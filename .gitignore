@@ -1,0 +1,23 @@
+# Dependencies and generated Apps Script bundle
+node_modules/
+dist/
+
+# Local deployment target; use the checked-in example instead
+.clasp.json
+
+# Local QA, browser state, release audits, and generated evidence
+output/
+.playwright-cli/
+.tmp-clasp-audit/
+.hallmark/
+
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+npm-debug.log*

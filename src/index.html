@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="description" content="注文から出荷までを一画面で管理する生産工程管理アプリ">
+    <title>生産工程管理</title>
+    <script>
+      try {
+        const savedTheme = localStorage.getItem("production-board-theme");
+        if (savedTheme === "light" || savedTheme === "dark") document.documentElement.dataset.theme = savedTheme;
+      } catch (error) { /* 保存領域を使えない場合は端末設定に合わせる */ }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800&amp;family=IBM+Plex+Sans+JP:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="../tokens.css" data-inline="tokens">
+    <link rel="stylesheet" href="styles.css" data-inline="styles">
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">本文へ移動</a>
+
+    <header class="app-header">
+      <div class="brand-block">
+        <button class="icon-button mobile-nav-button" type="button" data-action="toggle-nav" aria-label="画面メニューを開く" aria-expanded="false">
+          <svg aria-hidden="true"><use href="#icon-menu"></use></svg>
+        </button>
+        <div>
+          <p class="brand-name">生産工程管理</p>
+          <p class="brand-context" id="connection-label">接続を確認中</p>
+        </div>
+      </div>
+
+      <nav class="primary-nav" aria-label="主な画面">
+        <span class="rail-mark" aria-hidden="true">製</span>
+        <button class="nav-item is-active" type="button" data-view="dashboard" aria-current="page">
+          <svg aria-hidden="true"><use href="#icon-dashboard"></use></svg><span>概況</span>
+        </button>
+        <button class="nav-item" type="button" data-view="orders">
+          <svg aria-hidden="true"><use href="#icon-list"></use></svg><span>案件</span>
+        </button>
+        <button class="nav-item" type="button" data-view="completed">
+          <svg aria-hidden="true"><use href="#icon-check"></use></svg><span>終了リスト</span>
+          <span class="nav-count nav-count-neutral" id="completed-nav-count" hidden>0</span>
+        </button>
+        <button class="nav-item" type="button" data-view="intake">
+          <svg aria-hidden="true"><use href="#icon-inbox"></use></svg><span>取込キュー</span>
+          <span class="nav-count" id="intake-nav-count" hidden>0</span>
+        </button>
+        <button class="nav-item" type="button" data-view="settings">
+          <svg aria-hidden="true"><use href="#icon-settings"></use></svg><span>設定</span>
+        </button>
+      </nav>
+
+      <div class="header-actions">
+        <button class="button button-secondary" type="button" data-action="open-label-print">
+          <svg aria-hidden="true"><use href="#icon-print"></use></svg><span>ラベル印刷</span><span class="button-count" data-label-queue-count hidden>0</span>
+        </button>
+        <button class="button button-secondary" type="button" data-action="open-import">
+          <svg aria-hidden="true"><use href="#icon-scan"></use></svg><span>注文を取り込む</span>
+        </button>
+        <button class="button button-primary" type="button" data-action="new-order" aria-label="案件を追加">
+          <svg aria-hidden="true"><use href="#icon-plus"></use></svg><span>案件を追加</span>
+        </button>
+      </div>
+    </header>
+
+    <main id="main-content" tabindex="-1">
+      <section class="view is-active" data-view-panel="dashboard" aria-labelledby="dashboard-title">
+        <div class="page-heading">
+          <div>
+            <p class="date-line" id="today-label">—</p>
+            <h1 id="dashboard-title">生産状況</h1>
+          </div>
+        </div>
+
+        <section class="summary-grid" aria-label="工程の集計">
+          <button class="summary-item summary-item-main summary-item-action" type="button" data-action="show-production-orders" aria-label="進行中の案件を見る">
+            <div class="summary-icon"><svg aria-hidden="true"><use href="#icon-activity"></use></svg></div>
+            <div><p>進行中</p><strong id="metric-active">—</strong><span>件</span></div>
+            <small id="metric-active-note">読み込み中</small>
+          </button>
+          <button class="summary-item summary-item-danger summary-item-action" type="button" data-action="show-due-orders" aria-label="納期注意の案件を見る">
+            <div class="summary-icon"><svg aria-hidden="true"><use href="#icon-clock"></use></svg></div>
+            <div><p>納期注意</p><strong id="metric-due">—</strong><span>件</span></div>
+            <small>期限超過～あと2日</small>
+          </button>
+          <button class="summary-item summary-item-success summary-item-action" type="button" data-action="show-current-completed" aria-label="今月完了した案件を見る">
+            <div class="summary-icon"><svg aria-hidden="true"><use href="#icon-check"></use></svg></div>
+            <div><p>今月完了</p><strong id="metric-done">—</strong><span>件</span></div>
+            <small>今月、出荷完了した案件</small>
+          </button>
+          <button class="summary-item summary-item-neutral summary-item-action" type="button" data-action="show-shipping-orders" aria-label="出荷待ちの案件を見る">
+            <div class="summary-icon"><svg aria-hidden="true"><use href="#icon-package"></use></svg></div>
+            <div><p>出荷待ち</p><strong id="metric-ship">—</strong><span>件</span></div>
+            <small>全工程完了・未出荷</small>
+          </button>
+          <button class="summary-item summary-item-label summary-item-action" type="button" data-action="open-label-print">
+            <span class="summary-icon"><svg aria-hidden="true"><use href="#icon-print"></use></svg></span>
+            <span class="summary-copy"><span class="summary-label">ラベル印刷待ち</span><strong id="metric-label">—</strong><span>件</span></span>
+            <small>取込後・再印刷が必要な案件</small>
+          </button>
+        </section>
+
+        <div class="dashboard-grid">
+          <section class="panel orders-panel" aria-labelledby="recent-title">
+            <div class="panel-heading panel-heading-controls">
+              <div class="panel-heading-copy">
+                <div><h2 id="recent-title">案件一覧</h2><p id="result-summary">—</p></div>
+                <button class="text-button" type="button" data-action="show-all-orders">未出荷案件をすべて見る</button>
+              </div>
+              <div class="filter-row">
+                <label class="search-field">
+                  <span class="filter-field-label">検索</span>
+                  <svg aria-hidden="true"><use href="#icon-search"></use></svg>
+                  <input id="dashboard-search" type="search" placeholder="得意先・品名・分類・連番・担当" autocomplete="off">
+                </label>
+                <label class="select-field">
+                  <span class="filter-field-label">工程</span>
+                  <select id="dashboard-stage-filter">
+                    <option value="all">すべての工程</option>
+                    <option value="welding">溶接</option>
+                    <option value="base">元作り</option>
+                    <option value="grinding">浮き止め～立ち上がり</option>
+                    <option value="heat">厚みとり</option>
+                    <option value="finish">仕上げ</option>
+                    <option value="shipping">出荷待ち</option>
+                  </select>
+                </label>
+                <label class="select-field sort-field">
+                  <span class="filter-field-label">並び順</span>
+                  <select id="dashboard-sort">
+                    <option value="priority">優先・納期・残工程順</option>
+                    <option value="category">大分類</option>
+                    <option value="serial">連番</option>
+                    <option value="due">納期</option>
+                    <option value="customer">得意先</option>
+                    <option value="updated">更新が新しい順</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+            <div class="order-table-wrap">
+              <table class="order-table" aria-label="案件一覧">
+                <caption class="sr-only">並び順は一覧上部の選択欄で変更できます。</caption>
+                <thead><tr><th>得意先</th><th>品名</th><th>大分類</th><th>納期</th><th>数量</th><th>全長</th><th>型</th><th>刃幅</th><th>連番</th><th>溶接</th><th>元作り</th><th>浮き止め～立ち上がり</th><th>厚みとり</th><th>仕上げ</th><th>備考</th><th>出荷</th><th>編集</th></tr></thead>
+                <tbody id="dashboard-order-rows"></tbody>
+              </table>
+            </div>
+            <div class="order-card-list" id="dashboard-order-cards"></div>
+            <div class="empty-state" id="dashboard-empty" hidden>
+              <svg aria-hidden="true"><use href="#icon-search"></use></svg>
+              <h3>条件に合う案件がありません</h3>
+              <p>検索語か工程フィルターを変更してください。</p>
+              <button class="button button-secondary" type="button" data-action="clear-filters">絞り込みを解除</button>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" data-view-panel="orders" aria-labelledby="orders-title" hidden>
+        <div class="page-heading">
+          <div><p class="date-line">未出荷案件</p><h1 id="orders-title">注文から出荷まで</h1></div>
+        </div>
+        <section class="panel full-list-panel">
+          <div class="filter-row filter-row-wide">
+            <label class="search-field"><span class="filter-field-label">検索</span><svg aria-hidden="true"><use href="#icon-search"></use></svg><input id="orders-search" type="search" placeholder="得意先・品名・分類・連番・担当" autocomplete="off"></label>
+            <label class="select-field"><span class="filter-field-label">工程</span><select id="orders-stage-filter"><option value="all">すべての工程</option><option value="welding">溶接</option><option value="base">元作り</option><option value="grinding">浮き止め～立ち上がり</option><option value="heat">厚みとり</option><option value="finish">仕上げ</option><option value="shipping">出荷待ち</option></select></label>
+            <label class="select-field"><span class="filter-field-label">状況</span><select id="orders-attention-filter"><option value="all">すべての状況</option><option value="production">製作中</option><option value="due">納期注意</option><option value="shipping">出荷待ち</option></select></label>
+            <label class="select-field sort-field"><span class="filter-field-label">並び順</span><select id="orders-sort"><option value="priority">優先・納期・残工程順</option><option value="category">大分類</option><option value="serial">連番</option><option value="due">納期</option><option value="customer">得意先</option><option value="updated">更新が新しい順</option></select></label>
+          </div>
+          <div id="orders-workspace"></div>
+        </section>
+      </section>
+
+      <section class="view" data-view-panel="completed" aria-labelledby="completed-title" hidden>
+        <div class="page-heading">
+          <div><p class="date-line">出荷完了</p><h1 id="completed-title">終了リスト</h1></div>
+        </div>
+        <section class="panel full-list-panel">
+          <div class="filter-row filter-row-wide completed-filter-row">
+            <p id="completed-result-summary">—</p>
+            <label class="select-field"><span class="filter-field-label">完了期間</span><select id="completed-period"><option value="current">今月</option><option value="all">すべて</option></select></label>
+            <label class="search-field"><span class="filter-field-label">検索</span><svg aria-hidden="true"><use href="#icon-search"></use></svg><input id="completed-search" type="search" placeholder="得意先・品名・分類・連番・担当" autocomplete="off"></label>
+            <label class="select-field sort-field"><span class="filter-field-label">並び順</span><select id="completed-sort"><option value="updated">出荷完了が新しい順</option><option value="category">大分類</option><option value="serial">連番</option><option value="due">納期</option><option value="customer">得意先</option></select></label>
+          </div>
+          <div id="completed-workspace"></div>
+        </section>
+      </section>
+
+      <section class="view" data-view-panel="intake" aria-labelledby="intake-title" hidden>
+        <div class="page-heading">
+          <div><p class="date-line">メール・画像</p><h1 id="intake-title">取込内容を確認</h1></div>
+          <button class="button button-primary" type="button" data-action="open-import"><svg aria-hidden="true"><use href="#icon-scan"></use></svg><span>注文を取り込む</span></button>
+        </div>
+        <div class="intake-layout">
+          <aside class="intake-guidance">
+            <svg aria-hidden="true"><use href="#icon-shield"></use></svg>
+            <h2>自動で本登録しません</h2>
+            <p>メール本文や画像の読み取り結果を確認し、必要なら直してから案件に反映します。</p>
+          </aside>
+          <section class="intake-list"><div class="intake-bulk-entry" id="intake-bulk-entry" hidden><p id="intake-pending-count"></p><button class="button button-primary" type="button" data-action="open-bulk-intake">まとめて確認・編集</button></div><div id="intake-list" aria-live="polite"></div></section>
+        </div>
+      </section>
+
+      <section class="view" data-view-panel="settings" aria-labelledby="settings-title" hidden>
+        <div class="page-heading"><div><p class="date-line">接続と移行</p><h1 id="settings-title">運用設定</h1></div></div>
+        <div class="settings-grid">
+          <section class="panel settings-panel"><div><h2>AIの得意先判定</h2><p>御社名の除外と、発注元の表記を揃えるルールを管理します。</p></div><button class="button button-secondary" type="button" data-action="open-customer-rules">得意先の読取ルール</button></section>
+          <section class="panel settings-panel">
+            <div class="settings-icon"><svg aria-hidden="true"><use href="#icon-settings"></use></svg></div>
+            <div><h2>Apps Scriptの管理</h2><p>このアプリに対応するスクリプトを別タブで開きます。AIのAPIキーは、開いた先の歯車「プロジェクトの設定」→「スクリプト プロパティ」で設定できます。</p></div>
+            <a class="button button-secondary" id="script-editor-link" target="_blank" rel="noopener noreferrer" hidden>Apps Scriptを開く<span class="sr-only">（別タブ）</span></a>
+            <p id="script-editor-unavailable">接続先を取得できません。画面を更新してください。ローカル版では .clasp.json の設定も確認してください。</p>
+            <p>編集権限のあるGoogleアカウントでログインしてください。このリンクで権限が追加されることはありません。</p>
+          </section>
+          <section class="panel settings-panel">
+            <div class="settings-icon"><svg aria-hidden="true"><use href="#icon-mail"></use></svg></div>
+            <div><h2>注文メールの接続</h2><p>Google Workspaceの独自ドメインは直接検索できます。それ以外のメールは、このGoogleアカウントへ自動転送して取り込みます。</p></div>
+            <label class="field"><span>接続先Gmailの検索式</span><input id="gmail-query" type="text" value="newer_than:30d (subject:(注文 OR 発注 OR 依頼))"><small>転送メールも対象にできるGmail検索式を入力します。</small></label>
+            <button class="button button-secondary" type="button" data-action="save-settings">検索条件を保存</button>
+          </section>
+          <section class="panel settings-panel">
+            <div class="settings-icon"><svg aria-hidden="true"><use href="#icon-moon"></use></svg></div>
+            <div><h2>表示モード</h2><p>この端末だけの見え方を設定します。データや他の端末の表示には影響しません。</p></div>
+            <div class="theme-options" role="group" aria-label="表示モード">
+              <button class="theme-choice" type="button" data-theme-choice="auto" aria-pressed="true">端末に合わせる</button>
+              <button class="theme-choice" type="button" data-theme-choice="light" aria-pressed="false">ライト</button>
+              <button class="theme-choice" type="button" data-theme-choice="dark" aria-pressed="false">ダーク</button>
+            </div>
+            <p class="theme-current" id="theme-current">現在の表示を確認中</p>
+          </section>
+          <section class="panel settings-panel">
+            <div class="settings-icon"><svg aria-hidden="true"><use href="#icon-sheet"></use></svg></div>
+            <div><h2>現在の管理表を読み込む</h2><p>元の月別シートは変更せず、見出し名を照合して案件シートへ複製します。</p></div>
+            <label class="field"><span>読み込むシート名</span><input id="legacy-sheet-name" type="text" placeholder="例：2026.7"><small>1行目・2行目に見出しがある表にも対応します。</small></label>
+            <button class="button button-secondary" type="button" data-action="migrate-sheet">既存表を読み込む</button>
+          </section>
+          <section class="panel settings-panel settings-panel-wide">
+            <div class="settings-icon"><svg aria-hidden="true"><use href="#icon-sync"></use></svg></div>
+            <div><h2>同期の状態</h2><p>保存のたびにスプレッドシートへ書き込み、この画面は一定間隔で更新を確認します。</p></div>
+            <dl class="settings-facts"><div><dt>保存</dt><dd>即時</dd></div><div><dt>自動更新</dt><dd>20秒</dd></div><div><dt>競合対策</dt><dd>更新番号＋ロック</dd></div><div><dt>利用端末</dt><dd>PC・タブレット・スマートフォン</dd></div></dl>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <footer class="status-footer">
+      <div><span class="status-dot" id="status-dot"></span><span id="status-message">接続を確認しています</span></div>
+      <div><span id="last-sync">最終同期 —</span><button class="footer-button" type="button" data-action="refresh">今すぐ更新</button></div>
+    </footer>
+
+    <dialog class="app-dialog order-dialog" id="order-dialog" aria-labelledby="order-dialog-title">
+      <form method="dialog" class="dialog-shell" id="order-form">
+        <header class="dialog-header"><div><p class="dialog-kicker" id="order-dialog-kicker">案件</p><h2 id="order-dialog-title">案件を追加</h2></div><button class="icon-button" type="button" data-action="close-order-dialog" aria-label="案件画面を閉じる"><svg aria-hidden="true"><use href="#icon-close"></use></svg></button></header>
+        <div class="dialog-body">
+          <input type="hidden" name="id"><input type="hidden" name="version">
+          <section class="form-section"><h3>注文情報</h3><div class="form-grid">
+            <label class="field"><span>得意先 <b aria-hidden="true">必須</b></span><input name="customer" required aria-required="true"><small data-error-for="customer">注文元の名称</small></label>
+            <label class="field"><span>品名 <b aria-hidden="true">必須</b></span><input name="product" required aria-required="true"><small data-error-for="product">製作する品名</small></label>
+            <label class="field"><span>納期</span><input name="dueDate" type="date"><small>未確定の場合は空欄でも保存できます。</small></label>
+            <label class="field"><span>数量</span><input name="quantity" type="number" min="0" step="1" inputmode="numeric"><small>注文数を半角数字で入力</small></label>
+            <label class="field"><span>連番</span><input name="serialNo"><small>例：26-0974-1</small></label>
+            <label class="field"><span>大分類</span><select name="category"><option value="">未分類（要確認）</option><option value="鋭匙鉗子">鋭匙鉗子</option><option value="ケリソンパンチ">ケリソンパンチ</option></select><small>品名から自動判定。必要なら変更できます。</small></label>
+            <label class="field"><span>優先度</span><select name="priority"><option value="normal">通常</option><option value="high">高</option><option value="urgent">至急</option></select><small>納期とは別の優先指定</small></label>
+            <label class="field"><span>製品ラベル</span><select name="labelPrintStatus"><option value="not_required">ラベル不要</option><option value="waiting">印刷待ち</option><option value="reprint">再印刷待ち</option><option value="printed">印刷済み</option></select><small>メール・画像から反映した案件は自動で印刷待ちになります。</small></label>
+          </div></section>
+          <section class="form-section"><div class="form-section-heading"><h3>仕様</h3><p id="spec-auto-note">品名に全長・型・刃幅があれば、空欄だけ自動補完します。</p></div><div class="form-grid form-grid-4">
+            <label class="field"><span>全長</span><input name="specLength"><small>例：18cm</small></label>
+            <label class="field"><span>型</span><input name="specShape"><small>例：上曲・左</small></label>
+            <label class="field"><span>刃幅</span><input name="bladeWidth"><small>例：2mm</small></label>
+            <label class="field"><span>備考</span><input name="note"><small>材料・販売用番号など</small></label>
+          </div></section>
+        </div>
+        <footer class="dialog-footer"><div class="dialog-leading-actions"><button class="button button-danger" id="order-delete-action" type="button" data-action="delete-order" hidden><span>案件を削除</span></button><button class="button button-quiet" type="button" data-action="close-order-dialog">閉じる</button></div><div class="dialog-actions"><button class="button button-primary" type="submit" value="save"><span>注文情報を保存</span></button></div></footer>
+      </form>
+    </dialog>
+
+    <dialog class="app-dialog process-dialog" id="process-dialog" aria-labelledby="process-dialog-title">
+      <form method="dialog" class="dialog-shell" id="process-form">
+        <header class="dialog-header"><div><p class="dialog-kicker" id="process-dialog-kicker">工程更新</p><h2 id="process-dialog-title">工程と担当を更新</h2></div><button class="icon-button" type="button" data-action="close-process-dialog" aria-label="工程画面を閉じる"><svg aria-hidden="true"><use href="#icon-close"></use></svg></button></header>
+        <div class="dialog-body process-dialog-body">
+          <input type="hidden" name="id"><input type="hidden" name="version">
+          <section class="process-order-summary" aria-label="対象案件"><div><span>品名</span><strong id="process-product">—</strong></div><div><span>得意先</span><strong id="process-customer">—</strong></div><div><span>納期</span><strong id="process-due">—</strong></div><div><span>連番</span><strong id="process-serial">—</strong></div></section>
+          <section class="form-section"><div class="form-section-heading"><h3>工程と担当</h3><p>状態と担当者を選び、下の「工程を保存」を押します。</p></div><div class="stage-editor" id="process-stage-editor"></div><p class="order-lifecycle-note" id="process-lifecycle-note"></p></section>
+        </div>
+        <footer class="dialog-footer"><button class="button button-quiet" type="button" data-action="close-process-dialog">閉じる</button><div class="dialog-actions"><button class="button button-secondary order-lifecycle-action" id="process-lifecycle-action" type="button" data-action="complete-order"><span>出荷完了・終了へ</span></button><button class="button button-primary" type="submit" value="save"><span>工程を保存</span></button></div></footer>
+      </form>
+    </dialog>
+
+    <dialog class="app-dialog label-dialog" id="label-dialog" aria-labelledby="label-dialog-title">
+      <div class="dialog-shell">
+        <header class="dialog-header"><div><p class="dialog-kicker">A4縦・最大9枚</p><h2 id="label-dialog-title">製品ラベルを印刷</h2></div><button class="icon-button" type="button" data-action="close-label-dialog" aria-label="ラベル印刷画面を閉じる"><svg aria-hidden="true"><use href="#icon-close"></use></svg></button></header>
+        <div class="dialog-body label-dialog-body">
+          <section class="label-picker" aria-labelledby="label-picker-title">
+            <div class="label-section-head"><div><h3 id="label-picker-title">印刷する案件</h3><p>選んだ順に上から印刷します。</p></div><strong id="label-selection-count" aria-live="polite">0 / 9枚</strong></div>
+            <div class="label-filter-row"><label class="select-field"><span class="filter-field-label">表示範囲</span><select id="label-status-filter"><option value="queue">印刷待ち</option><option value="printed">印刷済み</option><option value="all">すべての進行案件</option></select></label><label class="search-field label-search"><span class="filter-field-label">案件を検索</span><svg aria-hidden="true"><use href="#icon-search"></use></svg><input id="label-search" type="search" placeholder="得意先・品名・連番" autocomplete="off"></label></div>
+            <div class="label-job-list" id="label-job-list" aria-label="印刷対象の案件"></div>
+            <button class="text-button label-clear" type="button" data-action="clear-label-selection">選択をすべて解除</button>
+          </section>
+          <section class="label-preview-pane" aria-labelledby="label-preview-title">
+            <div class="label-section-head"><div><h3 id="label-preview-title">印刷プレビュー</h3><p>実際の印刷は横15cm・縦3cmです。</p></div></div>
+            <div class="label-preview-list" id="label-preview-list"></div>
+            <div class="label-print-result" id="label-print-result" role="status" hidden><div><strong>印刷は完了しましたか？</strong><p id="label-print-result-count">選択した案件を印刷済みにします。</p></div><div class="label-print-result-actions"><button class="button button-quiet" type="button" data-action="keep-label-waiting">まだ印刷していない</button><button class="button button-primary" type="button" data-action="confirm-label-printed"><span>印刷済みにする</span></button></div></div>
+            <div class="label-print-note"><svg aria-hidden="true"><use href="#icon-alert"></use></svg><p>印刷画面では倍率を100％にし、ヘッダーとフッターをオフにしてください。</p></div>
+          </section>
+        </div>
+        <footer class="dialog-footer"><button class="button button-quiet" type="button" data-action="close-label-dialog">閉じる</button><button class="button button-primary" id="print-labels-button" type="button" data-action="print-labels" disabled><svg aria-hidden="true"><use href="#icon-print"></use></svg><span>ラベルを印刷</span></button></footer>
+      </div>
+    </dialog>
+
+    <dialog class="app-dialog import-dialog" id="import-dialog" aria-labelledby="import-dialog-title">
+      <div class="dialog-shell">
+        <header class="dialog-header"><div><p class="dialog-kicker">取込</p><h2 id="import-dialog-title">注文を読み込む</h2></div><button class="icon-button" type="button" data-action="close-import-dialog" aria-label="取込画面を閉じる"><svg aria-hidden="true"><use href="#icon-close"></use></svg></button></header>
+        <div class="dialog-body">
+          <label class="field" id="file-import-engine-field"><span>読取方法</span><select id="import-engine"><option value="ai">AIで読む（複数社の書式に対応）</option><option value="legacy" selected>従来の読取（AIを使わない）</option></select><small id="ai-import-status" role="status">AI設定を確認しています。</small></label>
+          <p id="file-import-notice">AIを選ぶと注文書・対象メールをGoogleへ送信します。無料枠では製品改善に利用される場合があります。個人情報・機密情報を含まない資料だけを使用し、原本と結果を確認してください。AIのメール検索は1通ずつ処理します。</p>
+          <details><summary>AIで読み取れないとき</summary><p>注文書・メールは送らず、固定のテスト文で接続と回答形式を確認します。最大2回のAI利用として日次上限に数えます。失敗した段階で停止します。</p><button class="button button-secondary" type="button" data-action="diagnose-ai">注文書を送らず接続診断</button><p id="ai-diagnostic-result" role="status" hidden></p></details>
+          <div class="import-tabs" role="tablist" aria-label="取込方法">
+            <button role="tab" aria-selected="true" aria-controls="import-image-panel" id="import-image-tab" type="button" data-import-tab="image" tabindex="0">PDF・画像</button>
+            <button role="tab" aria-selected="false" aria-controls="import-text-panel" id="import-text-tab" type="button" data-import-tab="text" tabindex="-1">本文を貼り付け</button>
+            <button role="tab" aria-selected="false" aria-controls="import-email-panel" id="import-email-tab" type="button" data-import-tab="email" tabindex="-1">メールを探す</button>
+          </div>
+          <section id="import-image-panel" role="tabpanel" aria-labelledby="import-image-tab">
+            <label class="drop-zone" id="drop-zone">
+              <input id="image-input" type="file" accept="image/jpeg,image/png,image/webp,application/pdf">
+              <svg aria-hidden="true"><use href="#icon-image"></use></svg>
+              <strong>注文書・メール画面を選択</strong>
+              <span>JPEG・PNG・WebP・PDF（複数品目のPDFは品目ごとに分割します）</span>
+            </label>
+            <div class="file-preview" id="file-preview" hidden></div>
+            <p id="file-import-error" role="alert" hidden></p>
+            <button class="button button-primary button-full" type="button" data-action="upload-image" disabled>PDF・画像を読み取る</button>
+          </section>
+          <section id="import-text-panel" role="tabpanel" aria-labelledby="import-text-tab" hidden>
+            <p>注文メールの件名・本文をコピーして貼り付けてください。メールの接続設定は不要です。読み取った後に全品目・数量・納期を確認してから案件へ反映します。</p>
+            <form id="text-import-form">
+              <label class="field"><span>件名（任意）</span><input id="text-import-subject" name="subject" maxlength="200" autocomplete="off" placeholder="例：11月納入分の注文"></label>
+              <label class="field"><span>メール本文（30,000文字まで）</span><textarea id="text-import-body" name="body" rows="10" maxlength="30000" required placeholder="注文メールの本文をここに貼り付けてください"></textarea></label>
+              <label class="field"><span>本文の読取方法</span><select id="text-import-engine"><option value="legacy" selected>AIを使わず読み取る</option><option value="ai">AIで読み取る（設定が必要）</option></select></label>
+              <p>AIなしの読取は書式によって抜けが出ます。品名・数量・納期が判別しづらい場合は、下の例のように整えてください。AIを選ぶ場合、貼り付けた本文・件名をGoogleへ送信し、無料枠では製品改善に利用される場合があります。</p>
+              <details><summary>読み取りやすい書き方の例</summary><pre>得意先: 田中
+品名: ケリソン 18cm 上向 3mm
+数量: 10
+納期: 2026-11-30
+連番: 26-1790-1</pre><p>複数品目のときは、品名・数量・納期のまとまりを品目ごとに記載してください。</p></details>
+              <p id="text-import-error" role="alert" hidden></p>
+              <button class="button button-primary button-full" type="submit">本文を読み取る</button>
+            </form>
+          </section>
+          <section id="import-email-panel" role="tabpanel" aria-labelledby="import-email-tab" hidden>
+            <div class="email-import-copy"><svg aria-hidden="true"><use href="#icon-mail"></use></svg><div><strong>接続先の注文メールを確認します</strong><p>独自ドメインから転送されたメールも対象です。メール自体の削除・移動・既読化は行いません。</p></div></div>
+            <button class="button button-primary button-full" type="button" data-action="scan-email">受注メールを検索</button>
+          </section>
+        </div>
+      </div>
+    </dialog>
+
+    <section class="label-print-sheet" id="label-print-sheet" aria-hidden="true"></section>
+
+    <dialog class="app-dialog intake-dialog" id="intake-dialog" aria-labelledby="intake-dialog-title">
+      <form method="dialog" class="dialog-shell" id="intake-form">
+        <header class="dialog-header"><div><p class="dialog-kicker">読取結果</p><h2 id="intake-dialog-title">内容を確認</h2></div><button class="icon-button" type="button" data-action="close-intake-dialog" aria-label="確認画面を閉じる"><svg aria-hidden="true"><use href="#icon-close"></use></svg></button></header>
+        <div class="dialog-body"><input type="hidden" name="intakeId"><div class="source-preview" id="intake-source-preview"></div><div class="form-grid" id="intake-fields"></div>
+          <div class="intake-delete-confirm" data-intake-delete-confirm hidden><p role="status"></p><div class="dialog-actions"><button class="button button-quiet" type="button" data-action="cancel-intake-delete">キャンセル</button><button class="button button-danger" type="button" data-action="confirm-intake-delete">削除する</button></div></div>
+        </div>
+        <footer class="dialog-footer"><button class="button button-danger" type="button" data-action="reject-intake">この品目を削除</button><button class="button button-primary" type="submit" value="approve">確認して案件へ反映</button></footer>
+      </form>
+    </dialog>
+
+    <dialog class="app-dialog bulk-intake-dialog" id="bulk-intake-dialog" aria-labelledby="bulk-intake-title">
+      <form class="dialog-shell" id="bulk-intake-form" novalidate>
+        <header class="dialog-header"><div><h2 id="bulk-intake-title">注文をまとめて確認</h2><p>一覧で修正し、選択した品目を一括反映します。</p></div><button class="icon-button" type="button" data-action="close-bulk-intake" aria-label="一括確認を閉じる"><svg aria-hidden="true"><use href="#icon-close"></use></svg></button></header>
+        <div class="dialog-body bulk-intake-body">
+          <div class="bulk-intake-toolbar"><label class="bulk-check"><input type="checkbox" id="bulk-intake-all">すべて選択</label><span id="bulk-intake-count"></span><button class="button button-danger" id="bulk-intake-delete" type="button" data-action="delete-selected-intakes">選択した品目を削除</button></div>
+          <p class="bulk-intake-help">得意先・品名・数量は必須です。選択を外した品目は確認待ちに残ります。1回の反映は100件まで。</p>
+          <section class="customer-command" aria-labelledby="customer-command-title">
+            <div class="bulk-intake-toolbar"><h3 id="customer-command-title">言葉で得意先を修正</h3><button class="button button-quiet" type="button" data-action="open-customer-rules">得意先の読取ルール</button></div>
+            <p class="bulk-intake-help">対象はチェックした品目だけです。例：得意先をミズホにして</p>
+            <div class="customer-command-entry"><label class="field"><span>修正の指示</span><input id="customer-command-input" maxlength="220" placeholder="得意先をミズホにして" autocomplete="off"></label><button class="button button-secondary" type="button" data-action="preview-customer-command">変更内容を確認</button></div>
+            <p id="customer-command-status" role="status" aria-live="polite"></p>
+            <div id="customer-command-preview" hidden>
+              <ul id="customer-command-changes"></ul>
+              <label class="bulk-check"><input type="checkbox" id="customer-command-remember">次回のAI読取にも適用する</label>
+              <label class="field" id="customer-command-issuer-field" hidden><span>発注元の正式名（注文書の表記）</span><input id="customer-command-issuer" maxlength="160" placeholder="例：ミズホ株式会社"><small>宛先の御社名は指定しないでください。この発注元にだけ適用します。</small></label>
+              <div class="dialog-actions"><button class="button button-quiet" type="button" data-action="cancel-customer-command">キャンセル</button><button class="button button-primary" type="button" data-action="apply-customer-command">この内容で修正</button></div>
+            </div>
+          </section>
+          <div class="intake-delete-confirm" data-intake-delete-confirm hidden><p role="status"></p><div class="dialog-actions"><button class="button button-quiet" type="button" data-action="cancel-intake-delete">キャンセル</button><button class="button button-danger" type="button" data-action="confirm-intake-delete">削除する</button></div></div>
+          <p id="bulk-intake-result" role="status" aria-live="polite"></p>
+          <div id="bulk-intake-rows"></div>
+        </div>
+        <footer class="dialog-footer"><span class="bulk-draft-note">編集内容はこの画面を閉じても保持します（再読込で破棄）。</span><button class="button button-primary" id="bulk-intake-submit" type="submit">選択した注文を反映</button></footer>
+      </form>
+    </dialog>
+
+    <dialog class="app-dialog" id="customer-rules-dialog" aria-labelledby="customer-rules-title">
+      <form class="dialog-shell" id="customer-rules-form" novalidate>
+        <header class="dialog-header"><div><h2 id="customer-rules-title">得意先の読取ルール</h2><p>次回以降のAI取込に使います。</p></div><button class="icon-button" type="button" data-action="close-customer-rules" aria-label="読取ルールを閉じる"><svg aria-hidden="true"><use href="#icon-close"></use></svg></button></header>
+        <div class="dialog-body">
+          <p class="bulk-intake-help">宛先と発注元を区別し、発注元の表記を揃えます。保存済みの案件や取込候補は変更しません。</p>
+          <label class="field"><span>御社名・得意先から除外する社名（1行に1つ）</span><textarea id="customer-rules-own" rows="3" maxlength="3220"></textarea></label>
+          <h3>発注元と得意先の対応</h3>
+          <div id="customer-rules-aliases"></div>
+          <button class="button button-quiet" type="button" data-action="add-customer-rule">対応を追加</button>
+          <p id="customer-rules-status" role="status" aria-live="polite"></p>
+        </div>
+        <footer class="dialog-footer"><button class="button button-quiet" type="button" data-action="reload-customer-rules">編集を破棄して読み直す</button><button class="button button-primary" type="submit">ルールを保存</button></footer>
+      </form>
+    </dialog>
+
+    <div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="true"></div>
+    <div class="live-region sr-only" id="live-region" aria-live="polite"></div>
+
+    <svg class="svg-sprite" aria-hidden="true">
+      <symbol id="icon-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+      <symbol id="icon-dashboard" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
+      <symbol id="icon-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></symbol>
+      <symbol id="icon-inbox" viewBox="0 0 24 24"><path d="M4 4h16l1 12H15l-2 3h-2l-2-3H3L4 4Z"/><path d="M3.5 13h5l2 3h3l2-3h5"/></symbol>
+      <symbol id="icon-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></symbol>
+      <symbol id="icon-moon" viewBox="0 0 24 24"><path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5 8.6 8.6 0 1 0 20.5 14.2Z"/></symbol>
+      <symbol id="icon-scan" viewBox="0 0 24 24"><path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M7 12h10M7 9h10M7 15h6"/></symbol>
+      <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 8a7 7 0 0 1 11.7-1L20 12M4 12l2.2 5a7 7 0 0 0 11.7-1"/></symbol>
+      <symbol id="icon-activity" viewBox="0 0 24 24"><path d="M3 12h4l2-6 4 12 2-6h6"/></symbol>
+      <symbol id="icon-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+      <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+      <symbol id="icon-package" viewBox="0 0 24 24"><path d="m4 7 8-4 8 4v10l-8 4-8-4V7Z"/><path d="m4 7 8 4 8-4M12 11v10"/></symbol>
+      <symbol id="icon-compass" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m15 9-2 4-4 2 2-4 4-2Z"/></symbol>
+      <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+      <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 5 3 8 7 10 4-2 7-5 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-5"/></symbol>
+      <symbol id="icon-mail" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m4 7 8 6 8-6"/></symbol>
+      <symbol id="icon-sheet" viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6V3Z"/><path d="M15 3v5h4M9 12h7M9 16h7M9 8h2"/></symbol>
+      <symbol id="icon-sync" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 8a7 7 0 0 1 12-1l2 5M4 12l2 5a7 7 0 0 0 12-1"/></symbol>
+      <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+      <symbol id="icon-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m4 17 5-5 4 4 2-2 5 5"/></symbol>
+      <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+      <symbol id="icon-alert" viewBox="0 0 24 24"><path d="M12 3 2.5 20h19L12 3Z"/><path d="M12 9v4M12 17h.01"/></symbol>
+      <symbol id="icon-edit" viewBox="0 0 24 24"><path d="m4 20 4-.8L19 8.2 15.8 5 4.8 16 4 20Z"/><path d="m14.5 6.3 3.2 3.2"/></symbol>
+      <symbol id="icon-print" viewBox="0 0 24 24"><path d="M7 8V3h10v5M7 17H5a2 2 0 0 1-2-2v-4a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3v4a2 2 0 0 1-2 2h-2"/><path d="M7 14h10v7H7zM17 11h.01"/></symbol>
+    </svg>
+
+    <script src="app.js" defer data-inline="script"></script>
+  </body>
+</html>

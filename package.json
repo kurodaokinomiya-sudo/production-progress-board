@@ -1,0 +1,20 @@
+{
+  "name": "production-progress-board",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Google Sheets と同期する生産工程管理 Web アプリ",
+  "scripts": {
+    "dev": "node tools/dev-server.mjs",
+    "build": "node tools/build-apps-script.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:contrast": "node tools/contrast-audit.mjs",
+    "check": "npm run build && npm test && npm run test:contrast"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "pdfjs-dist": "6.3.289"
+  }
+}
