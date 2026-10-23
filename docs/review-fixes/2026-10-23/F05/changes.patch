@@ -1,0 +1,245 @@
+--- a/apps-script/Code.gs
++++ b/apps-script/Code.gs
+@@ -89,2 +89,2 @@
+-      if (rowsByKey[key]) sheet.getRange(rowsByKey[key], 2).setValue(updates[key]);
+-      else sheet.appendRow([key, updates[key], ""]);
++      if (rowsByKey[key]) sheet.getRange(rowsByKey[key], 2).setValue(sheetCellValue_(updates[key]));
++      else sheet.appendRow(sheetValues_([[key, updates[key], ""]])[0]);
+@@ -253,2 +253,2 @@
+-    if (typeof cell.setValue === "function") cell.setValue(value);
+-    else cell.setValues([[value]]);
++    if (typeof cell.setValue === "function") cell.setValue(sheetCellValue_(value));
++    else cell.setValues(sheetValues_([[value]]));
+@@ -256 +256 @@
+-    sheet.appendRow(["customerRules", value, "AI取込の得意先判定ルール"]);
++    sheet.appendRow(sheetValues_([["customerRules", value, "AI取込の得意先判定ルール"]])[0]);
+@@ -258 +258 @@
+-    sheet.getRange(lastRow + 1, 1, 1, 3).setValues([["customerRules", value, "AI取込の得意先判定ルール"]]);
++    sheet.getRange(lastRow + 1, 1, 1, 3).setValues(sheetValues_([["customerRules", value, "AI取込の得意先判定ルール"]]));
+--- a/apps-script/Config.gs
++++ b/apps-script/Config.gs
+@@ -39,0 +40,12 @@
++// Encode only at the managed-sheet write boundary. Sheets consumes one leading
++// apostrophe as a text escape; escape existing apostrophes too so round trips
++// preserve the actual input. Readers and business models use the original text.
++// Numbers, dates, booleans and ordinary JSON strings retain their types/values.
++function sheetCellValue_(value) {
++  return typeof value === "string" && /^[=']/.test(value) ? "'" + value : value;
++}
++
++function sheetValues_(rows) {
++  return rows.map(function(row) { return row.map(sheetCellValue_); });
++}
++
+@@ -230 +242 @@
+-  if (rows.length) sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, APP.SETTING_HEADERS.length).setValues(rows);
++  if (rows.length) sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, APP.SETTING_HEADERS.length).setValues(sheetValues_(rows));
+--- a/apps-script/FinishedStock.gs
++++ b/apps-script/FinishedStock.gs
+@@ -23 +23 @@
+-  sheet.getRange(sheet.getLastRow() + 1, 1, 1, FINISHED_STOCK_HEADERS_.length).setValues([[
++  sheet.getRange(sheet.getLastRow() + 1, 1, 1, FINISHED_STOCK_HEADERS_.length).setValues(sheetValues_([[
+@@ -25 +25 @@
+-  ]]);
++  ]]));
+--- a/apps-script/Import.gs
++++ b/apps-script/Import.gs
+@@ -355 +355 @@
+-      target.getRange(target.getLastRow() + 1, 1, jobs.length, APP.JOB_HEADERS.length).setValues(jobs.map(jobToRow_));
++      target.getRange(target.getLastRow() + 1, 1, jobs.length, APP.JOB_HEADERS.length).setValues(sheetValues_(jobs.map(jobToRow_)));
+--- a/apps-script/IntakeLearning.gs
++++ b/apps-script/IntakeLearning.gs
+@@ -29 +29 @@
+-  sheet.getRange(row, 1, 1, APP.LEARNING_HEADERS.length).setValues([[rule.key, value, rule.updatedAt]]);
++  sheet.getRange(row, 1, 1, APP.LEARNING_HEADERS.length).setValues(sheetValues_([[rule.key, value, rule.updatedAt]]));
+--- a/apps-script/Materials.gs
++++ b/apps-script/Materials.gs
+@@ -23 +23 @@
+-  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, MATERIAL_EVENT_FIELDS_.length).setValues(rows);
++  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, MATERIAL_EVENT_FIELDS_.length).setValues(sheetValues_(rows));
+--- a/apps-script/Polishing.gs
++++ b/apps-script/Polishing.gs
+@@ -103 +103 @@
+-  if (rows.length) sheet.getRange(2, 1, rows.length, POLISHING_HEADERS.length).setValues(rows);
++  if (rows.length) sheet.getRange(2, 1, rows.length, POLISHING_HEADERS.length).setValues(sheetValues_(rows));
+@@ -235 +235 @@
+-      sheet.getRange(update.rowNumber, 1, 1, APP.JOB_HEADERS.length).setValues([update.rawRow]);
++      sheet.getRange(update.rowNumber, 1, 1, APP.JOB_HEADERS.length).setValues(sheetValues_([update.rawRow]));
+@@ -292 +292 @@
+-      getSpreadsheet_().getSheetByName(APP.SHEETS.JOBS).getRange(row._rowNumber, 1, 1, APP.JOB_HEADERS.length).setValues([rawRow]);
++      getSpreadsheet_().getSheetByName(APP.SHEETS.JOBS).getRange(row._rowNumber, 1, 1, APP.JOB_HEADERS.length).setValues(sheetValues_([rawRow]));
+--- a/apps-script/ProductMaster.gs
++++ b/apps-script/ProductMaster.gs
+@@ -427,2 +427,2 @@
+-  if (found.length) sheet.getRange(found[0], 2).setValue(value);
+-  else sheet.appendRow([key, value, description || ""]);
++  if (found.length) sheet.getRange(found[0], 2).setValue(sheetCellValue_(value));
++  else sheet.appendRow(sheetValues_([[key, value, description || ""]])[0]);
+--- a/apps-script/Repository.gs
++++ b/apps-script/Repository.gs
+@@ -396 +396 @@
+-  sheet.getRange(rowNumber, 1, 1, APP.JOB_HEADERS.length).setValues(values);
++  sheet.getRange(rowNumber, 1, 1, APP.JOB_HEADERS.length).setValues(sheetValues_(values));
+@@ -433 +433 @@
+-    sheet.getRange(row._rowNumber, 1, 1, APP.JOB_HEADERS.length).setValues([values]);
++    sheet.getRange(row._rowNumber, 1, 1, APP.JOB_HEADERS.length).setValues(sheetValues_([values]));
+@@ -519 +519 @@
+-    sheet.getRange(row._rowNumber, 1, 1, APP.JOB_HEADERS.length).setValues([jobToRow_(job)]);
++    sheet.getRange(row._rowNumber, 1, 1, APP.JOB_HEADERS.length).setValues(sheetValues_([jobToRow_(job)]));
+@@ -549 +549 @@
+-      sheet.getRange(update.rowNumber, 1, 1, APP.JOB_HEADERS.length).setValues([jobToRow_(update.job)]);
++      sheet.getRange(update.rowNumber, 1, 1, APP.JOB_HEADERS.length).setValues(sheetValues_([jobToRow_(update.job)]));
+@@ -593 +593 @@
+-    .setValues([APP.INTAKE_HEADERS.map(function(header) { return normalized[header] === undefined ? "" : normalized[header]; })]);
++    .setValues(sheetValues_([APP.INTAKE_HEADERS.map(function(header) { return normalized[header] === undefined ? "" : normalized[header]; })]));
+@@ -616 +616 @@
+-  sheet.getRange(row._rowNumber, statusColumn).setValue(status);
++  sheet.getRange(row._rowNumber, statusColumn).setValue(sheetCellValue_(status));
+@@ -961,2 +961,2 @@
+-  sheet.appendRow([new Date().toISOString(), action, entityType, entityId, email, JSON.stringify(detail || {})]);
+-}
++  sheet.appendRow(sheetValues_([[new Date().toISOString(), action, entityType, entityId, email, JSON.stringify(detail || {})]])[0]);
++}
+--- /dev/null
++++ b/tests/helpers/sheets-fixture.mjs
+@@ -0,0 +1,70 @@
++import assert from "node:assert/strict";
++import { readFile } from "node:fs/promises";
++import vm from "node:vm";
++
++// Synthetic Sheets boundary: text escape consumption and formula interpretation
++// are intentionally separate from the app's encoder. This is not a live Sheets test.
++export async function sheetsFixture(extraFiles = []) {
++  const files = ["apps-script/Config.gs", "apps-script/Parser.gs", "apps-script/Repository.gs", ...extraFiles];
++  const source = (await Promise.all(files.map(file => readFile(new URL(`../../${file}`, import.meta.url), "utf8")))).join("\n");
++  const grids = new Map(), formulas = new Set(), properties = new Map();
++  const state = { locked: false, writes: 0, beforeWrite: null, afterWrite: null, afterFlush: null };
++  let uuid = 0;
++  function sheet(name) {
++    const grid = grids.get(name);
++    if (!grid) return null;
++    const result = {
++      getLastRow: () => grid.length,
++      getLastColumn: () => Math.max(0, ...grid.map(row => row.length)),
++      getRange(row, column, height = 1, width = 1) {
++        const values = () => Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => grid[row + r - 1]?.[column + c - 1] ?? ""));
++        const range = {
++          getValues: values, getDisplayValues: () => values().map(row => row.map(String)),
++          setValues(rows) {
++            state.beforeWrite?.({ name, row, column, rows });
++            rows.forEach((cells, r) => {
++              grid[row + r - 1] ||= [];
++              cells.forEach((value, c) => {
++                const key = `${name}:${row + r}:${column + c}`;
++                formulas.delete(key);
++                if (typeof value === "string" && value.startsWith("'")) value = value.slice(1);
++                else if (typeof value === "string" && value.startsWith("=")) {
++                  formulas.add(key);
++                  value = value === "=1+1" ? 2 : "#ERROR!";
++                }
++                grid[row + r - 1][column + c - 1] = value;
++              });
++            });
++            state.writes += 1;
++            state.afterWrite?.({ name, row, column, rows });
++            return range;
++          },
++          setValue(value) { return range.setValues([[value]]); },
++          setFontWeight() { return range; }, setBackground() { return range; }, setFontColor() { return range; },
++        };
++        return range;
++      },
++      getDataRange() { return result.getRange(1, 1, grid.length, result.getLastColumn()); },
++      appendRow(row) { result.getRange(grid.length + 1, 1, 1, row.length).setValues([row]); },
++      setFrozenRows() {}, autoResizeColumns() {},
++    };
++    return result;
++  }
++  const spreadsheet = { getSheetByName: sheet, insertSheet(name) { grids.set(name, []); return sheet(name); } };
++  const access = () => ({ role: "owner", email: "synthetic@example.com", canEdit: true, canWork: true, isOwner: true, isAdmin: true });
++  const context = vm.createContext({ Date, Math, Number, Object, RegExp, String, Array, JSON, Error,
++    requireAppAccess_: access, requireEditorAccess_: access, requireWorkerAccess_: access, requireOwnerAccess_: access, requireAdminAccess_: access,
++    Session: { getActiveUser: () => ({ getEmail: () => "synthetic@example.com" }) },
++    SpreadsheetApp: { flush() { state.afterFlush?.(); } },
++    PropertiesService: { getScriptProperties: () => ({ getProperty: key => properties.get(key) ?? null, setProperty: (key, value) => properties.set(key, value), deleteProperty: key => properties.delete(key) }) },
++    Utilities: { getUuid: () => `fixture-${++uuid}`, formatDate: date => new Date(+date + 9 * 3600000).toISOString().slice(0, 10) },
++    LockService: { getDocumentLock: () => null, getScriptLock: () => ({ waitLock() { assert.equal(state.locked, false); state.locked = true; }, releaseLock() { state.locked = false; } }) },
++  });
++  vm.runInContext(source, context);
++  context.getSpreadsheet_ = () => spreadsheet;
++  context.ensureSystem_ = () => {};
++  for (const [sheetKey, headerKey] of [["JOBS", "JOB_HEADERS"], ["INTAKE", "INTAKE_HEADERS"], ["SETTINGS", "SETTING_HEADERS"], ["LOG", "LOG_HEADERS"], ["LEARNING", "LEARNING_HEADERS"]]) {
++    grids.set(context.APP.SHEETS[sheetKey], [[...context.APP[headerKey]]]);
++  }
++  return { context, grids, formulas, state, properties, sheet };
++}
+--- /dev/null
++++ b/tests/sheet-text-roundtrip.test.mjs
+@@ -0,0 +1,67 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { sheetsFixture } from "./helpers/sheets-fixture.mjs";
++
++const texts = ["=1+1", "'原文", "''引用", "'=1+1", "日本語\n明細", "=日本語\n明細"];
++
++test("job writer/reader and unrelated updates preserve literal text without leaking escapes into the model", async () => {
++  for (const text of texts) {
++    const h = await sheetsFixture(), c = h.context;
++    let saved = c.saveJob({ customer: "検証商事", product: "鋭匙鉗子", quantity: 3, serialNo: text, note: text });
++    assert.equal(saved.note, text);
++    assert.equal(saved.serialNo, text);
++    for (let retry = 0; retry < 2; retry += 1) {
++      const loaded = c.readJobs_()[0];
++      assert.equal(loaded.note, text);
++      assert.equal(loaded.serialNo, text);
++      saved = c.saveJob({ ...loaded, priority: retry ? "normal" : "high" });
++    }
++    assert.equal(c.readJobs_()[0].note, text);
++    assert.equal(h.formulas.size, 0);
++    assert.equal(typeof c.readJobs_()[0].quantity, "number");
++    assert.equal(c.readJobs_()[0].archived, false);
++    assert.equal(c.sanitizeText_(text), text);
++  }
++});
++
++test("intake subject, sender, original text and parsed JSON survive status updates and read/write round trips", async () => {
++  const h = await sheetsFixture(), c = h.context;
++  for (const text of texts) {
++    const original = c.appendIntake_({ sourceType: "text", sourceRef: `source:${text}`, subject: text, sender: text, originalText: text, parsed: { note: text, quantity: 5, verified: false }, confidence: 0.25 });
++    c.updateIntakeStatus_(original.id, "rejected");
++    const loaded = c.readIntake_().find(item => item.id === original.id);
++    assert.equal(loaded.subject, text);
++    assert.equal(loaded.sender, text);
++    assert.equal(loaded.originalText, text);
++    assert.equal(loaded.parsed.note, text);
++    assert.equal(loaded.parsed.quantity, 5);
++    assert.equal(loaded.parsed.verified, false);
++    const copied = c.appendIntake_({ ...loaded, id: undefined, sourceRef: `copy:${text}` });
++    assert.equal(c.readIntake_().find(item => item.id === copied.id).originalText, text);
++  }
++  assert.equal(h.formulas.size, 0);
++});
++
++test("settings, material and audit writers protect text while preserving numeric, boolean, date and JSON cell types", async () => {
++  const h = await sheetsFixture(["apps-script/Code.gs", "apps-script/Materials.gs"]), c = h.context;
++  c.getAccessSettings = () => ({});
++  c.getAiImportStatus = () => ({});
++  for (const text of texts) {
++    c.saveSettings({ gmailQuery: text });
++    assert.equal(c.readSettings_().gmailQuery, text);
++    c.appendLog_(text, text, text, { note: text });
++    const audit = c.readRows_(c.APP.SHEETS.LOG, c.APP.LOG_HEADERS).at(-1);
++    assert.equal(audit.action, text);
++    assert.equal(JSON.parse(audit.detailJson).note, text);
++  }
++  h.grids.set(c.APP.SHEETS.MATERIALS, [[...c.MATERIAL_EVENT_HEADERS_]]);
++  const date = new Date("2026-10-23T01:02:03.000Z");
++  c.appendMaterialEvents_([{ id: "event", action: "adjust", note: "=1+1", quantity: 3, date, orderDate: "2026-10-23" }]);
++  const event = c.readMaterialEvents_()[0];
++  assert.equal(event.note, "=1+1");
++  assert.equal(event.quantity, 3);
++  assert.equal(event.date, "2026-10-23");
++  const cellDate = h.grids.get(c.APP.SHEETS.MATERIALS)[1][c.MATERIAL_EVENT_FIELDS_.indexOf("date")];
++  assert.equal(cellDate, date);
++  assert.equal(h.formulas.size, 0);
++});
