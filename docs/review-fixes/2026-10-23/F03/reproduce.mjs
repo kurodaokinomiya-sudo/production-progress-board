@@ -1,4 +1,5 @@
-// Investigation only. Synthetic local state; never connects to Sheets/Gmail.
+// Original F03 reproduction, now checks the agreed fulfillment behavior.
+// Synthetic local state; never connects to Sheets/Gmail.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { webcrypto } from "node:crypto";
@@ -28,9 +29,8 @@ for (const [name, api] of [["server", server.context], ["MockApi", context.ui.ap
   const projected = snapshot.orders.find(row => row.jobId === zero.id);
   assert.equal(projected.remainingQuantity, 0);
   assert.equal(projected.shippedQuantity, 5);
-  let blocked = "";
-  try { await api.saveJob({ ...zero, stages: { ...zero.stages, finish: { status: "done", assignee: "" } }, shippingStatus: "shipped", requestId: "complete" }); }
-  catch (error) { blocked = error.message; }
-  assert.match(blocked, /研磨.*全数.*最終仕上げ/);
-  console.log(JSON.stringify({ name, manufacturingQuantity: zero.quantity, orderQuantity: projected.quantity, shippedQuantity: projected.shippedQuantity, remainingQuantity: projected.remainingQuantity, completionBlocked: blocked }));
+  const fulfilled = await api.saveJob({ ...zero, shippingStatus: "shipped", requestId: "complete" });
+  assert.equal(fulfilled.completionKind, "stock_fulfillment");
+  assert.notEqual(fulfilled.stages?.finish?.status, "done");
+  console.log(JSON.stringify({ name, manufacturingQuantity: zero.quantity, orderQuantity: projected.quantity, shippedQuantity: projected.shippedQuantity, remainingQuantity: projected.remainingQuantity, completionKind: fulfilled.completionKind, completedAt: fulfilled.completedAt }));
 }

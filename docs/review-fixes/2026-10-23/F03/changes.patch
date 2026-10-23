@@ -1,0 +1,426 @@
+--- a/apps-script/Config.gs
++++ b/apps-script/Config.gs
+@@ -20 +20 @@
+-    "labelPrintStatus", "labelPrintedAt", "distributionAssignee", "polishingJson", "productCode", "externalOrderNo", "externalLineNo", "materialsJson", "stockPlannedQuantity"
++    "labelPrintStatus", "labelPrintedAt", "distributionAssignee", "polishingJson", "productCode", "externalOrderNo", "externalLineNo", "materialsJson", "stockPlannedQuantity", "completionKind"
+--- a/apps-script/FinishedStock.gs
++++ b/apps-script/FinishedStock.gs
+@@ -33 +33,19 @@
+-    return FinishedStock.snapshot({ jobs: readJobs_(), events: readFinishedStockEventsIfPresent_() });
++    var events = readFinishedStockEventsIfPresent_();
++    return FinishedStock.snapshot({ jobs: reconcileStockFulfillments_(readJobs_(), events), events: events });
++  });
++}
++
++// Repairable after an event write whose reply (or subsequent job write) failed.
++// Never reduce/increase stock here: the original reversal event owns that effect.
++function reconcileStockFulfillments_(jobs, events) {
++  return jobs.map(function(job) {
++    if (job.completionKind !== "stock_fulfillment" || job.shippingStatus !== "shipped" || FinishedStock.fulfillment(job, events)) return job;
++    var rows = readRows_(APP.SHEETS.JOBS, APP.JOB_HEADERS);
++    var row = rows.filter(function(value) { return String(value.id) === job.id; })[0];
++    if (!row) throw new Error("受注の再開対象が見つかりません。");
++    job.shippingStatus = "not_ready"; job.completedAt = ""; job.completionKind = "";
++    job.version += 1; job.updatedAt = new Date().toISOString();
++    getSpreadsheet_().getSheetByName(APP.SHEETS.JOBS).getRange(row._rowNumber, 1, 1, APP.JOB_HEADERS.length).setValues(sheetValues_([jobToRow_(job)]));
++    SpreadsheetApp.flush();
++    appendLog_("job.fulfillment.reopen", "job", job.id, { reason: "stock-shipment-reversed", version: job.version });
++    return job;
+@@ -77 +95,2 @@
+-      return FinishedStock.snapshot({ jobs: jobs, events: events.concat([result.event]) });
++      var committed = events.concat([result.event]);
++      return FinishedStock.snapshot({ jobs: reconcileStockFulfillments_(jobs, committed), events: committed });
+@@ -79 +98 @@
+-    return result.snapshot;
++    return FinishedStock.snapshot({ jobs: reconcileStockFulfillments_(jobs, events), events: events });
+--- a/apps-script/Repository.gs
++++ b/apps-script/Repository.gs
+@@ -108,0 +109 @@
++    completionKind: row.completionKind === "stock_fulfillment" ? "stock_fulfillment" : "",
+@@ -226,2 +226,0 @@
+-  validatePolishingLifecycle_(polishing, quantityValue, stages.finish.status, shipping, existing,
+-    !existing && normalizationOptions && normalizationOptions.historicalImport === true);
+@@ -263,0 +263,12 @@
++  var fulfillment = existing && !existing.archived && !next.archived && shipping === "shipped" && typeof FinishedStock !== "undefined" && typeof readFinishedStockEventsIfPresent_ === "function"
++    ? FinishedStock.fulfillment(next, readFinishedStockEventsIfPresent_()) : null;
++  if (fulfillment) {
++    if (stages.finish.status === "done") throw new Error("製造不要の受注は最終仕上げを完了にせず、受注履行完了を記録してください。");
++    next.completionKind = "stock_fulfillment";
++    next.completedAt = new Date(fulfillment.date + "T00:00:00+09:00").toISOString();
++  } else {
++    if (shipping === "shipped" && existing && existing.completionKind === "stock_fulfillment") throw new Error("有効な在庫出荷が注文数量を満たしていません。受注を再開して出荷履歴を確認してください。");
++    validatePolishingLifecycle_(polishing, quantityValue, stages.finish.status, shipping, existing,
++      !existing && normalizationOptions && normalizationOptions.historicalImport === true);
++    next.completionKind = "";
++  }
+@@ -293 +304 @@
+-    completedAt: job.completedAt, category: job.category,
++    completedAt: job.completedAt, category: job.category, completionKind: job.completionKind || "",
+--- a/docs/Tezoe製品在庫.md
++++ b/docs/Tezoe製品在庫.md
+@@ -56,0 +57,4 @@
++全数を在庫から出荷し、製造総数が0の受注は、在庫画面の受注欄で「受注履行完了」を押します。編集者以上が、保存済みの注文数量と紐付く有効な実出荷を根拠に完了を記録します。製造工程の最終仕上げは完了にせず、完了日は最後の有効な出荷日です。完成品リストの出荷済み欄に「受注履行完了」と表示し、製造数量0と実出荷数量は分けて扱います。在庫はこの完了操作では減りません。「在庫」「在庫用」の補充製造や製造分の残る受注には適用しません。
++
++受注履行完了後に出荷を取り消して受注残が戻ると、自動で受注を再開します。完了日を消し、在庫画面の受注欄で再度扱えます。取消の途中で通信が失敗した場合も「更新」または同じ取消の再試行で再開を回復します。在庫を戻すのは取消履歴の1回だけです。
++
+--- a/src/app.js
++++ b/src/app.js
+@@ -404,0 +405,2 @@
++        data.jobs = data.jobs.map((job) => job.completionKind === "stock_fulfillment" && job.shippingStatus === "shipped" && !FinishedStock.fulfillment(job, data.finishedStockEvents)
++          ? { ...job, shippingStatus: "not_ready", completionKind: "", completedAt: "", version: job.version + 1, updatedAt: new Date().toISOString() } : job);
+@@ -407 +409 @@
+-      return prepared.snapshot;
++      return FinishedStock.snapshot({ jobs: data.jobs, events: data.finishedStockEvents || events });
+@@ -541,0 +544,2 @@
++    const fulfillment = previous && !previous.archived && payload.shippingStatus === "shipped"
++      ? globalThis.FinishedStock?.fulfillment(nextForPolishing, data.finishedStockEvents || []) : null;
+@@ -543,2 +547,8 @@
+-    if (invalidFinalFinishing(nextForPolishing, previous)) throw new Error("研磨から全数戻るまで最終仕上げを完了にできません。");
+-    if (payload.shippingStatus === "shipped" && stageStatus(payload, "finish") !== "done") throw new Error("出荷完了にするには、最終仕上げを完了にしてください。");
++    if (fulfillment) {
++      if (!canEdit() || state.accessRevoked) throw new Error("受注履行完了には編集権限が必要です。");
++      if (stageStatus(payload, "finish") === "done") throw new Error("製造不要の受注は最終仕上げを完了にせず、受注履行完了を記録してください。");
++    } else {
++      if (payload.shippingStatus === "shipped" && previous?.completionKind === "stock_fulfillment") throw new Error("有効な在庫出荷が注文数量を満たしていません。受注を再開して出荷履歴を確認してください。");
++      if (invalidFinalFinishing(nextForPolishing, previous)) throw new Error("研磨から全数戻るまで最終仕上げを完了にできません。");
++      if (payload.shippingStatus === "shipped" && stageStatus(payload, "finish") !== "done") throw new Error("出荷完了にするには、最終仕上げを完了にしてください。");
++    }
+@@ -558 +568,2 @@
+-      completedAt: completed ? (wasCompleted ? previous.completedAt || "" : now) : "",
++      completedAt: fulfillment ? new Date(`${fulfillment.date}T00:00:00+09:00`).toISOString() : completed ? (wasCompleted ? previous.completedAt || "" : now) : "",
++      completionKind: fulfillment ? "stock_fulfillment" : "",
+@@ -966,0 +978 @@
++const stockFulfillmentAttempts = new Map();
+@@ -977,0 +990,15 @@
++      async onFulfill(id) {
++        if (!canEdit() || state.accessRevoked) throw new Error("受注履行完了には編集権限が必要です。");
++        const job = state.jobs.find((entry) => entry.id === id && !entry.archived);
++        if (!job) throw new Error("案件が見つかりません。更新して確認してください。");
++        const payload = stockFulfillmentAttempts.get(id) || { ...structuredClone(job), shippingStatus: "shipped", requestId: crypto.randomUUID() };
++        stockFulfillmentAttempts.set(id, payload);
++        try {
++          await api.saveJob(payload);
++          stockFulfillmentAttempts.delete(id);
++        } catch (error) {
++          if (/別の端末|権限|削除済み|見つかりません/.test(String(error.message))) stockFulfillmentAttempts.delete(id);
++          throw error;
++        } finally { await refreshData({ quiet: true }); }
++      },
++      onMutation() { void refreshData({ quiet: true }); },
+@@ -1684 +1711 @@
+-  if (job.shippingStatus === "shipped") return { key: "complete", label: "出荷完了", status: "done", assignee: "" };
++  if (job.shippingStatus === "shipped") return { key: "complete", label: job.completionKind === "stock_fulfillment" ? "受注履行完了" : "出荷完了", status: "done", assignee: "" };
+@@ -3049 +3076 @@
+-  const label = job.shippingStatus === "shipped" ? "出荷完了" : isDone(job) ? "出荷待ち" : "未出荷";
++  const label = job.shippingStatus === "shipped" ? (job.completionKind === "stock_fulfillment" ? "受注履行完了" : "出荷完了") : isDone(job) ? "出荷待ち" : "未出荷";
+@@ -3599,0 +3627 @@
++  stockFulfillmentAttempts.clear();
+@@ -5725,2 +5753,3 @@
+-        form.dataset.shippingStatus = "waiting";
+-        form.dataset.afterSaveView = "shipping";
++        const stockFulfilled = form._jobBase?.completionKind === "stock_fulfillment";
++        form.dataset.shippingStatus = stockFulfilled ? "not_ready" : "waiting";
++        form.dataset.afterSaveView = stockFulfilled ? "finishedStock" : "shipping";
+--- a/src/finished-stock-ui.js
++++ b/src/finished-stock-ui.js
+@@ -74 +74 @@
+-      q("#finished-stock-order-rows").innerHTML = orders.map((o) => `<tr data-stock-order="${escape(o.jobId)}"><th scope="row"><strong>${escape(nameFor(o.productId))}</strong><small>${escape(o.customer)} / ${escape(o.serialNo || o.jobId)}</small></th><td>${count(o.quantity)}${o.hasSchedule ? "" : '<small>製造総数−在庫予定</small>'}</td><td>${count(o.shippedQuantity)}</td><td>${count(o.remainingQuantity)}</td><td class="finished-stock-number">${count(o.allocatedQuantity)}</td><td class="${o.shortageQuantity > 0 ? "finished-stock-shortage" : ""}">${count(o.shortageQuantity)}</td><td>${escape(o.shipDate || "未定")}${o.shipDate && o.shipDate < today() && (o.shipmentMode === "together" ? o.remainingQuantity > 0 : o.stockTargetQuantity > 0) ? '<small class="finished-stock-badge">出荷予定日超過</small>' : ""}<small>${o.shipmentMode === "together" ? "不足分と一緒に出荷" : "在庫分を先に出荷"}</small></td><td>${o.shortageQuantity > 0 ? escape(o.completionDate || "未定") : "在庫で対応可"}<small>製造総数 ${count(o.totalQuantity)}丁</small>${o.shortageQuantity > 0 && !o.finishReady && o.completionDate && o.completionDate < today() ? '<small class="finished-stock-badge">完成予定日超過・要確認</small>' : ""}${button("job", "製造計画", `data-job-id="${escape(o.jobId)}"`)}</td><td>${button("schedule", "出荷予定", `data-job-id="${escape(o.jobId)}"`)}${button("ship", "この受注へ出荷", `data-product-id="${escape(o.productId)}" data-order-job-id="${escape(o.jobId)}" data-stock-unavailable="${o.allocatedQuantity <= 0 || o.shipmentMode === "together" && o.shortageQuantity > 0 && !o.finishReady}"`)}</td></tr>`).join("") || empty(9, "未出荷のTezoe受注はありません。注文入力・取込の確定後に自動で表示します。");
++      q("#finished-stock-order-rows").innerHTML = orders.map((o) => `<tr data-stock-order="${escape(o.jobId)}"><th scope="row"><strong>${escape(nameFor(o.productId))}</strong><small>${escape(o.customer)} / ${escape(o.serialNo || o.jobId)}</small></th><td>${count(o.quantity)}${o.hasSchedule ? "" : '<small>製造総数−在庫予定</small>'}</td><td>${count(o.shippedQuantity)}</td><td>${count(o.remainingQuantity)}</td><td class="finished-stock-number">${count(o.allocatedQuantity)}</td><td class="${o.shortageQuantity > 0 ? "finished-stock-shortage" : ""}">${count(o.shortageQuantity)}</td><td>${escape(o.shipDate || "未定")}${o.shipDate && o.shipDate < today() && (o.shipmentMode === "together" ? o.remainingQuantity > 0 : o.stockTargetQuantity > 0) ? '<small class="finished-stock-badge">出荷予定日超過</small>' : ""}<small>${o.shipmentMode === "together" ? "不足分と一緒に出荷" : "在庫分を先に出荷"}</small></td><td>${o.shortageQuantity > 0 ? escape(o.completionDate || "未定") : "在庫で対応可"}<small>製造総数 ${count(o.totalQuantity)}丁</small>${o.shortageQuantity > 0 && !o.finishReady && o.completionDate && o.completionDate < today() ? '<small class="finished-stock-badge">完成予定日超過・要確認</small>' : ""}${button("job", "製造計画", `data-job-id="${escape(o.jobId)}"`)}</td><td>${o.hasSchedule && o.totalQuantity === 0 && o.quantity > 0 && o.remainingQuantity === 0 && o.shippedQuantity === o.quantity ? button("fulfill", "受注履行完了", `data-job-id="${escape(o.jobId)}"`) : ""}${button("schedule", "出荷予定", `data-job-id="${escape(o.jobId)}"`)}${button("ship", "この受注へ出荷", `data-product-id="${escape(o.productId)}" data-order-job-id="${escape(o.jobId)}" data-stock-unavailable="${o.allocatedQuantity <= 0 || o.shipmentMode === "together" && o.shortageQuantity > 0 && !o.finishReady}"`)}</td></tr>`).join("") || empty(9, "未出荷のTezoe受注はありません。注文入力・取込の確定後に自動で表示します。");
+@@ -231,0 +232 @@
++        options.onMutation?.();
+@@ -272,0 +274,10 @@
++        if (action === "fulfill") {
++          pending = true; controls();
++          status("#finished-stock-status", "受注履行完了を記録しています…", "pending");
++          Promise.resolve().then(() => options.onFulfill?.(el.dataset.jobId)).then(() => {
++            status("#finished-stock-status", "受注履行完了を記録しました。", "success");
++          }).catch((error) => status("#finished-stock-status", errorMessage(error), "error")).finally(() => {
++            pending = false; dirty = true; controls(); void refresh();
++          });
++          return;
++        }
+--- a/src/finished-stock.js
++++ b/src/finished-stock.js
+@@ -168,0 +169,34 @@
++  }
++  function fulfillment(job, events) {
++    function quantity(value) {
++      if ((typeof value !== "number" && typeof value !== "string") || !text(value)) fail("数量を確認してください。");
++      return safeInteger(value, 0, MAX_QUANTITY, "数量");
++    }
++    try {
++      if (!job || !text(job.id) || job.archived || FinishedStockOrders.isStockOnly(job)) return null;
++      if (quantity(job.quantity) !== 0 || quantity(job.stockPlannedQuantity) !== 0) return null;
++      var product = productFor(job);
++      if (!product) return null;
++      var polishing = job.polishing || {};
++      var sent = polishing.sentQuantity === undefined ? 0 : quantity(polishing.sentQuantity);
++      var returned = polishing.returnedQuantity === undefined ? 0 : quantity(polishing.returnedQuantity);
++      if (sent !== returned) return null;
++      var state = normalizeEvents(events || []), schedule = null, capturedQuantity = null, jobId = text(job.id);
++      // Event append order is the sequence used by snapshot's schedule projection.
++      state.events.forEach(function (event, index) {
++        if (event.action === "schedule" && event.jobId === jobId) { schedule = event; capturedQuantity = events[index].orderQuantity; }
++      });
++      if (!schedule || schedule.productId !== product.id || quantity(capturedQuantity) <= 0) return null;
++      var shipped = 0, date = "", invalidProduct = false;
++      state.activeShipments.forEach(function (source) {
++        var event = state.byId[source.id];
++        if (event.orderJobId !== jobId) return;
++        if (event.productId !== product.id) { invalidProduct = true; return; }
++        shipped += event.quantity;
++        if (event.date > date) date = event.date;
++      });
++      if (invalidProduct || !date || shipped !== schedule.orderQuantity) return null;
++      return { date: date, orderQuantity: schedule.orderQuantity, shippedQuantity: shipped, productId: product.id };
++    } catch (error) {
++      return null;
++    }
+@@ -348 +382 @@
+-  return { CATALOG: catalog(), catalog: catalog, snapshot: snapshot, prepareMutation: prepareMutation, normalizePlannedQuantity: normalizePlannedQuantity, validateJob: validateJob, productFor: productFor, hash: hash };
++  return { CATALOG: catalog(), catalog: catalog, snapshot: snapshot, prepareMutation: prepareMutation, normalizePlannedQuantity: normalizePlannedQuantity, validateJob: validateJob, productFor: productFor, fulfillment: fulfillment, hash: hash };
+--- /dev/null
++++ b/tests/stock-fulfillment-integration.test.mjs
+@@ -0,0 +1,101 @@
++import assert from "node:assert/strict";
++import { readFile } from "node:fs/promises";
++import { webcrypto } from "node:crypto";
++import vm from "node:vm";
++import test from "node:test";
++import { sheetsFixture } from "./helpers/sheets-fixture.mjs";
++
++async function mock() {
++  const files = ["finished-stock-orders.js", "finished-stock.js", "materials.js", "intake-duplicates.js", "intake-learning.js", "app.js"];
++  const sources = await Promise.all(files.map(file => readFile(new URL(`../src/${file}`, import.meta.url), "utf8")));
++  const storage = new Map();
++  const c = vm.createContext({ Date, Intl, Math, Number, Object, String, Array, RegExp, Set, Map, JSON, URL, structuredClone,
++    setTimeout, clearTimeout, crypto: webcrypto, window: { crypto: webcrypto }, navigator: {},
++    localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
++    document: { querySelector: () => null, querySelectorAll: () => [] },
++    fetch: async (url, request) => ({ ok: true, json: async () => url === "/api/local/product-metadata" ? { jobs: JSON.parse(request.body).jobs } : {} }),
++  });
++  vm.runInContext(`${sources.slice(0, 5).join("\n")}\n${sources[5].slice(0, sources[5].indexOf("async function init()"))}\ndelay = () => Promise.resolve(); globalThis.ui = { api, state };`, c);
++  const data = c.ui.api.read(); data.jobs = []; data.intake = []; data.finishedStockEvents = []; c.ui.api.write(data);
++  const role = value => { c.ui.state.access = { role: value, canEdit: ["owner", "admin", "editor"].includes(value) }; };
++  role("editor");
++  return { api: c.ui.api, jobs: () => c.ui.api.read().jobs, role };
++}
++
++async function server() {
++  const h = await sheetsFixture(["src/finished-stock-orders.js", "src/finished-stock.js", "src/materials.js", "apps-script/Materials.gs", "apps-script/FinishedStock.gs"]);
++  let currentRole = "editor";
++  h.context.requireEditorAccess_ = () => {
++    if (!["owner", "admin", "editor"].includes(currentRole)) throw new Error("EDITOR_REQUIRED: 編集権限が必要です。");
++    return { role: currentRole, email: "fixture@example.invalid", canEdit: true };
++  };
++  return { ...h, api: h.context, jobs: () => h.context.readJobs_(), role: value => { currentRole = value; } };
++}
++
++async function setup(h) {
++  const a = h.api;
++  const stages = Object.fromEntries(["welding", "base", "grinding", "heat", "finish"].map(key => [key, { status: "not_started", assignee: "" }]));
++  let order = await a.saveJob({ customer: "検証受注", product: "Tezoe スタンツェ 直・上向", productCode: "26001", quantity: 5, stockPlannedQuantity: 0, serialNo: "FULFILLMENT", requestId: "order", stages });
++  await a.openFinishedStock({ requestId: "opening", expectedVersion: 0, productId: "26001", quantity: 5, date: "2026-10-01", note: "合成fixture" });
++  await a.saveFinishedStockSchedule({ requestId: "schedule", expectedVersion: 1, jobId: order.id, jobVersion: order.version, orderQuantity: 5, stockQuantity: 5, shipmentMode: "split", shipDate: "", completionDate: "" });
++  order = await a.saveJob({ ...order, quantity: 0, requestId: "zero" });
++  const ship = (quantity, date, requestId, expectedVersion) => a.shipFinishedStock({ requestId, expectedVersion, productId: "26001", orderJobId: order.id, jobVersion: order.version, quantity, date, purpose: "sale" });
++  return { order, ship };
++}
++
++for (const [name, factory] of [["server", server], ["MockApi", mock]]) {
++  test(`${name}: manual stock fulfillment preserves manufacturing, uses last shipment day, and cancellation reopens exactly once`, async () => {
++    const h = await factory(), a = h.api, { order, ship } = await setup(h);
++    const completion = { ...order, shippingStatus: "shipped", requestId: "fulfill" };
++    await ship(2, "2026-10-01", "ship-first", 2);
++    await assert.rejects(async () => a.saveJob(completion), /研磨|最終仕上げ|出荷予定/);
++    const shipped = await ship(3, "2026-10-02", "ship-last", 3);
++    for (const role of ["worker", "viewer", "revoked"]) {
++      h.role(role);
++      await assert.rejects(async () => a.saveJob(completion), /権限|EDITOR_REQUIRED/);
++    }
++    h.role("editor");
++    await assert.rejects(async () => a.saveJob({ ...completion, stages: { ...order.stages, finish: { status: "done", assignee: "" } } }), /最終仕上げ/);
++    const saved = await a.saveJob(completion);
++    assert.equal(saved.completionKind, "stock_fulfillment");
++    assert.equal(saved.shippingStatus, "shipped");
++    assert.equal(saved.quantity, 0);
++    assert.equal(saved.stages.finish.status, order.stages.finish.status);
++    assert.equal(saved.completedAt, "2026-10-01T15:00:00.000Z");
++    assert.equal((await a.saveJob(completion)).version, saved.version, "lost response retries the same request without another completion");
++    assert.equal((await a.getFinishedStock()).products.find(p => p.id === "26001").stockQuantity, 0);
++    assert.equal((await a.getFinishedStock()).orders.length, 0);
++    const firstShip = shipped.history.find(e => e.requestId === "ship-first");
++    const reversal = { requestId: "reverse", expectedVersion: shipped.version, eventId: firstShip.id, date: "2026-10-03", note: "合成取消" };
++    const reversed = await a.reverseFinishedStock(reversal);
++    const reopened = h.jobs().find(j => j.id === order.id);
++    assert.equal(reopened.shippingStatus, "not_ready");
++    assert.equal(reopened.completionKind, "");
++    assert.equal(reopened.completedAt, "");
++    assert.equal(reopened.version, saved.version + 1);
++    assert.equal(reversed.orders[0].remainingQuantity, 2);
++    assert.equal(reversed.products.find(p => p.id === "26001").stockQuantity, 2);
++    await a.reverseFinishedStock(reversal);
++    assert.equal(h.jobs().find(j => j.id === order.id).version, reopened.version);
++    await assert.rejects(async () => a.saveJob({ ...reopened, shippingStatus: "shipped", requestId: "too-soon" }), /研磨|最終仕上げ|出荷予定/);
++    await a.shipFinishedStock({ requestId: "replacement", expectedVersion: reversed.version, productId: "26001", orderJobId: reopened.id, jobVersion: reopened.version, quantity: 2, date: "2026-10-03", purpose: "sale" });
++    const fulfilledAgain = await a.saveJob({ ...reopened, shippingStatus: "shipped", requestId: "fulfill-again" });
++    assert.equal(fulfilledAgain.completedAt, "2026-10-02T15:00:00.000Z");
++    assert.equal(fulfilledAgain.stages.finish.status, order.stages.finish.status);
++  });
++}
++
++test("server repairs automatic reopening after reversal committed but its job write failed", async () => {
++  const h = await server(), a = h.api, { order, ship } = await setup(h);
++  const shipped = await ship(5, "2026-10-02", "ship-all", 2);
++  await a.saveJob({ ...order, shippingStatus: "shipped", requestId: "fulfill" });
++  h.state.beforeWrite = operation => { if (operation.name === a.APP.SHEETS.JOBS) { h.state.beforeWrite = null; throw new Error("reopen write failed"); } };
++  const request = { requestId: "reverse", expectedVersion: shipped.version, eventId: shipped.history.find(e => e.requestId === "ship-all").id, date: "2026-10-03", note: "訂正" };
++  await assert.rejects(async () => a.reverseFinishedStock(request), /reopen write failed/);
++  const repaired = await a.getFinishedStock();
++  assert.equal(h.jobs()[0].shippingStatus, "not_ready");
++  assert.equal(repaired.orders[0].remainingQuantity, 5);
++  assert.equal(repaired.products.find(p => p.id === "26001").stockQuantity, 5);
++  await a.reverseFinishedStock(request);
++  assert.equal((await a.getFinishedStock()).products.find(p => p.id === "26001").stockQuantity, 5);
++});
+--- /dev/null
++++ b/tests/stock-fulfillment-rules.test.mjs
+@@ -0,0 +1,138 @@
++import assert from "node:assert/strict";
++import { readFile } from "node:fs/promises";
++import test from "node:test";
++import vm from "node:vm";
++
++const sources = await Promise.all(["finished-stock-orders.js", "finished-stock.js"].map(name =>
++  readFile(new URL(`../src/${name}`, import.meta.url), "utf8")));
++const context = vm.createContext({ Date, Math, Number, Object, RegExp, String, Array, JSON, Error, isFinite, parseInt });
++vm.runInContext(sources.join("\n"), context);
++const stock = context.FinishedStock;
++const copy = value => JSON.parse(JSON.stringify(value));
++const job = (extra = {}) => ({
++  id: "F03", customer: "田中医科", product: "Tezoe スタンツェ 直上", productCode: "26001",
++  specShape: "直・上向", bladeWidth: "赤", quantity: 0, stockPlannedQuantity: 0,
++  version: 1, stages: { finish: { status: "pending" } }, ...extra,
++});
++function fixture({ shipped = 5, linked = true } = {}) {
++  const order = job(), events = [];
++  const mutate = (action, input) => {
++    const result = stock.prepareMutation(action, {
++      expectedVersion: events.length, requestId: `request-${events.length}`, ...input,
++    }, { jobs: [order], events, at: "2026-10-23T00:00:00.000Z", id: `event-${events.length}` });
++    events.push(copy(result.event));
++    return events.at(-1);
++  };
++  mutate("opening", { productId: "26001", quantity: 12, date: "2026-10-01", note: "現物確認" });
++  mutate("schedule", { jobId: order.id, jobVersion: 1, orderQuantity: 5, stockQuantity: linked ? 5 : 0, shipmentMode: "split", shipDate: "2026-10-23" });
++  if (shipped) mutate("ship", { productId: "26001", quantity: shipped, date: "2026-10-20", customer: order.customer, orderRef: "F03", purpose: "sale", ...(linked ? { orderJobId: order.id, jobVersion: 1 } : {}) });
++  return { order, events, mutate };
++}
++const fulfilled = { date: "2026-10-20", orderQuantity: 5, shippedQuantity: 5, productId: "26001" };
++
++test("all-stock order requires explicit full linked shipment and preserves all input and stock quantities", () => {
++  const h = fixture(), before = copy(h);
++  const balance = stock.snapshot({ jobs: [h.order], events: h.events }).products[0].stockQuantity;
++  assert.deepEqual(copy(stock.fulfillment(h.order, h.events)), fulfilled);
++  assert.deepEqual(copy(h), before);
++  assert.equal(stock.snapshot({ jobs: [h.order], events: h.events }).products[0].stockQuantity, balance);
++  assert.equal(h.order.stages.finish.status, "pending");
++});
++
++test("partial shipments, missing captured demand, manufacture and replenishment are ineligible", () => {
++  const full = fixture(), partial = fixture({ shipped: 4 });
++  assert.equal(stock.fulfillment(partial.order, partial.events), null);
++  assert.equal(stock.fulfillment(full.order, full.events.filter(event => event.action !== "schedule")), null);
++  assert.equal(stock.fulfillment(job({ quantity: 1 }), full.events), null);
++  assert.equal(stock.fulfillment(job({ quantity: 5, stockPlannedQuantity: 5 }), full.events), null);
++  assert.equal(stock.fulfillment(job({ stockPlannedQuantity: 1 }), full.events), null);
++  for (const customer of ["在庫", "在庫用", " 在庫用 "]) assert.equal(stock.fulfillment(job({ customer }), full.events), null);
++  assert.equal(stock.fulfillment(job({ archived: true }), full.events), null);
++});
++
++test("unlinked or other-job shipments never fulfill the order", () => {
++  const h = fixture({ linked: false });
++  assert.equal(stock.fulfillment(h.order, h.events), null);
++  h.events.at(-1).orderJobId = "ANOTHER";
++  assert.equal(stock.fulfillment(h.order, h.events), null);
++});
++
++test("reversal removes linked shipment eligibility and a replacement uses its effective shipment date", () => {
++  const h = fixture();
++  h.mutate("reverse", { eventId: h.events.at(-1).id, date: "2026-10-21", note: "出荷取消" });
++  assert.equal(stock.fulfillment(h.order, h.events), null);
++  h.mutate("ship", { productId: "26001", quantity: 5, date: "2026-10-22", orderJobId: h.order.id, jobVersion: 1, purpose: "sale" });
++  assert.deepEqual(copy(stock.fulfillment(h.order, h.events)), { ...fulfilled, date: "2026-10-22" });
++});
++
++test("the completion date is the latest effective shipment day, including backdated append order", () => {
++  const h = fixture({ shipped: 3 });
++  h.mutate("ship", { productId: "26001", quantity: 2, date: "2026-10-19", orderJobId: h.order.id, jobVersion: 1, purpose: "sale" });
++  assert.deepEqual(copy(stock.fulfillment(h.order, h.events)), fulfilled);
++});
++
++test("only the latest appended schedule captures demand and must match the product", () => {
++  const h = fixture();
++  const schedule = copy(h.events.find(event => event.action === "schedule"));
++  h.events.push({ ...schedule, id: "new-schedule", requestId: "new-schedule", orderQuantity: 6, at: "2026-10-22T00:00:00.000Z" });
++  assert.equal(stock.fulfillment(h.order, h.events), null);
++  h.events.at(-1).orderQuantity = 5;
++  assert.deepEqual(copy(stock.fulfillment(h.order, h.events)), fulfilled);
++  h.events.at(-1).productId = "26002";
++  assert.equal(stock.fulfillment(h.order, h.events), null);
++  h.events.at(-1).productId = "26001";
++  h.events.at(-1).orderQuantity = 0;
++  assert.equal(stock.fulfillment(h.order, h.events), null);
++  delete h.events.at(-1).orderQuantity;
++  assert.equal(stock.fulfillment(h.order, h.events), null);
++});
++
++test("incorrect Tezoe identity or a different product linked shipment cannot complete an order", () => {
++  const h = fixture();
++  for (const extra of [{ product: "別製品" }, { productCode: "26002" }, { productCode: "unknown" }, { specShape: "弱弯上向" }]) {
++    assert.equal(stock.fulfillment(job(extra), h.events), null);
++  }
++  const other = fixture({ shipped: 0 });
++  other.mutate("opening", { productId: "26002", quantity: 5, date: "2026-10-01", note: "別製品現物確認" });
++  const shipment = other.mutate("ship", { productId: "26002", quantity: 5, date: "2026-10-20", customer: "田中医科", orderRef: "F03", purpose: "sale" });
++  shipment.orderJobId = other.order.id;
++  assert.equal(stock.fulfillment(other.order, other.events), null);
++});
++
++test("invalid zero manufacture or stock quantities and invalid captured demand fail closed", () => {
++  const h = fixture();
++  const invalid = [undefined, null, "", " ", false, true, [], {}, NaN, Infinity, -1, 0.5, 1000001, "invalid"];
++  for (const field of ["quantity", "stockPlannedQuantity"]) {
++    for (const value of invalid) assert.equal(stock.fulfillment(job({ [field]: value }), h.events), null, `${field}: ${String(value)}`);
++  }
++  assert.deepEqual(copy(stock.fulfillment(job({ quantity: "0", stockPlannedQuantity: "0" }), h.events)), fulfilled);
++  for (const value of [undefined, null, "", " ", false, [], [5], {}, -1, 0, 0.5, 1000001, "invalid"]) {
++    const events = copy(h.events);
++    events.find(event => event.action === "schedule").orderQuantity = value;
++    assert.equal(stock.fulfillment(h.order, events), null);
++  }
++});
++
++test("invalid dates and corrupt replay records cannot qualify for completion", () => {
++  const h = fixture();
++  for (const action of ["schedule", "ship"]) {
++    for (const date of ["", "2026-02-30", "2026-13-01", "2026-10-20T00:00:00Z", "invalid"]) {
++      const events = copy(h.events);
++      events.find(event => event.action === action).date = date;
++      assert.equal(stock.fulfillment(h.order, events), null);
++    }
++  }
++  const events = copy(h.events);
++  events.at(-1).quantity = null;
++  assert.equal(stock.fulfillment(h.order, events), null);
++  assert.equal(stock.fulfillment(h.order, {}), null);
++});
++
++test("outstanding or invalid polishing blocks completion and shipped orders remain auditable", () => {
++  const h = fixture();
++  assert.deepEqual(copy(stock.fulfillment(job({ shippingStatus: "shipped" }), h.events)), fulfilled);
++  assert.deepEqual(copy(stock.fulfillment(job({ polishing: { sentQuantity: 1, returnedQuantity: 1 } }), h.events)), fulfilled);
++  for (const polishing of [{ sentQuantity: 1, returnedQuantity: 0 }, { sentQuantity: 0, returnedQuantity: 1 }, { sentQuantity: null, returnedQuantity: 0 }, { sentQuantity: false, returnedQuantity: false }]) {
++    assert.equal(stock.fulfillment(job({ polishing }), h.events), null);
++  }
++});
