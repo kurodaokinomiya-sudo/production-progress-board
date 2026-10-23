@@ -1,0 +1,167 @@
+--- a/apps-script/AccessControl.gs
++++ b/apps-script/AccessControl.gs
+@@ -83 +83 @@
+-  accessWithLock_(function() {
++  var delivery = accessWithLock_(function() {
+@@ -110,2 +110,5 @@
+-    MailApp.sendEmail(email, "生産工程管理 確認コード", "確認コード: " + code + "\n\nこのコードは10分間有効です。心当たりがない場合は、このメールを無視してください。");
+-  });
++    return { email: email, code: code };
++  });
++  // Reserve the challenge/rate limit atomically, then release the shared mutex
++  // before sending mail so slow delivery cannot block workbook updates.
++  if (delivery) MailApp.sendEmail(delivery.email, "生産工程管理 確認コード", "確認コード: " + delivery.code + "\n\nこのコードは10分間有効です。心当たりがない場合は、このメールを無視してください。");
+--- a/apps-script/Repository.gs
++++ b/apps-script/Repository.gs
+@@ -28 +28 @@
+-// Call only inside the same document lock as the read and writes. Reconstruct
++// Call only inside the same script lock as the read and writes. Reconstruct
+@@ -559 +559,3 @@
+-  var lock = LockService.getDocumentLock();
++  // Keep the legacy helper name, but every entry point must use the same
++  // script-wide mutex (including AccessControl). Web apps have no document lock.
++  var lock = LockService.getScriptLock();
+--- a/tests/distribution-assignee.test.mjs
++++ b/tests/distribution-assignee.test.mjs
+@@ -48 +48 @@
+-    LockService: { getDocumentLock: () => lock },
++    LockService: { getScriptLock: () => lock },
+--- a/tests/finished-stock.test.mjs
++++ b/tests/finished-stock.test.mjs
+@@ -191 +191 @@
+-    SpreadsheetApp: { flush() { if (state.failFlush) { state.failFlush = false; throw new Error("lost reply after write"); } } }, LockService: { getDocumentLock: () => lock },
++    SpreadsheetApp: { flush() { if (state.failFlush) { state.failFlush = false; throw new Error("lost reply after write"); } } }, LockService: { getScriptLock: () => lock },
+--- a/tests/intake-duplicates.test.mjs
++++ b/tests/intake-duplicates.test.mjs
+@@ -23 +23 @@
+-    LockService: { getDocumentLock: () => ({
++    LockService: { getScriptLock: () => ({
+--- a/tests/intake-learning-approval.test.mjs
++++ b/tests/intake-learning-approval.test.mjs
+@@ -82 +82 @@
+-    LockService: { getDocumentLock: () => lock },
++    LockService: { getScriptLock: () => lock },
+--- a/tests/intake-learning-storage.test.mjs
++++ b/tests/intake-learning-storage.test.mjs
+@@ -59 +59 @@
+-    LockService: { getDocumentLock: () => ({
++    LockService: { getScriptLock: () => ({
+--- a/tests/materials.test.mjs
++++ b/tests/materials.test.mjs
+@@ -55 +55 @@
+-    LockService: { getDocumentLock: () => ({ waitLock() { assert.equal(state.locked, false); state.locked = true; if (state.beforeLock) { const callback = state.beforeLock; state.beforeLock = null; callback(); } }, releaseLock() { state.locked = false; } }) },
++    LockService: { getScriptLock: () => ({ waitLock() { assert.equal(state.locked, false); state.locked = true; if (state.beforeLock) { const callback = state.beforeLock; state.beforeLock = null; callback(); } }, releaseLock() { state.locked = false; } }) },
+--- a/tests/polishing.test.mjs
++++ b/tests/polishing.test.mjs
+@@ -57 +57 @@
+-    SpreadsheetApp: { flush() {} }, LockService: { getDocumentLock: () => lock },
++    SpreadsheetApp: { flush() {} }, LockService: { getScriptLock: () => lock },
+--- a/tests/server-latency.test.mjs
++++ b/tests/server-latency.test.mjs
+@@ -79 +79 @@
+-    LockService: { getDocumentLock: () => lock },
++    LockService: { getScriptLock: () => lock },
+--- /dev/null
++++ b/tests/shared-lock-regression.test.mjs
+@@ -0,0 +1,91 @@
++import assert from "node:assert/strict";
++import { readFile } from "node:fs/promises";
++import vm from "node:vm";
++import test from "node:test";
++
++const source = (await Promise.all(["Config.gs", "Parser.gs", "Repository.gs", "AccessControl.gs"].map(
++  name => readFile(new URL(`../apps-script/${name}`, import.meta.url), "utf8"),
++))).join("\n");
++
++function harness() {
++  const state = { held: false, acquisitions: 0, releases: 0, fail: false };
++  const lock = {
++    waitLock(timeout) {
++      assert.equal(timeout, 30000);
++      if (state.fail || state.held) throw new Error("lock timeout");
++      state.held = true;
++      state.acquisitions += 1;
++    },
++    releaseLock() { assert.equal(state.held, true); state.held = false; state.releases += 1; },
++  };
++  const create = () => {
++    const context = vm.createContext({ Date, Math, Number, Object, RegExp, String, JSON,
++      LockService: { getDocumentLock: () => null, getScriptLock: () => lock },
++    });
++    vm.runInContext(source, context);
++    return context;
++  };
++  return { state, context: create(), other: create() };
++}
++
++test("web, management and access paths contend for the same script mutex with a null document lock", () => {
++  const { state, context, other } = harness();
++  for (const entry of ["withDocumentLock_", "accessWithLock_"]) {
++    assert.equal(context[entry](() => {
++      assert.equal(state.held, true);
++      for (const competing of ["withDocumentLock_", "accessWithLock_"]) {
++        let wrote = false;
++        assert.throws(() => other[competing](() => { wrote = true; }), /lock timeout/);
++        assert.equal(wrote, false);
++      }
++      return "saved";
++    }), "saved");
++    assert.equal(state.held, false);
++  }
++  assert.equal(state.acquisitions, 2);
++  assert.equal(state.releases, 2);
++});
++
++test("callback failure releases the mutex; acquisition failure never runs a writer or releases another lock", () => {
++  const { state, context } = harness();
++  assert.throws(() => context.withDocumentLock_(() => { throw new Error("write failed"); }), /write failed/);
++  assert.equal(state.held, false);
++  assert.equal(state.releases, 1);
++  state.fail = true;
++  let wrote = false;
++  assert.throws(() => context.withDocumentLock_(() => { wrote = true; }), /lock timeout/);
++  assert.equal(wrote, false);
++  assert.equal(state.releases, 1);
++});
++
++test("an update through another entry point leaves a stale version rejected under the shared lock", () => {
++  const { state, context, other } = harness();
++  const stored = { id: "shared-job", version: 4 };
++  context.ensureSystem_ = () => {};
++  context.requireEditorAccess_ = () => ({ canEdit: true });
++  context.saveJobUnlocked_ = input => {
++    assert.equal(state.held, true);
++    if (input.version !== stored.version) throw new Error("version conflict");
++    stored.version += 1;
++  };
++  other.withDocumentLock_(() => { stored.version += 1; });
++  assert.throws(() => context.saveJob({ id: stored.id, version: 4 }), /version conflict/);
++  assert.equal(stored.version, 5);
++});
++
++test("verification mail delivery happens after releasing the workbook mutex", () => {
++  const { state, context } = harness();
++  context.Session = { getActiveUser: () => ({ getEmail: () => "" }), getEffectiveUser: () => ({ getEmail: () => "owner@example.com" }) };
++  context.accessConfig_ = () => ({ users: [{ email: "editor@example.com" }] });
++  context.accessSessionHash_ = () => "synthetic-session";
++  context.accessCleanup_ = () => {};
++  context.accessReadJson_ = () => null;
++  context.accessWriteJson_ = () => assert.equal(state.held, true);
++  context.accessNewCode_ = () => "12345678";
++  context.accessHash_ = () => "synthetic-hash";
++  context.Utilities = { getUuid: () => "synthetic-nonce" };
++  let deliveries = 0;
++  context.MailApp = { sendEmail() { assert.equal(state.held, false); deliveries += 1; } };
++  context.requestAccessCode({ email: "editor@example.com" });
++  assert.equal(deliveries, 1);
++});
+--- a/tests/shipment-date-save.test.mjs
++++ b/tests/shipment-date-save.test.mjs
+@@ -48 +48 @@
+-    LockService: { getDocumentLock: () => ({ waitLock() { locked = true; }, releaseLock() { locked = false; } }) },
++    LockService: { getScriptLock: () => ({ waitLock() { locked = true; }, releaseLock() { locked = false; } }) },
+--- a/tests/worker-process.test.mjs
++++ b/tests/worker-process.test.mjs
+@@ -43 +43 @@
+-    } }, SpreadsheetApp: { flush() {} }, LockService: { getDocumentLock: () => lock },
++    } }, SpreadsheetApp: { flush() {} }, LockService: { getScriptLock: () => lock },
