@@ -1,0 +1,267 @@
+--- a/apps-script/AiImport.gs
++++ b/apps-script/AiImport.gs
+@@ -389 +389,60 @@
+-// One unprocessed message per click: avoids bursts and partial per-message imports.
++function aiMailHash_(value) {
++  function canonical(item) {
++    if (Array.isArray(item)) return item.map(canonical);
++    if (!item || typeof item !== "object") return item;
++    var sorted = {};
++    Object.keys(item).sort().forEach(function(key) { if (key !== "_mailBatch") sorted[key] = canonical(item[key]); });
++    return sorted;
++  }
++  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, JSON.stringify(canonical(value)), Utilities.Charset.UTF_8)
++    .map(function(byte) { return (byte & 255).toString(16).padStart(2, "0"); }).join("");
++}
++
++function aiMailBelongsTo_(ref, base) {
++  return ref === base || String(ref || "").indexOf(base + ":item:") === 0;
++}
++
++// A single existing row is never proof that a mail was completely saved.
++// All statuses count: approved/rejected candidates must not be resurrected.
++function aiMailBatchState_(base, intakes, jobs) {
++  var rows = intakes.filter(function(item) { return aiMailBelongsTo_(item.sourceRef, base); });
++  var linked = jobs.filter(function(job) { return aiMailBelongsTo_(job.sourceRef, base); });
++  if (!rows.length) return { kind: linked.length ? "legacy" : "empty", rows: rows };
++  var first = rows[0].parsed && rows[0].parsed._mailBatch;
++  if (!first || first.version !== 1 || !/^[a-f0-9]{64}$/.test(first.key) || !Number.isInteger(first.size) || first.size < 1 || first.size > 100) return { kind: "legacy", rows: rows };
++  var ordinals = {}, refs = {};
++  var valid = rows.every(function(item) {
++    var meta = item.parsed && item.parsed._mailBatch;
++    if (!meta || meta.version !== 1 || meta.key !== first.key || meta.size !== first.size || !Number.isInteger(meta.ordinal) || meta.ordinal < 0 || meta.ordinal >= meta.size || ordinals[meta.ordinal] || refs[item.sourceRef]) return false;
++    ordinals[meta.ordinal] = true;
++    refs[item.sourceRef] = true;
++    return true;
++  });
++  if (!valid || linked.some(function(job) { return !refs[job.sourceRef]; })) return { kind: "legacy", rows: rows };
++  return { kind: rows.length === first.size ? "complete" : "partial", key: first.key, rows: rows };
++}
++
++function prepareAiMailBatch_(base, results, envelope) {
++  if (!Array.isArray(results) || !results.length || results.length > 100) throw new Error("メールの明細数を確認できません。候補は登録していません。");
++  var refs = {};
++  var prepared = results.map(function(result, index) {
++    var ai = result.parsed && result.parsed._ai;
++    if (!ai || !Number.isInteger(ai.document) || !Number.isInteger(ai.page) || !String(ai.row || "").trim()) throw new Error("メール明細の出典を確認できません。候補は登録していません。");
++    var ref = base + ":item:v1:" + aiMailHash_([ai.document, ai.page, ai.row]);
++    if (refs[ref]) throw new Error("メール明細の出典が重複しています。候補は登録していません。");
++    refs[ref] = true;
++    return {
++      sourceType: "email", sourceRef: ref, receivedAt: envelope.receivedAt, sender: envelope.sender,
++      subject: intakeSubject_(envelope.subject, result, index, results.length),
++      originalText: intakePreviewText_("メールと添付の原本を照合してください。", result, index, results.length),
++      parsed: JSON.parse(JSON.stringify(result.parsed)), confidence: 0, status: "pending"
++    };
++  }).sort(function(a, b) { return a.sourceRef < b.sourceRef ? -1 : a.sourceRef > b.sourceRef ? 1 : 0; });
++  // Exclude presentation numbering/envelope text from the identity. The same
++  // source lines in a different AI response order still describe one batch.
++  var key = aiMailHash_(prepared.map(function(item) { return { sourceRef: item.sourceRef, parsed: item.parsed }; }));
++  prepared.forEach(function(item, index) { item.parsed._mailBatch = { version: 1, key: key, size: prepared.length, ordinal: index }; });
++  return { key: key, items: prepared };
++}
++
++// One mail per click; incomplete batches are retried without duplicating rows.
+@@ -393 +452,2 @@
+-  var seen = readIntake_().map(function(item) { return item.sourceRef; }).concat(readJobs_().map(function(job) { return job.sourceRef; }));
++  var intakes = readIntake_(), jobs = readJobs_(), review = [];
++  function warnings() { return review.length ? ["全件保存を確認できない既存のAIメール取込が" + review.length + "通あります。原本と候補・承認済み案件を管理者が照合してください。自動で処理済みにはしていません。"] : []; }
+@@ -400 +460,3 @@
+-      if (seen.some(function(ref) { return ref === base || String(ref).indexOf(base + ":item:") === 0; })) continue;
++      var state = aiMailBatchState_(base, intakes, jobs);
++      if (state.kind === "complete") continue;
++      if (state.kind === "legacy") { review.push(base); continue; }
+@@ -407,0 +470 @@
++      var batch = prepareAiMailBatch_(base, results, { receivedAt: message.getDate().toISOString(), sender: message.getFrom(), subject: message.getSubject() });
+@@ -409,11 +472,11 @@
+-        var current = readIntake_().map(function(item) { return item.sourceRef; }).concat(readJobs_().map(function(job) { return job.sourceRef; }));
+-        if (current.some(function(ref) { return ref === base || String(ref).indexOf(base + ":item:") === 0; })) return { added: 0, skipped: 1 };
+-        results.forEach(function(result, index) {
+-          appendIntake_({
+-            sourceType: "email", sourceRef: base + ":item:" + result.itemNumber, receivedAt: message.getDate().toISOString(),
+-            sender: message.getFrom(), subject: intakeSubject_(message.getSubject(), result, index, results.length),
+-            originalText: intakePreviewText_("メールと添付の原本を照合してください。", result, index, results.length),
+-            parsed: result.parsed, confidence: 0, status: "pending"
+-          });
+-        });
+-        return { added: results.length, skipped: 0, warnings: ["AIは未取込メールを1通ずつ処理します。続きは10秒以上あけて再度検索してください。"] };
++        requireOwnerAccess_();
++        var current = aiMailBatchState_(base, readIntake_(), readJobs_());
++        if (current.kind === "complete") return { added: 0, skipped: 1, warnings: warnings(), reviewRequired: review };
++        if (current.kind === "legacy" || current.kind === "partial" && current.key !== batch.key) {
++          throw new Error("AI_MAIL_REVIEW_REQUIRED: 未完了メールの再読取結果が前回と異なるか、既存候補を照合できません。原本と候補・承認済み案件を管理者が確認してください。追加保存はしていません。");
++        }
++        var missing = batch.items.filter(function(item) { return !current.rows.some(function(saved) { return saved.sourceRef === item.sourceRef; }); });
++        if (missing.length) appendIntakes_(missing);
++        SpreadsheetApp.flush();
++        if (aiMailBatchState_(base, readIntake_(), readJobs_()).kind !== "complete") throw new Error("メール明細の保存が未完了です。同じ検索を再試行してください。");
++        return { added: missing.length, skipped: batch.items.length - missing.length, warnings: warnings().concat(["AIは未取込メールを1通ずつ処理します。続きは10秒以上あけて再度検索してください。"]), reviewRequired: review };
+@@ -423,2 +486,2 @@
+-  return { added: 0, skipped: 0, warnings: ["検索範囲の20スレッド内に未取込メールはありません。"] };
+-}
++  return { added: 0, skipped: 0, warnings: warnings().length ? warnings() : ["検索範囲の20スレッド内に未取込メールはありません。"], reviewRequired: review };
++}
+--- a/apps-script/Repository.gs
++++ b/apps-script/Repository.gs
+@@ -583,0 +584,8 @@
++  return appendIntakes_([item])[0];
++}
++
++// Validate/prepare the entire batch before the first write. Callers hold the
++// shared lock. A range write is not a transaction: callers must verify/recover
++// a partial or uncertain write using their stable source identities.
++function appendIntakes_(items) {
++  if (!Array.isArray(items) || !items.length || items.length > 100) throw new Error("取込候補は1〜100件で保存してください。");
+@@ -586 +594 @@
+-  var normalized = {
++  var normalizedItems = items.map(function(item) { return {
+@@ -591,4 +599,9 @@
+-  };
+-  sheet.getRange(sheet.getLastRow() + 1, 1, 1, APP.INTAKE_HEADERS.length)
+-    .setValues(sheetValues_([APP.INTAKE_HEADERS.map(function(header) { return normalized[header] === undefined ? "" : normalized[header]; })]));
+-  return {
++  }; });
++  var rows = normalizedItems.map(function(normalized) {
++    return APP.INTAKE_HEADERS.map(function(header) { return normalized[header] === undefined ? "" : normalized[header]; });
++  });
++  if (rows.some(function(row) { return row.some(function(value) { return typeof value === "string" && value.length > 45000; }); })) {
++    throw new Error("取込候補の保存文字数が上限を超えています。原本を分けて再度読み取ってください。");
++  }
++  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, APP.INTAKE_HEADERS.length).setValues(sheetValues_(rows));
++  return normalizedItems.map(function(normalized, index) { return {
+@@ -596 +609 @@
+-    sender: normalized.sender, subject: normalized.subject, originalText: normalized.originalText, parsed: item.parsed || {},
++    sender: normalized.sender, subject: normalized.subject, originalText: normalized.originalText, parsed: items[index].parsed || {},
+@@ -598 +611 @@
+-  };
++  }; });
+--- a/tests/ai-import.test.mjs
++++ b/tests/ai-import.test.mjs
+@@ -1,0 +2 @@
++import { createHash } from "node:crypto";
+@@ -52 +53,2 @@
+-    appendIntake_: (value) => { saved.push(value); return value; }, appendLog_: () => {},
++    appendIntake_: (value) => { saved.push(value); return value; },
++    appendIntakes_: (values) => { saved.push(...values); return values; }, appendLog_: () => {}, SpreadsheetApp: { flush() {} },
+@@ -54 +56 @@
+-    Utilities: { formatDate: () => "2026-09-07", getUuid: () => "ai-test" },
++    Utilities: { formatDate: () => "2026-09-07", getUuid: () => "ai-test", DigestAlgorithm: { SHA_256: "sha256" }, Charset: { UTF_8: "utf8" }, computeDigest: (_algorithm, value) => [...createHash("sha256").update(value).digest()] },
+@@ -291 +293 @@
+-  assert.equal(saved[0].sourceRef, "gmail:mock-message:item:1");
++  assert.match(saved[0].sourceRef, /^gmail:mock-message:item:v1:[a-f0-9]{64}$/);
+--- /dev/null
++++ b/tests/ai-mail-recovery.test.mjs
+@@ -0,0 +1,113 @@
++import assert from "node:assert/strict";
++import { createHash } from "node:crypto";
++import test from "node:test";
++import { sheetsFixture } from "./helpers/sheets-fixture.mjs";
++
++const results = () => [1, 2, 3].map(row => ({ itemNumber: row, parsed: {
++  customer: "合成テスト", product: `検証製品${row}`, quantity: row, note: "=1+1",
++  _ai: { document: 1, page: 1, row: String(row), evidence: "合成fixture", warnings: [] },
++}, confidence: 0 }));
++const envelope = { receivedAt: "2026-10-23T00:00:00.000Z", sender: "fixture@example.invalid", subject: "=合成注文" };
++
++async function harness() {
++  const h = await sheetsFixture(["apps-script/Import.gs", "apps-script/AiImport.gs"]), c = h.context;
++  c.Utilities.DigestAlgorithm = { SHA_256: "sha256" };
++  c.Utilities.Charset = { UTF_8: "utf8" };
++  c.Utilities.computeDigest = (_algorithm, value) => [...createHash("sha256").update(value).digest()];
++  c.runAiImport_ = () => { assert.equal(h.state.locked, false); h.aiCalls += 1; return h.results; };
++  h.aiCalls = 0;
++  h.results = results();
++  const message = id => ({
++    getId: () => id, getSubject: () => envelope.subject, getFrom: () => envelope.sender,
++    getDate: () => new Date(envelope.receivedAt), getPlainBody: () => "合成fixtureのみ",
++    getAttachments: () => [],
++  });
++  h.messages = [message("synthetic-mail")];
++  h.message = message;
++  c.GmailApp = { search() { assert.equal(h.state.locked, false); return [{ getMessages: () => h.messages }]; } };
++  h.scan = () => c.scanOrderEmailsWithAi_({});
++  h.rows = () => c.readIntake_();
++  h.batch = () => c.prepareAiMailBatch_("gmail:synthetic-mail", h.results, envelope);
++  return h;
++}
++
++for (const failure of ["before", "partial", "after-write", "after-flush"]) {
++  test(`a three-line mail recovers exactly once after ${failure} failure`, async () => {
++    const h = await harness(), c = h.context;
++    if (failure === "before" || failure === "partial") h.state.beforeWrite = operation => {
++      if (operation.name !== c.APP.SHEETS.INTAKE) return;
++      h.state.beforeWrite = null;
++      if (failure === "partial") h.sheet(operation.name).getRange(operation.row, operation.column, 1, operation.rows[0].length).setValues(operation.rows.slice(0, 1));
++      throw new Error("synthetic storage failure");
++    };
++    if (failure === "after-write") h.state.afterWrite = operation => {
++      if (operation.name !== c.APP.SHEETS.INTAKE) return;
++      h.state.afterWrite = null;
++      throw new Error("synthetic lost write response");
++    };
++    if (failure === "after-flush") h.state.afterFlush = () => { h.state.afterFlush = null; throw new Error("synthetic lost flush response"); };
++    assert.throws(h.scan, /synthetic/);
++    assert.equal(h.state.locked, false);
++    const retried = h.scan();
++    assert.equal(h.rows().length, 3);
++    assert.equal(new Set(h.rows().map(row => row.sourceRef)).size, 3);
++    assert.equal(c.aiMailBatchState_("gmail:synthetic-mail", h.rows(), []).kind, "complete");
++    assert.equal(h.scan().added, 0);
++    assert.equal(h.rows().length, 3);
++    assert.equal(h.formulas.size, 0);
++    if (failure === "partial") assert.equal(retried.added, 2);
++  });
++}
++
++test("recovery preserves approved/rejected lines and their linked jobs; reordered AI output is the same batch", async () => {
++  const h = await harness(), c = h.context, batch = h.batch();
++  c.withDocumentLock_(() => c.appendIntakes_(batch.items.slice(0, 2)));
++  const rows = h.rows();
++  c.updateIntakeStatus_(rows[0].id, "approved");
++  c.updateIntakeStatus_(rows[1].id, "rejected");
++  c.saveJob({ customer: "合成テスト", product: "承認済み", quantity: 1, sourceRef: rows[0].sourceRef });
++  h.results.reverse();
++  assert.equal(h.scan().added, 1);
++  assert.equal(h.rows().find(row => row.id === rows[0].id).status, "approved");
++  assert.equal(h.rows().find(row => row.id === rows[1].id).status, "rejected");
++  assert.equal(c.readJobs_().length, 1);
++  assert.equal(h.rows().length, 3);
++});
++
++test("changed AI contents during partial recovery stop before writing and remain visibly incomplete", async () => {
++  const h = await harness(), c = h.context;
++  c.withDocumentLock_(() => c.appendIntakes_(h.batch().items.slice(0, 1)));
++  const writes = h.state.writes;
++  h.results[2].parsed.quantity = 999;
++  assert.throws(h.scan, /AI_MAIL_REVIEW_REQUIRED/);
++  assert.equal(h.state.writes, writes);
++  assert.equal(c.aiMailBatchState_("gmail:synthetic-mail", h.rows(), []).kind, "partial");
++});
++
++test("another import can complete while AI runs; the later writer rechecks under lock without duplicates", async () => {
++  const h = await harness(), c = h.context, original = c.runAiImport_;
++  c.runAiImport_ = () => { c.runAiImport_ = original; assert.equal(h.scan().added, 3); return h.results; };
++  assert.equal(h.scan().skipped, 1);
++  assert.equal(h.rows().length, 3);
++});
++
++test("legacy partial mail is reported for review, while an independent new mail can continue", async () => {
++  const h = await harness(), c = h.context;
++  c.appendIntake_({ sourceType: "email", sourceRef: "gmail:synthetic-mail:item:1", parsed: results()[0].parsed, status: "approved" });
++  let report = h.scan();
++  assert.deepEqual(Array.from(report.reviewRequired), ["gmail:synthetic-mail"]);
++  assert.ok(report.warnings.every(warning => !warning.includes("未取込メールはありません")));
++  assert.equal(h.aiCalls, 0);
++  h.messages.push(h.message("independent"));
++  report = h.scan();
++  assert.equal(report.added, 3);
++  assert.equal(h.rows().length, 4);
++  assert.equal(h.rows()[0].status, "approved");
++});
++
++test("batch serialization failure validates all candidates before any row is saved", async () => {
++  const h = await harness();
++  h.results[2].parsed.note = "長".repeat(46000);
++  assert.throws(h.scan, /保存文字数/);
++  assert.equal(h.rows().length, 0);
++});
