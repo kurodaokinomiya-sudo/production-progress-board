@@ -1,0 +1,497 @@
+--- a/README.md
++++ b/README.md
+@@ -1,0 +2,2 @@
++
++ローカルブラウザー検証は [開発用QA手順](docs/browser-qa.md) を参照してください。`npm ci`、`npm run qa:install`、`npm run qa` で、専用ポートと隔離デモ状態の検証を実行できます。
+--- /dev/null
++++ b/docs/browser-qa.md
+@@ -0,0 +1,51 @@
++# ローカルブラウザー回帰検証
++
++Node.js 20以上とnpmを使う。個人のホームやCodex内部ランタイムを参照しない。
++
++```sh
++npm ci
++npm run qa:install
++npm run qa
++```
++
++Playwrightは開発依存 `1.64.1` に固定した。`qa:install` はその版に対応するChromiumを導入する。Linux CIでは必要に応じ `npx playwright install --with-deps chromium` を使う。
++
++`npm run qa` は生成物をビルドし、ソース `/src/index.html` と生成物 `/dist/Index.html` をそれぞれ新しいブラウザーコンテキストで開く。起動、主要画面、注文追加・保存・再読込、工程変更・保存・再読込、タブレット幅を確認する。
++空きポートはOSへ割り当てを依頼し、HTTP到達性を確認してから実行する。既存の開発サーバーやブラウザーの保存領域を使わない。
++
++結果は `output/browser-qa/<suite>-<日時>/report.json` に保存する。対象ごとのtrace.zip、失敗時のPNG、必要な画面キャプチャも残る。失敗は終了コード1。未導入ブラウザーは `QA_BROWSER_MISSING`、起動失敗は `QA_SERVER_START_FAILED`、起動待ち期限切れは `QA_SERVER_TIMEOUT` と表示する。ポート競合は他のサーバーを終了せず失敗として扱う。
++
++標準実行は専用サーバーを起動・終了する。既存の**ローカルQA専用**サーバーを使う場合のみ `PROGRESS_BOARD_QA_URL=http://127.0.0.1:<port>/src/index.html` を指定できる。HTTPかつ明示ポート付きの127.0.0.1/localhost以外は拒否する。通常の個人用デモのURLは指定しない。
++
++ブラウザーから外部サイトへは通信しない。フォントは空の合成応答、その他の外部リクエストは拒否する。専用サーバーは `PROGRESS_BOARD_QA_MODE=1` で、外部AI、AI指定の本文解析、本番プロジェクト情報・認証ファイルの取得を拒否する。実メール・Googleログイン・本番データは不要。
++
++後続の結合テストは `runBrowserQa(name, scenario)` を使う。1つのcontextに2つのpageを作れば、保存領域を共有する2タブ検証になる。入力遅延・障害は合成APIかテスト用の一時的な差し替えで再現する。
++
++## 既存QAの対応表
++
++従来のシナリオは削除せず、同じ依存・サーバー・通信制限へ移した。次のように個別に実行できる。
++
++```sh
++npm run build
++npm run qa:legacy -- tools/project-link-qa.mjs
++```
++
++| スクリプト | 残している検証範囲 |
++| --- | --- |
++| browser-qa.mjs | 従来の広範な工程・注文・ラベル・印刷・レイアウト |
++| polishing-browser-qa.mjs | 研磨の発送・戻り・最終仕上げ |
++| ai-browser-qa.mjs | 合成AI応答・取込・診断エラー |
++| text-import-qa.mjs | 本文解析・候補確認・失敗復旧 |
++| bulk-intake-qa.mjs | 一括取込・入力・承認・表示幅 |
++| customer-rules-qa.mjs | 得意先ルールの編集・保存 |
++| intake-delete-qa.mjs | 取込候補の選択・削除・失敗復旧 |
++| project-link-qa.mjs | 合成プロジェクトのリンク先・別タブ・不正URL |
++| review-fixes-qa.mjs | 過去の詳細回帰シナリオ |
++
++旧シナリオの業務前提が変わった場合は、その対象の変更時に確認・更新する。既定スモークの成功だけで全旧シナリオの成功とはしない。
++
++## 検証の限界
++
++どちらの画面もローカルのMockApiを使う。生成物の組み込み漏れやブラウザー操作の確認であり、HtmlService上のgoogle.script.run、GASロック、Sheets永続化、Google認証、本番との一致は確認しない。サーバー単体回帰は別途 `node --test --test-isolation=none tests/*.test.mjs` で実行する。
++
++Playwright公式: https://playwright.dev/docs/library / https://playwright.dev/docs/browsers
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -11,0 +12,3 @@
++      },
++      "devDependencies": {
++        "playwright": "1.64.1"
+@@ -277,0 +281,29 @@
++    },
++    "node_modules/playwright": {
++      "version": "1.64.1",
++      "resolved": "https://registry.npmjs.org/playwright/-/playwright-1.64.1.tgz",
++      "integrity": "sha512-HCrVhHr5QQuwYoswEUGTb7gGp522yflbv/ST8nF4sFWGuLjQCt17Q/EubpGGSNKYn1tsTCPZxqHhHCfVURu7UA==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "playwright-core": "1.64.1"
++      },
++      "bin": {
++        "playwright": "cli.js"
++      },
++      "engines": {
++        "node": ">=20"
++      }
++    },
++    "node_modules/playwright-core": {
++      "version": "1.64.1",
++      "resolved": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.64.1.tgz",
++      "integrity": "sha512-BC4s8y6SEVA6Q1rSxZTto8hI1KUI3xXlHGZgvGqP4IqPdI/a6FX9H29IDNz7vKo9l21b6LfYosScPL6M3xxyDQ==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "playwright-core": "cli.js"
++      },
++      "engines": {
++        "node": ">=20"
++      }
+--- a/package.json
++++ b/package.json
+@@ -11,0 +12,3 @@
++    "qa:install": "playwright install chromium",
++    "qa": "node tools/browser-smoke.mjs",
++    "qa:legacy": "node",
+@@ -18,0 +22,3 @@
++  },
++  "devDependencies": {
++    "playwright": "1.64.1"
+--- /dev/null
++++ b/tests/browser-qa-config.test.mjs
+@@ -0,0 +1,10 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { validateQaUrl } from "../tools/browser-runtime.mjs";
++
++test("browser QA accepts only an explicitly ported loopback HTTP target", () => {
++  for (const value of ["http://127.0.0.1:4173/src/index.html", "http://localhost:43123/dist/Index.html"]) assert.equal(validateQaUrl(value).protocol, "http:");
++  for (const value of ["https://script.google.com/macros/s/production/exec", "http://127.0.0.1.evil.example:4173", "http://127.0.0.1", "https://localhost:4173", "http://user:password@localhost:4173", "file:///tmp/index.html", "http://192.168.1.10:4173"]) {
++    assert.throws(() => validateQaUrl(value), /QA_LOCAL_URL_REQUIRED/);
++  }
++});
+--- a/tools/ai-browser-qa.mjs
++++ b/tools/ai-browser-qa.mjs
+@@ -2 +1,0 @@
+-import { createRequire } from "node:module";
+@@ -5,3 +4,2 @@
+-const require = createRequire(import.meta.url);
+-const { chromium } = require("C:/Users/kurom/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright");
+-const baseUrl = process.env.PROGRESS_BOARD_QA_URL || "http://127.0.0.1:4174";
++import { chromium, qaBaseUrl } from "./browser-runtime.mjs";
++const baseUrl = await qaBaseUrl("/src/index.html");
+@@ -10 +8 @@
+-const browser = await chromium.launch({ headless: true, executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe" });
++const browser = await chromium.launch({ headless: true });
+--- a/tools/browser-qa.mjs
++++ b/tools/browser-qa.mjs
+@@ -2 +1,0 @@
+-import { createRequire } from "node:module";
+@@ -6,3 +5,2 @@
+-
+-const require = createRequire(import.meta.url);
+-const { chromium } = require("C:/Users/kurom/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright");
++import { chromium, qaBaseUrl } from "./browser-runtime.mjs";
++
+@@ -11 +9 @@
+-const baseUrl = process.env.PROGRESS_BOARD_QA_URL || "http://127.0.0.1:4173";
++const baseUrl = await qaBaseUrl("/src/index.html");
+@@ -14,4 +12 @@
+-const browser = await chromium.launch({
+-  headless: true,
+-  executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe",
+-});
++const browser = await chromium.launch({ headless: true });
+--- /dev/null
++++ b/tools/browser-runtime.mjs
+@@ -0,0 +1,150 @@
++import { chromium as playwrightChromium } from "playwright";
++import { spawn, spawnSync } from "node:child_process";
++import { mkdir, writeFile } from "node:fs/promises";
++import { once } from "node:events";
++import path from "node:path";
++import { fileURLToPath } from "node:url";
++
++const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
++let ownedServer;
++async function closeOwnedServer() {
++  const pending = ownedServer; ownedServer = null;
++  if (pending) await pending.then(server => server.close(), () => {});
++}
++
++export function validateQaUrl(value) {
++  const url = new URL(value);
++  if (url.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(url.hostname) || !url.port || url.username || url.password) {
++    throw new Error("QA_LOCAL_URL_REQUIRED: QA URLは専用ポートを持つhttp://127.0.0.1またはlocalhostに限定します。本番URLは使用できません。");
++  }
++  return url;
++}
++
++export async function startQaServer({ entry = "tools/dev-server.mjs", port = 0, timeout = 10000 } = {}) {
++  const child = spawn(process.execPath, [path.resolve(root, entry)], {
++    cwd: root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
++    env: { ...process.env, PROGRESS_BOARD_PORT: String(port), PROGRESS_BOARD_QA_MODE: "1", PROGRESS_GEMINI_API_KEY: "", PROGRESS_AI_FREE_TIER_CONFIRMED: "false" },
++  });
++  const close = async () => {
++    if (child.exitCode !== null || child.signalCode !== null) return;
++    const exited = once(child, "exit").catch(() => {});
++    child.kill();
++    await exited;
++  };
++  try {
++    const origin = await new Promise((resolve, reject) => {
++      let output = "", errorOutput = "";
++      const timer = setTimeout(() => reject(new Error("QA_SERVER_TIMEOUT: ローカルQAサーバーが起動しませんでした。")), timeout);
++      child.stderr.on("data", data => { errorOutput = (errorOutput + data).slice(-2000); });
++      child.stdout.on("data", data => {
++        output += data;
++        const match = output.match(/Production board: (http:\/\/127\.0\.0\.1:\d+)/);
++        if (match) { clearTimeout(timer); resolve(match[1]); }
++      });
++      child.once("error", error => { clearTimeout(timer); reject(new Error(`QA_SERVER_START_FAILED: ${error.message}`)); });
++      child.once("exit", code => { clearTimeout(timer); reject(new Error(`QA_SERVER_START_FAILED: exit ${code}; ${errorOutput}`)); });
++    });
++    const response = await fetch(`${origin}/src/index.html`, { signal: AbortSignal.timeout(timeout) });
++    if (!response.ok) throw new Error(`QA_SERVER_NOT_READY: HTTP ${response.status}`);
++    return { origin, close };
++  } catch (error) { await close(); throw error; }
++}
++
++export async function qaBaseUrl(defaultPath = "/src/index.html") {
++  if (process.env.PROGRESS_BOARD_QA_URL) return validateQaUrl(process.env.PROGRESS_BOARD_QA_URL).href;
++  ownedServer ||= startQaServer();
++  return (await ownedServer).origin + defaultPath;
++}
++
++async function secureContext(context, origin) {
++  await context.route("**/*", route => {
++    const url = new URL(route.request().url());
++    if (["data:", "blob:"].includes(url.protocol) || url.origin === origin) return route.continue();
++    if (/^https:\/\/fonts\.(googleapis|gstatic)\.com\//.test(url.href)) return route.fulfill({ status: 200, contentType: "text/css", body: "" });
++    return route.abort("blockedbyclient");
++  });
++  return context;
++}
++
++// Legacy QA retains its scenarios while sharing browser installation, server,
++// isolation and the network boundary. No personal executable/runtime paths.
++export const chromium = {
++  async launch(options = {}) {
++    const origin = validateQaUrl(await qaBaseUrl()).origin;
++    let browser;
++    try { browser = await playwrightChromium.launch({ headless: true, ...options }); }
++    catch (error) {
++      await closeOwnedServer();
++      const code = /Executable doesn't exist/.test(error.message) ? "QA_BROWSER_MISSING: npm run qa:install でChromiumを導入してください。" : "QA_BROWSER_START_FAILED";
++      throw new Error(`${code}\n${error.message}`);
++    }
++    const createContext = async options => secureContext(await browser.newContext({ serviceWorkers: "block", ...options }), origin);
++    return new Proxy(browser, { get(target, key) {
++      if (key === "newContext") return createContext;
++      if (key === "newPage") return async options => (await createContext(options)).newPage();
++      if (key === "close") return async () => {
++        try { await browser.close(); }
++        finally { await closeOwnedServer(); }
++      };
++      const value = Reflect.get(target, key);
++      return typeof value === "function" ? value.bind(target) : value;
++    } });
++  },
++};
++
++export async function selectQaView(page, name) {
++  const button = page.locator(`[data-view="${name}"]`);
++  if (!await button.isVisible()) await page.locator('[data-action="toggle-nav"]').click();
++  await button.click();
++  await page.locator(`[data-view-panel="${name}"]`).waitFor({ state: "visible" });
++}
++
++export async function waitForQaReady(page) {
++  await page.waitForFunction(() => !document.body.classList.contains("is-starting") && /デモ|ローカル/.test(document.querySelector("#connection-label")?.textContent || ""));
++}
++
++export async function runBrowserQa(name, scenario, { paths = ["/src/index.html", "/dist/Index.html"] } = {}) {
++  const output = path.resolve(root, "output/browser-qa", `${name}-${new Date().toISOString().replace(/[:.]/g, "-")}`);
++  await mkdir(output, { recursive: true });
++  const report = { suite: name, localDemoOnly: true, results: [], output };
++  let browser;
++  try {
++    if (process.env.PROGRESS_BOARD_QA_URL) validateQaUrl(process.env.PROGRESS_BOARD_QA_URL);
++    if (paths.some(file => file.startsWith("/dist/"))) {
++      const build = spawnSync(process.execPath, ["tools/build-apps-script.mjs"], { cwd: root, encoding: "utf8", windowsHide: true });
++      if (build.status !== 0) throw new Error(`QA_BUILD_FAILED: ${build.stderr || build.error || build.stdout}`);
++    }
++    const base = new URL(await qaBaseUrl());
++    browser = await chromium.launch();
++    for (const file of paths) {
++      const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "ja-JP", timezoneId: "Asia/Tokyo" });
++      const label = file.startsWith("/dist/") ? "bundle" : "source";
++      const errors = [];
++      context.on("page", page => page.on("pageerror", error => errors.push(error.message)));
++      await context.tracing.start({ screenshots: true, snapshots: true });
++      const page = await context.newPage();
++      page.setDefaultTimeout(10000);
++      try {
++        await page.goto(new URL(file, base.origin).href, { waitUntil: "domcontentloaded" });
++        await waitForQaReady(page);
++        await scenario({ page, context, output, label, origin: base.origin });
++        if (errors.length) throw new Error(`QA_PAGE_ERRORS: ${errors.join("; ")}`);
++        report.results.push({ target: file, passed: true });
++      } catch (error) {
++        report.results.push({ target: file, passed: false, error: error.message });
++        await page.screenshot({ path: path.join(output, `${label}-failure.png`), fullPage: true }).catch(() => {});
++        process.exitCode = 1;
++      } finally {
++        await context.tracing.stop({ path: path.join(output, `${label}-trace.zip`) });
++        await context.close();
++      }
++    }
++  } catch (error) { report.error = error.message; process.exitCode = 1; }
++  finally {
++    if (browser) await browser.close();
++    else await closeOwnedServer();
++    await writeFile(path.join(output, "report.json"), JSON.stringify(report, null, 2));
++    console.log(JSON.stringify(report, null, 2));
++  }
++  return report;
++}
+--- /dev/null
++++ b/tools/browser-smoke.mjs
+@@ -0,0 +1,38 @@
++import assert from "node:assert/strict";
++import path from "node:path";
++import { runBrowserQa, selectQaView, waitForQaReady } from "./browser-runtime.mjs";
++
++await runBrowserQa("smoke", async ({ page, output, label }) => {
++  assert.equal(await page.locator('[data-view-panel="orders"]').isVisible(), true);
++  for (const view of ["dashboard", "completed", "distribution", "polishing", "materials", "finishedStock", "intake", "settings", "orders"]) {
++    await selectQaView(page, view);
++  }
++  await page.locator('[data-action="new-order"]').first().click();
++  const form = page.locator("#order-form");
++  await form.locator('[name="customer"]').fill("回帰QA");
++  await form.locator('[name="product"]').fill("鋭匙鉗子 21cm 直 4mm");
++  await form.locator('[name="quantity"]').fill("3");
++  await form.locator('[name="serialNo"]').fill("QA-SMOKE");
++  await form.locator('[name="note"]').fill("合成データ 保存と再読込");
++  await form.getByRole("button", { name: "注文情報を保存", exact: true }).click();
++  await page.locator("#order-dialog").waitFor({ state: "hidden" });
++  await page.waitForFunction(() => JSON.parse(localStorage.getItem("production-board-demo-v2")).jobs.some(job => job.serialNo === "QA-SMOKE"));
++  await page.reload(); await waitForQaReady(page);
++  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("production-board-demo-v2")).jobs.find(job => job.serialNo === "QA-SMOKE"));
++  assert.equal(saved.note, "合成データ 保存と再読込");
++  await page.locator(`[data-action="open-process"][data-order-id="${saved.id}"][data-stage-key="welding"]`).first().click();
++  const row = page.locator('#process-form .stage-edit-row[data-stage-key="welding"]');
++  await row.locator('[data-status="working"]').click();
++  await row.locator('[data-assignee="豊"]').click();
++  await page.locator("#process-form").getByRole("button", { name: "工程を保存", exact: true }).click();
++  await page.locator("#process-dialog").waitFor({ state: "hidden" });
++  await page.waitForFunction(id => JSON.parse(localStorage.getItem("production-board-demo-v2")).jobs.find(job => job.id === id)?.stages.welding.assignee === "豊", saved.id);
++  await page.reload(); await waitForQaReady(page);
++  const reloaded = await page.evaluate(id => JSON.parse(localStorage.getItem("production-board-demo-v2")).jobs.find(job => job.id === id), saved.id);
++  assert.equal(reloaded.stages.welding.status, "working");
++  assert.equal(reloaded.stages.welding.assignee, "豊");
++  assert.equal(reloaded.note, saved.note);
++  await page.setViewportSize({ width: 768, height: 1024 });
++  await page.screenshot({ path: path.join(output, `${label}-tablet.png`), fullPage: true });
++  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
++});
+--- a/tools/bulk-intake-qa.mjs
++++ b/tools/bulk-intake-qa.mjs
+@@ -2 +1,0 @@
+-import { createRequire } from "node:module";
+@@ -4,3 +3,2 @@
+-const require = createRequire(import.meta.url);
+-const { chromium } = require("C:/Users/kurom/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright");
+-const browser = await chromium.launch({ headless: true, executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe" });
++import { chromium, qaBaseUrl } from "./browser-runtime.mjs";
++const browser = await chromium.launch({ headless: true });
+@@ -15 +13 @@
+-  await page.goto(process.env.PROGRESS_BOARD_QA_URL || "http://127.0.0.1:4177/dist/Index.html", { waitUntil: "networkidle" });
++  await page.goto(await qaBaseUrl("/dist/Index.html"), { waitUntil: "networkidle" });
+--- a/tools/customer-rules-qa.mjs
++++ b/tools/customer-rules-qa.mjs
+@@ -2 +1,0 @@
+-import { createRequire } from "node:module";
+@@ -4,3 +3,2 @@
+-const require = createRequire(import.meta.url);
+-const { chromium } = require("C:/Users/kurom/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright");
+-const browser = await chromium.launch({ headless: true, executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe" });
++import { chromium, qaBaseUrl } from "./browser-runtime.mjs";
++const browser = await chromium.launch({ headless: true });
+@@ -20 +18 @@
+-  await page.goto(process.env.PROGRESS_BOARD_QA_URL || "http://127.0.0.1:4179/dist/Index.html", { waitUntil: "networkidle" });
++  await page.goto(await qaBaseUrl("/dist/Index.html"), { waitUntil: "networkidle" });
+--- a/tools/dev-server.mjs
++++ b/tools/dev-server.mjs
+@@ -11,0 +12 @@
++const qaMode = process.env.PROGRESS_BOARD_QA_MODE === "1";
+@@ -46,0 +48,4 @@
++      if (qaMode && ["/api/local/parse-order-ai", "/api/local/diagnose-ai"].includes(url.pathname)) {
++        sendJson(response, 403, { error: "QAでは外部AIを呼び出せません。合成応答を使用してください。" });
++        return;
++      }
+@@ -54 +59 @@
+-      sendJson(response, 200, localAiStatus());
++      sendJson(response, 200, qaMode ? { configured: false, ready: false } : localAiStatus());
+@@ -57,0 +63 @@
++      if (qaMode) { sendJson(response, 200, { scriptEditorUrl: "" }); return; }
+@@ -71,0 +78 @@
++        if (qaMode && input.engine === "ai") throw new Error("QAでは外部AIを呼び出せません。合成応答を使用してください。");
+@@ -113,0 +121 @@
++    if (qaMode && (!/^\/(?:src\/|dist\/|tests\/fixtures\/|node_modules\/pdfjs-dist\/|tokens\.css$)/.test(requested) || requested.split(/[\\/]/).some(part => part === ".."))) throw new Error("not a QA asset");
+@@ -128 +136 @@
+-  console.log(`Production board: http://127.0.0.1:${port}`);
++  console.log(`Production board: http://127.0.0.1:${server.address().port}`);
+--- a/tools/intake-delete-qa.mjs
++++ b/tools/intake-delete-qa.mjs
+@@ -2 +1,0 @@
+-import { createRequire } from "node:module";
+@@ -4,3 +3,2 @@
+-const require = createRequire(import.meta.url);
+-const { chromium } = require("C:/Users/kurom/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright");
+-const browser = await chromium.launch({ headless: true, executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe" });
++import { chromium, qaBaseUrl } from "./browser-runtime.mjs";
++const browser = await chromium.launch({ headless: true });
+@@ -16 +14 @@
+-  await page.goto(process.env.PROGRESS_BOARD_QA_URL || "http://127.0.0.1:4178/dist/Index.html", { waitUntil: "networkidle" });
++  await page.goto(await qaBaseUrl("/dist/Index.html"), { waitUntil: "networkidle" });
+--- a/tools/polishing-browser-qa.mjs
++++ b/tools/polishing-browser-qa.mjs
+@@ -2,2 +1,0 @@
+-import { createRequire } from "node:module";
+-import { homedir } from "node:os";
+@@ -5,0 +4 @@
++import { chromium, qaBaseUrl } from "./browser-runtime.mjs";
+@@ -7,2 +5,0 @@
+-const require = createRequire(import.meta.url);
+-const { chromium } = require(path.join(homedir(), ".cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright"));
+@@ -11 +8 @@
+-const browser = await chromium.launch({ headless: true, executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe" });
++const browser = await chromium.launch({ headless: true });
+@@ -29 +26 @@
+-  await page.goto(process.env.PROGRESS_BOARD_QA_URL || "http://127.0.0.1:4173", { waitUntil: "domcontentloaded" });
++  await page.goto(await qaBaseUrl("/src/index.html"), { waitUntil: "domcontentloaded" });
+@@ -36,4 +33 @@
+-  await page.locator('[data-stage-key="finish"] [data-status="done"]').click();
+-  await page.locator("#process-form button[type='submit']").click();
+-  assert.equal(await page.locator("#process-dialog").evaluate((element) => element.open), true);
+-  assert.match(await page.locator("#toast-stack").innerText(), /全数戻るまで/);
++  assert.equal(await page.locator('#process-form [data-stage-key="finish"] [data-status="done"]:enabled').count(), 0, "全数戻り前は最終仕上げの完了操作を提供しない");
+@@ -52 +46,4 @@
+-  await page.waitForFunction(() => document.querySelector("#polishing-workspace").textContent.includes("対象の製品はありません"));
++  await page.waitForFunction(() => ["DEMO-001", "DEMO-002"].every(id => {
++    const job = JSON.parse(localStorage.getItem("production-board-demo-v2")).jobs.find(job => job.id === id);
++    return job.polishing.returnedQuantity === job.polishing.sentQuantity;
++  }));
+@@ -76,0 +74 @@
++  await page.waitForFunction(() => JSON.parse(localStorage.getItem("production-board-demo-v2")).jobs.find(job => job.id === "DEMO-004").polishing.sentQuantity === 0);
+--- a/tools/project-link-qa.mjs
++++ b/tools/project-link-qa.mjs
+@@ -2,5 +2,3 @@
+-import { createRequire } from "node:module";
+-import { readFile, mkdir } from "node:fs/promises";
+-const require = createRequire(import.meta.url);
+-const { chromium } = require("C:/Users/kurom/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright");
+-const { scriptId } = JSON.parse(await readFile(".clasp.json", "utf8"));
++import { mkdir } from "node:fs/promises";
++import { chromium, qaBaseUrl } from "./browser-runtime.mjs";
++const scriptId = "synthetic-qa-script";
+@@ -8 +6 @@
+-const browser = await chromium.launch({ executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe", headless: true });
++const browser = await chromium.launch({ headless: true });
+@@ -11,0 +10 @@
++await context.route("**/api/local/project-info", (route) => route.fulfill({ json: { scriptEditorUrl: expected } }));
+@@ -16 +15 @@
+-const url = process.env.PROGRESS_BOARD_QA_URL || "http://127.0.0.1:4175/dist/Index.html";
++const url = await qaBaseUrl("/dist/Index.html");
+@@ -46 +45 @@
+-  console.log("Project link QA PASS: correct .clasp target, separate tab (navigation mocked), invalid URL hidden, 320/768/1280px, no page errors.");
++  console.log("Project link QA PASS: synthetic project target, separate tab (navigation mocked), invalid URL hidden, 320/768/1280px, no page errors.");
+--- a/tools/review-fixes-qa.mjs
++++ b/tools/review-fixes-qa.mjs
+@@ -4 +4 @@
+-import { createRequire } from "node:module";
++import { chromium, qaBaseUrl } from "./browser-runtime.mjs";
+@@ -7,2 +7,2 @@
+-const ORIGIN = "http://127.0.0.1:4199";
+-const URL = `${ORIGIN}/src/index.html`;
++const pageUrl = await qaBaseUrl("/src/index.html");
++const ORIGIN = new globalThis.URL(pageUrl).origin;
+@@ -11,2 +10,0 @@
+-const require = createRequire(import.meta.url);
+-const { chromium } = require("C:/Users/okino/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright");
+@@ -214 +212 @@
+-  browser = await chromium.launch({ executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe", headless: true });
++  browser = await chromium.launch({ headless: true });
+@@ -223 +221 @@
+-  await page.goto(URL, { waitUntil: "networkidle" });
++  await page.goto(pageUrl, { waitUntil: "networkidle" });
+@@ -351 +349 @@
+-      await second.goto(URL, { waitUntil: "networkidle" });
++      await second.goto(pageUrl, { waitUntil: "networkidle" });
+@@ -603 +601 @@
+-  const report = { localUrl: URL, isolatedContext: true, productionRequests: false, generatedAt: new Date().toISOString(), passed, failed, runtimeErrors, results, screenshots: shots };
++  const report = { localUrl: pageUrl, isolatedContext: true, productionRequests: false, generatedAt: new Date().toISOString(), passed, failed, runtimeErrors, results, screenshots: shots };
+@@ -605 +603 @@
+-  const lines = ["# 5点修正の実ブラウザー回帰確認", "", `ローカル専用: ${URL}`, "", "Googleへのアクセスと本番書き込みは行っていません。Chrome の専用 context と専用ポートのデモ localStorage を使用しました。", "", `成功 ${passed}件 / 失敗 ${failed}件。`, "", ...results.map((item) => `- ${item.pass ? "成功" : "失敗"}: ${item.name}${item.pass ? "" : ` — ${item.error.split("\n")[0]}`}`), "", "日付の幅・フォントと文字／アイコンの必要幅、品名全文・備考 textarea、閉じた後の編集保持を DOM と実画面で確認しました。guidance の実効 oklch 色は canvas で sRGB に変換して測定しました。", "", "権限別の Google 認証、Sheets 永続化、Apps Script のロック、実機タッチ・実紙印刷はこのローカル QA の対象外です。", "", ...shots.map((file) => `![${file}](${file})`)];
++  const lines = ["# 5点修正の実ブラウザー回帰確認", "", `ローカル専用: ${pageUrl}`, "", "Googleへのアクセスと本番書き込みは行っていません。Chrome の専用 context と専用ポートのデモ localStorage を使用しました。", "", `成功 ${passed}件 / 失敗 ${failed}件。`, "", ...results.map((item) => `- ${item.pass ? "成功" : "失敗"}: ${item.name}${item.pass ? "" : ` — ${item.error.split("\n")[0]}`}`), "", "日付の幅・フォントと文字／アイコンの必要幅、品名全文・備考 textarea、閉じた後の編集保持を DOM と実画面で確認しました。guidance の実効 oklch 色は canvas で sRGB に変換して測定しました。", "", "権限別の Google 認証、Sheets 永続化、Apps Script のロック、実機タッチ・実紙印刷はこのローカル QA の対象外です。", "", ...shots.map((file) => `![${file}](${file})`)];
+--- a/tools/text-import-qa.mjs
++++ b/tools/text-import-qa.mjs
+@@ -2 +1,0 @@
+-import { createRequire } from "node:module";
+@@ -4,3 +3,2 @@
+-const require = createRequire(import.meta.url);
+-const { chromium } = require("C:/Users/kurom/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright");
+-const browser = await chromium.launch({ headless: true, executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe" });
++import { chromium, qaBaseUrl } from "./browser-runtime.mjs";
++const browser = await chromium.launch({ headless: true });
+@@ -21 +19 @@
+-  await page.goto(process.env.PROGRESS_BOARD_QA_URL || "http://127.0.0.1:4177/dist/Index.html", { waitUntil: "networkidle" });
++  await page.goto(await qaBaseUrl("/dist/Index.html"), { waitUntil: "networkidle" });
