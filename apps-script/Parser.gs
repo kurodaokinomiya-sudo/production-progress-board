@@ -4,18 +4,28 @@ function parseOrderText_(text, context) {
   var result = {
     customer: extractLabeledValue_(source, ["得意先", "客先", "顧客名", "発注元", "注文元", "会社名"]),
     product: extractLabeledValue_(source, ["品名", "商品名", "製品名", "器具名", "注文品"]),
+    productCode: extractLabeledValue_(source, ["製品番号", "品番", "商品番号", "製品コード"]),
     dueDate: normalizeDate_(extractLabeledValue_(source, ["納期", "希望納期", "希望日", "出荷予定日", "納品日"])),
     quantity: parseQuantity_(extractLabeledValue_(source, ["数量", "注文数", "個数", "本数"])),
-    serialNo: extractLabeledValue_(source, ["連番", "製造番号", "管理番号", "品番", "型番"]),
+    serialNo: extractLabeledValue_(source, ["連番", "製造番号", "管理番号"]),
+    externalOrderNo: extractLabeledValue_(source, ["注文番号", "発注番号", "購入番号", "注文書番号", "発注書番号"]),
+    externalLineNo: extractLabeledValue_(source, ["注文明細番号", "発注明細番号", "明細番号", "明細No"]),
     specLength: extractLabeledValue_(source, ["全長", "長さ"]),
     specShape: extractLabeledValue_(source, ["型", "形状", "曲がり"]),
     bladeWidth: extractLabeledValue_(source, ["刃幅", "刃巾", "幅"]),
     note: extractLabeledValue_(source, ["備考", "特記事項", "注意事項"])
   };
 
+  var quantitySuffix = quantityDateCustomer_(source);
+  if (quantitySuffix && (!result.dueDate || !result.customer)) {
+    if (!result.dueDate) result.dueDate = quantitySuffix.dueDate;
+    if (!result.customer) result.customer = quantitySuffix.customer;
+    result._parseWarnings = ["数量の後ろの日付を納期、末尾の名称を得意先として読み取りました。原文と確認してください。"];
+  }
   if (!result.customer && context.sender) result.customer = senderDisplayName_(context.sender);
   if (!result.product && context.subject) result.product = productFromSubject_(context.subject);
   separateImportedProductCode_(result);
+  result.product = cleanTanakaImportedProductName_(result.product, result.customer);
 
   var inferred = inferSpecsFromProductName_(result.product, result);
   result.specLength = inferred.specLength;
@@ -88,11 +98,37 @@ function splitLeadingProductCode_(value) {
 
 function separateImportedProductCode_(parsed) {
   var split = splitLeadingProductCode_(parsed.product);
+  if (!split.catalogCode) {
+    var trailing = String(split.product || "").match(/^(.+?)\s+([A-Z]{2,4}[-]?\d{3,6}[A-Z]?)$/i);
+    if (trailing) split = { product: trailing[1].trim(), catalogCode: trailing[2].toUpperCase() };
+  }
   parsed.product = split.product;
-  if (split.catalogCode && String(parsed.note || "").indexOf(split.catalogCode) < 0) {
-    parsed.note = [parsed.note, "品番: " + split.catalogCode].filter(Boolean).join(" / ");
+  if (!String(parsed.productCode || "").trim()) parsed.productCode = split.catalogCode;
+  var code = String(parsed.productCode || "").trim();
+  if (code && parsed.note) {
+    var legacyCode = new RegExp("(?:^|\\s*\\/\\s*)品番\\s*[:：]\\s*" + escapeRegExp_(code) + "(?=\\s*(?:\\/|$))", "i");
+    parsed.note = String(parsed.note).replace(legacyCode, "").replace(/^\s*\/\s*|\s*\/\s*$/g, "").replace(/\s*\/\s*\/\s*/g, " / ").trim();
   }
   return parsed;
+}
+
+/** Remove only known trailing annotations used by Tanaka, preserving dimensions and other model text. */
+function cleanTanakaImportedProductName_(product, customer) {
+  var value = String(product || "");
+  var normalizedCustomer = String(customer || "").normalize("NFKC").replace(/[\s　]/g, "");
+  normalizedCustomer = normalizedCustomer.replace(/^株式会社/, "");
+  if (!/^田中(?:医科(?:器械)?(?:製作所)?|製作所)?$/.test(normalizedCustomer)) return value;
+
+  // Tanaka order forms append an internal JS07 code after the direction/model.
+  // Strip only recognized terminal annotation tokens. Loop so either order and
+  // repeated forms (including a parenthesized TM marker) are handled safely.
+  var previous;
+  do {
+    previous = value;
+    value = value.replace(/[\s]*[（(]?[TＴ][MＭ]\s*対象[）)]?\s*$/i, "");
+    value = value.replace(/[\s]*[:：][\s]*[JjＪｊ][SsＳｓ][0-9０-９]{2}[\-－‐‑–−][0-9０-９]{3}[\-－‐‑–−][A-ZＡ-Ｚ0-9０-９]+(?:[\-－‐‑–−][A-ZＡ-Ｚ0-9０-９]+)?\s*$/i, "");
+  } while (value !== previous);
+  return value.trim();
 }
 
 function splitTcProductLine_(value) {
@@ -111,7 +147,6 @@ function splitTcProductLine_(value) {
   }
   product = product.replace(/\s*([<>/:])\s*/g, "$1").replace(/\s+/g, " ").trim();
   var notes = [];
-  if (catalogCode) notes.push("品番: " + catalogCode);
   if (inlineNote) notes.push(inlineNote);
   return { product: product, catalogCode: catalogCode, note: notes.join(" / ") };
 }
@@ -203,11 +238,15 @@ function parseTcPurchaseOrderItems_(text, context) {
       dueDate: row.dueDate || dueDates[rowIndex] || fallbackDueDate,
       quantity: row.quantity !== "" ? row.quantity : (quantities[rowIndex] === undefined ? "" : quantities[rowIndex]),
       serialNo: serialBase + "-" + row.number,
+      externalOrderNo: "TC_" + purchaseNo[1] + "_" + purchaseNo[2],
+      externalLineNo: String(row.number),
       specLength: "",
       specShape: "",
       bladeWidth: "",
-      note: productLine.note
+      note: productLine.note,
+      productCode: productLine.catalogCode
     };
+    parsed.product = cleanTanakaImportedProductName_(parsed.product, parsed.customer);
     var inferred = inferSpecsFromProductName_(parsed.product, parsed);
     parsed.specLength = inferred.specLength;
     parsed.specShape = inferred.specShape;
@@ -238,7 +277,8 @@ function escapeRegExp_(value) {
 }
 
 function extractLabeledValue_(text, labels) {
-  var labelPattern = labels.map(escapeRegExp_).join("|");
+  var spacedLabel = function(label) { return label.split("").map(escapeRegExp_).join("[ \\t]*"); };
+  var labelPattern = labels.map(spacedLabel).join("|");
   var linePattern = new RegExp("(?:^|\\n)\\s*(?:" + labelPattern + ")\\s*[:：]?\\s*([^\\n]{1,160})", "i");
   var match = text.match(linePattern);
   if (!match) {
@@ -246,7 +286,24 @@ function extractLabeledValue_(text, labels) {
     match = text.match(inlinePattern);
   }
   if (!match) return "";
-  return match[1].replace(/\s*(?:よろしく|以上|です|となります)[。.]?$/i, "").trim();
+  var nextLabels = ["得意先", "客先", "発注元", "注文元", "会社名", "品名", "商品名", "製品名", "器具名", "注文品", "製品番号", "品番", "商品番号", "製品コード", "納期", "希望納期", "希望日", "数量", "注文数", "個数", "本数", "連番", "製造番号", "管理番号", "注文番号", "発注番号", "全長", "長さ", "型", "形状", "刃幅", "刃巾", "備考", "特記事項", "注意事項"];
+  var boundary = new RegExp("\\s+(?:" + nextLabels.map(spacedLabel).join("|") + ")\\s*[:：]", "i");
+  return match[1].split(boundary)[0].replace(/\s*(?:よろしく|以上|です|となります)[。.]?$/i, "").trim();
+}
+
+// Compact pasted order format: 数 量:10丁 (2026/8/26) 松井.
+// Only this explicit quantity/date/name sequence is accepted; unrelated dates
+// and staff/remark labels never become an unlabeled delivery date or customer.
+function quantityDateCustomer_(source) {
+  var pattern = /(?:数\s*量|注文数|個数|本数)\s*[:：]\s*[0-9][0-9,]*(?:\.\d+)?\s*(?:丁|本|個|台|組|セット)?\s*\(\s*(20\d{2}\s*[年\/-]\s*\d{1,2}\s*[月\/-]\s*\d{1,2}\s*日?)\s*\)\s*([^\n():：]{1,60})(?=\n|$)/g;
+  var found = [], match;
+  while ((match = pattern.exec(source)) !== null) {
+    var customer = match[2].trim(), dueDate = normalizeDate_(match[1]);
+    if (!dueDate || !customer || /(?:担当|受注|注文日|発注日|納期|希望日|備考|特記|注意|至急|よろしく|以上)/.test(customer)) continue;
+    found.push({ customer: customer, dueDate: dueDate });
+  }
+  if (found.length !== 1) return null;
+  return found[0];
 }
 
 function parseQuantity_(value) {
@@ -344,6 +401,8 @@ function labeledMeasurement_(text, labels) {
 
 function inferShapeFromProductName_(text) {
   var compact = String(text || "").replace(/\s+/g, "");
+  var compound = compact.match(/((?:強|弱)[弯湾彎])[・/、,\-]*(上向(?:き)?|下向(?:き)?)/);
+  if (compound) return compound[1].replace(/[湾彎]/g, "弯") + "・" + compound[2].replace(/き$/, "");
   var jawMatch = compact.match(/[<〈]([^<>〈〉]{1,20}爪)[>〉]/);
   if (jawMatch) return jawMatch[1];
   if (/上向(?:き)?左(?:カーブ|曲)/.test(compact)) return "上曲左";

@@ -10,7 +10,7 @@ const purchaseOrder = await readFile(new URL("./fixtures/tanaka-tc-purchase-orde
 test("複数品目PDFを6件の重複しない取込候補として保存する", () => {
   const saved = [];
   const logs = [];
-  const context = vm.createContext({
+  const context = vm.createContext({ requireAppAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireAdminAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireEditorAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireOwnerAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), getAccessSettings: () => ({emails: [], version: 1}),
     Date,
     Math,
     Number,
@@ -56,7 +56,7 @@ test("複数品目PDFを6件の重複しない取込候補として保存する"
 
 test("ブラウザで抽出したPDF文字列もOCRを経由せず6件保存する", () => {
   const saved = [];
-  const context = vm.createContext({
+  const context = vm.createContext({ requireAppAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireAdminAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireEditorAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireOwnerAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), getAccessSettings: () => ({emails: [], version: 1}),
     Date,
     Math,
     Number,

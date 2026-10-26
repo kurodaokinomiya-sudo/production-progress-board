@@ -4,10 +4,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseLocalOrderPdf } from "./local-pdf-parser.mjs";
 import { parseLocalOrderText } from "./local-text-parser.mjs";
+import { localProductMetadata } from "./local-product-master.mjs";
 import { localAiStatus, parseLocalOrderAi, diagnoseLocalAi } from "./local-ai-import.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const port = Number(process.env.PROGRESS_BOARD_PORT || 4173);
+const qaMode = process.env.PROGRESS_BOARD_QA_MODE === "1";
 const mime = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -43,12 +45,22 @@ const server = createServer(async (request, response) => {
         sendJson(response, 403, { error: "ローカル画面から実行してください。" });
         return;
       }
+      if (qaMode && ["/api/local/parse-order-ai", "/api/local/diagnose-ai"].includes(url.pathname)) {
+        sendJson(response, 403, { error: "QAでは外部AIを呼び出せません。合成応答を使用してください。" });
+        return;
+      }
+    }
+    if (request.method === "POST" && url.pathname === "/api/local/product-metadata") {
+      const input = await readJsonBody(request);
+      sendJson(response, 200, await localProductMetadata(input));
+      return;
     }
     if (request.method === "GET" && url.pathname === "/api/local/ai-status") {
-      sendJson(response, 200, localAiStatus());
+      sendJson(response, 200, qaMode ? { configured: false, ready: false } : localAiStatus());
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/local/project-info") {
+      if (qaMode) { sendJson(response, 200, { scriptEditorUrl: "" }); return; }
       try {
         const config = JSON.parse(await readFile(path.join(root, ".clasp.json"), "utf8"));
         const id = String(config.scriptId || "");
@@ -63,6 +75,7 @@ const server = createServer(async (request, response) => {
       }
       try {
         const input = await readJsonBody(request, 512 * 1024, "本文は30000文字以下にしてください。");
+        if (qaMode && input.engine === "ai") throw new Error("QAでは外部AIを呼び出せません。合成応答を使用してください。");
         sendJson(response, 200, await parseLocalOrderText(input));
       } catch (error) {
         sendJson(response, 400, { error: error.message || "本文を解析できませんでした。" });
@@ -105,6 +118,7 @@ const server = createServer(async (request, response) => {
       return;
     }
     const requested = decodeURIComponent(url.pathname);
+    if (qaMode && (!/^\/(?:src\/|dist\/|tests\/fixtures\/|node_modules\/pdfjs-dist\/|tokens\.css$)/.test(requested) || requested.split(/[\\/]/).some(part => part === ".."))) throw new Error("not a QA asset");
     const target = path.resolve(root, `.${requested}`);
     if (!target.startsWith(root + path.sep)) throw new Error("outside workspace");
     const info = await stat(target);
@@ -119,5 +133,5 @@ const server = createServer(async (request, response) => {
 });
 
 server.listen(port, "127.0.0.1", () => {
-  console.log(`Production board: http://127.0.0.1:${port}`);
+  console.log(`Production board: http://127.0.0.1:${server.address().port}`);
 });

@@ -7,6 +7,7 @@ dist/
 
 # Local QA, browser state, release audits, and generated evidence
 output/
+tmp/
 .playwright-cli/
 .tmp-clasp-audit/
 .hallmark/
@@ -21,3 +22,4 @@ output/
 Thumbs.db
 *.swp
 npm-debug.log*
+__pycache__/

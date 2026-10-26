@@ -1,4 +1,5 @@
 function createIntakeFromImage(input) {
+  requireEditorAccess_();
   ensureSystem_();
   if (!input || !input.base64 || !input.mimeType) throw new Error("画像データがありません。");
   if (!["image/jpeg", "image/png", "image/gif", "image/bmp", "image/webp", "application/pdf"].includes(input.mimeType)) {
@@ -13,6 +14,7 @@ function createIntakeFromImage(input) {
 }
 
 function createIntakeFromPdfText(input) {
+  requireEditorAccess_();
   ensureSystem_();
   if (!input || input.mimeType !== "application/pdf") throw new Error("PDFデータがありません。");
   var text = String(input.text || "").trim();
@@ -26,6 +28,7 @@ function createIntakeFromPdfText(input) {
  * 本文は保存時に原文を渡し、AIでも同じ確認キューを経由する。
  */
 function createIntakeFromText(input) {
+  requireEditorAccess_();
   var validated = validateTextIntakeInput_(input);
   ensureSystem_();
   var saveInput = { name: validated.name, sourceType: "text" };
@@ -98,12 +101,19 @@ function saveParsedIntake_(parsedResults, text, input) {
   var fileName = sanitizeText_(input.name, 200);
   var sourceType = input.sourceType || "image";
   var items = withDocumentLock_(function() {
+    var learningRules = typeof readIntakeLearningRules_ === "function" ? readIntakeLearningRules_() : [];
     return parsedResults.map(function(parsedResult, index) {
       var itemNumber = parsedResult.itemNumber || index + 1;
       var multiItem = parsedResults.length > 1;
       var sourceRef = sourceType === "text"
         ? "paste:" + batchId + (multiItem ? ":item:" + itemNumber : "") + ":" + (fileName || "pasted-text")
         : "upload:" + batchId + (multiItem ? ":item:" + itemNumber : "") + ":" + fileName;
+      // Each upload remains a separate review candidate. Keep available source
+      // identities so approval can compare repeat uploads across routes.
+      var parsed = parsedResult.parsed || {};
+      if (!parsed.externalOrderNo && parsedResult.purchaseNo) parsed.externalOrderNo = sanitizeText_(parsedResult.purchaseNo, 240);
+      if (!parsed.externalLineNo && parsedResult.purchaseNo && parsedResult.itemNumber) parsed.externalLineNo = String(parsedResult.itemNumber);
+      if (typeof IntakeLearning !== "undefined") parsed = IntakeLearning.apply({ parsed: parsed, rules: learningRules }).parsed;
       return appendIntake_({
         sourceType: sourceType,
         sourceRef: sourceRef,
@@ -111,7 +121,7 @@ function saveParsedIntake_(parsedResults, text, input) {
         sender: "",
         subject: intakeSubject_(fileName, parsedResult, index, parsedResults.length),
         originalText: intakePreviewText_(text, parsedResult, index, parsedResults.length),
-        parsed: parsedResult.parsed,
+        parsed: parsed,
         confidence: parsedResult.confidence,
         status: "pending"
       });
@@ -140,6 +150,7 @@ function intakePreviewText_(text, parsedResult, index, total) {
 }
 
 function scanOrderEmails(input) {
+  requireOwnerAccess_();
   ensureSystem_();
   input = input || {};
   if (input.engine === "ai") return scanOrderEmailsWithAi_(input);
@@ -232,67 +243,149 @@ function ocrBlob_(blob) {
 }
 
 function migrateLegacySheet(input) {
-  ensureSystem_();
-  var sheetName = sanitizeText_(input && input.sheetName, 200);
+  requireOwnerAccess_();
+  input = input || {};
+  var sheetName = sanitizeText_(input.sheetName, 200);
   if (!sheetName) throw new Error("読み込むシート名を入力してください。");
   if (Object.keys(APP.SHEETS).some(function(key) { return APP.SHEETS[key] === sheetName; })) throw new Error("アプリ管理用シートは移行元に指定できません。");
-
-  var spreadsheet = getSpreadsheet_();
-  var source = spreadsheet.getSheetByName(sheetName);
-  if (!source) throw new Error("「" + sheetName + "」シートが見つかりません。");
-  var values = source.getDataRange().getDisplayValues();
-  if (!values.length) return { imported: 0, skipped: 0, sheetName: sheetName };
-
-  var detection = detectLegacyHeaders_(values.slice(0, 6));
-  if (detection.score < 3) throw new Error("見出しを判定できません。得意先・品名・納期などの見出しが上から6行以内にあるか確認してください。");
-  var map = detection.map;
-  if (map.customer === undefined || map.product === undefined) throw new Error("得意先と品名の列を特定できませんでした。");
+  var csvMode = Object.prototype.hasOwnProperty.call(input, "csvText");
+  var dryRun = input.dryRun === true;
+  var sourceIdentity = null;
+  if (csvMode) {
+    if (typeof input.csvText !== "string" || !input.csvText.trim()) throw new Error("読み込むCSVを指定してください。");
+    if (input.csvText.length > 250000) throw new Error("CSVは250000文字以内にしてください。");
+    sourceIdentity = legacyCsvSource_(input.sourceUrl);
+    if (!dryRun && !input.expectedFingerprint) throw new Error("CSVを先にプレビューしてから取り込んでください。");
+  }
 
   return withDocumentLock_(function() {
-    var existingRefs = {};
-    readJobs_().forEach(function(job) { existingRefs[job.sourceRef] = true; });
+    var spreadsheet = getSpreadsheet_();
+    var values;
+    if (csvMode) {
+      try { values = Utilities.parseCsv(input.csvText.replace(/^\uFEFF/, "")); }
+      catch (error) { throw new Error("CSVを読み取れません。CSV形式と引用符を確認してください。"); }
+    } else {
+      var source = spreadsheet.getSheetByName(sheetName);
+      if (!source) throw new Error("「" + sheetName + "」シートが見つかりません。");
+      values = source.getDataRange().getDisplayValues();
+    }
+    var existingJobs = readJobs_();
+    var fingerprint = legacyImportFingerprint_({
+      source: sourceIdentity, sheetName: sheetName, values: values,
+      target: spreadsheet.getId(), existing: existingJobs.map(jobToRow_)
+    });
+    if (input.expectedFingerprint && String(input.expectedFingerprint) !== fingerprint) {
+      throw new Error("プレビュー後に取込元または案件が変更されています。もう一度プレビューしてください。");
+    }
+    var detection = values.length ? detectLegacyHeaders_(values.slice(0, 6)) : { row: -1, score: 0, map: {} };
+    var map = detection.map;
+    if (values.length && detection.score < 3) throw new Error("見出しを判定できません。得意先・品名・納期などの見出しが上から6行以内にあるか確認してください。");
+    if (values.length && (map.customer === undefined || map.product === undefined)) throw new Error("得意先と品名の列を特定できませんでした。");
+    if (csvMode && APP.STAGES.some(function(key) { return map[key] === undefined; })) throw new Error("CSVに溶接・元作り・浮き止め～立ち上がり・厚みとり・仕上げの見出しが必要です。");
+    var mappedHeaders = {};
+    Object.keys(map).forEach(function(key) { mappedHeaders[key] = { column: map[key] + 1, header: String(values[detection.row][map[key]] || "") }; });
+    var existingRefs = Object.create(null);
+    var existingOrders = Object.create(null);
+    existingJobs.forEach(function(job) {
+      if (job.sourceRef) existingRefs[job.sourceRef] = true;
+      if (!job.archived) existingOrders[legacyOrderKey_(job)] = true;
+    });
+    var seenSourceRows = Object.create(null);
     var jobs = [];
     var skipped = 0;
+    var total = 0;
     var now = new Date();
+    var stageColumns = csvMode ? APP.STAGES.map(function(key) { return map[key]; }) : legacyStageColumns_(map);
     for (var rowIndex = detection.row + 1; rowIndex < values.length; rowIndex += 1) {
       var row = values[rowIndex];
       var customer = cellAt_(row, map.customer);
       var product = cellAt_(row, map.product);
-      if (!customer && !product) continue;
-      var sourceRef = "legacy:" + sheetName + ":" + (rowIndex + 1);
-      if (existingRefs[sourceRef]) { skipped += 1; continue; }
-      var stageColumns = legacyStageColumns_(map);
-      var stages = {};
-      APP.STAGES.forEach(function(key, stageIndex) {
-        stages[key] = { status: legacyStageStatus_(cellAt_(row, stageColumns[stageIndex])), assignee: "" };
-      });
-      var shippingText = cellAt_(row, map.shippingStatus);
-      var shippingStatus = /済|完了|出荷済/.test(shippingText) ? "shipped" : /待/.test(shippingText) ? "waiting" : "not_ready";
-      var inputJob = {
-        customer: customer, product: product, dueDate: normalizeDate_(cellAt_(row, map.dueDate), now),
-        quantity: parseQuantity_(cellAt_(row, map.quantity)), specLength: cellAt_(row, map.specLength),
-        specShape: cellAt_(row, map.specShape), bladeWidth: cellAt_(row, map.bladeWidth),
-        serialNo: cellAt_(row, map.serialNo), category: cellAt_(row, map.category), stages: stages, shippingStatus: shippingStatus,
-        note: cellAt_(row, map.note), sourceType: "legacy", sourceRef: sourceRef, priority: "normal"
-      };
-      if (!inputJob.customer) inputJob.customer = "得意先未設定";
-      if (!inputJob.product) inputJob.product = "品名未設定";
-      var migratedJob = normalizeJobInput_(inputJob, null);
-      migratedJob.completedAt = "";
-      migratedJob.labelPrintStatus = "not_required";
-      migratedJob.labelPrintedAt = "";
+      if (legacyStructuralRow_(customer, product)) continue;
+      total += 1;
+      var sourceRow = rowIndex + 1;
+      try {
+        if (!customer || !product) throw new Error("得意先と品名の両方が必要です。");
+        if (map.sourceRow !== undefined) {
+          var sourceRowText = cellAt_(row, map.sourceRow);
+          if (!/^[1-9]\d*$/.test(sourceRowText) || !Number.isSafeInteger(Number(sourceRowText))) throw new Error("元行番号は1以上の整数にしてください。");
+          sourceRow = Number(sourceRowText);
+        }
+        if (seenSourceRows[sourceRow]) throw new Error("元行番号が重複しています。");
+        seenSourceRows[sourceRow] = true;
+        var sourceRef = csvMode
+          ? "legacy:" + sourceIdentity.spreadsheetId + ":" + sourceIdentity.sheetId + ":" + sourceRow
+          : "legacy:" + sheetName + ":" + sourceRow;
+        var stages = {};
+        APP.STAGES.forEach(function(key, stageIndex) {
+          try { stages[key] = legacyStageInput_(cellAt_(row, stageColumns[stageIndex])); }
+          catch (error) { throw new Error("工程「" + key + "」: " + error.message); }
+        });
+        var rawDate = cellAt_(row, map.dueDate);
+        if (csvMode && rawDate && !isValidIsoDate_(rawDate)) throw new Error("CSVの納期はYYYY-MM-DD形式の正しい日付で指定してください。");
+        var dueDate = normalizeDate_(rawDate, now);
+        if (csvMode && rawDate && !dueDate) throw new Error("納期を正しい日付で指定してください。");
+        var rawQuantity = cellAt_(row, map.quantity);
+        if (csvMode && rawQuantity && !/^\d+(?:\.\d+)?$/.test(rawQuantity.normalize("NFKC").replace(/[,，]/g, ""))) throw new Error("数量は0以上の数値で指定してください。");
+        var inputJob = {
+          customer: customer, product: product, productCode: cellAt_(row, map.productCode), dueDate: dueDate,
+          quantity: parseQuantity_(rawQuantity.normalize("NFKC")), specLength: cellAt_(row, map.specLength),
+          specShape: cellAt_(row, map.specShape), bladeWidth: cellAt_(row, map.bladeWidth),
+          serialNo: cellAt_(row, map.serialNo), category: cellAt_(row, map.category), stages: stages,
+          shippingStatus: legacyShippingStatus_(cellAt_(row, map.shippingStatus)),
+          note: cellAt_(row, map.note), sourceType: "legacy", sourceRef: sourceRef, priority: "normal"
+        };
+        var migratedJob = normalizeJobInput_(inputJob, null, { historicalImport: true });
+        if (typeof prepareJobMaterials_ === "function" && typeof MaterialInventory !== "undefined") migratedJob.materials = prepareJobMaterials_(null, migratedJob, null, { baselineOnly: true });
+        if (migratedJob.shippingStatus !== "shipped") migratedJob.completedAt = "";
+        migratedJob.labelPrintStatus = "not_required";
+        migratedJob.labelPrintedAt = "";
+      } catch (error) {
+        throw new Error("元表 " + sourceRow + "行目: " + error.message);
+      }
+      if (existingRefs[sourceRef] || existingOrders[legacyOrderKey_(migratedJob)]) { skipped += 1; continue; }
       jobs.push(migratedJob);
       existingRefs[sourceRef] = true;
     }
-
+    var result = { imported: dryRun ? 0 : jobs.length, skipped: skipped, total: total, sheetName: sheetName,
+      headerRow: detection.row + 1, fingerprint: fingerprint, mappedHeaders: mappedHeaders };
+    if (dryRun) { result.jobs = jobs; return result; }
+    ensureSystem_();
     if (jobs.length) {
       var target = spreadsheet.getSheetByName(APP.SHEETS.JOBS);
-      target.getRange(target.getLastRow() + 1, 1, jobs.length, APP.JOB_HEADERS.length).setValues(jobs.map(jobToRow_));
+      target.getRange(target.getLastRow() + 1, 1, jobs.length, APP.JOB_HEADERS.length).setValues(sheetValues_(jobs.map(jobToRow_)));
       SpreadsheetApp.flush();
     }
-    appendLog_("legacy.migrate", "sheet", sheetName, { imported: jobs.length, skipped: skipped, headerRow: detection.row + 1 });
-    return { imported: jobs.length, skipped: skipped, sheetName: sheetName, headerRow: detection.row + 1 };
+    appendLog_("legacy.migrate", "sheet", sheetName, { imported: jobs.length, skipped: skipped, total: total, headerRow: detection.row + 1,
+      sourceUrl: sourceIdentity ? sourceIdentity.url : "" });
+    return result;
   });
+}
+
+function legacyCsvSource_(value) {
+  var text = String(value || "").trim();
+  var match = text.match(/^https:\/\/docs\.google\.com\/spreadsheets\/d\/([A-Za-z0-9_-]+)\/edit(?:\?[^#\s]*)?(?:#[^\s]*)?$/);
+  var gids = text.match(/[?&#]gid=\d+(?=[&#]|$)/g) || [];
+  if (!match || !gids.length) throw new Error("取込元のGoogleスプレッドシートURL（gid付き）を指定してください。");
+  var sheetId = gids[0].replace(/^[?&#]gid=/, "");
+  if (gids.some(function(gid) { return gid.replace(/^[?&#]gid=/, "") !== sheetId; })) throw new Error("取込元URLのgidが一致していません。");
+  return { spreadsheetId: match[1], sheetId: sheetId, url: "https://docs.google.com/spreadsheets/d/" + match[1] + "/edit?gid=" + sheetId };
+}
+
+function legacyImportFingerprint_(value) {
+  var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, JSON.stringify(value), Utilities.Charset.UTF_8);
+  return digest.map(function(byte) { return ((byte + 256) % 256).toString(16).padStart(2, "0"); }).join("");
+}
+
+function legacyOrderKey_(job) {
+  return JSON.stringify(["customer", "product", "productCode", "dueDate", "quantity", "specLength", "specShape", "bladeWidth", "serialNo", "category"]
+    .map(function(key) { return String(job[key] === undefined || job[key] === null ? "" : job[key]).normalize("NFKC").trim(); }));
+}
+
+function legacyStructuralRow_(customer, product) {
+  if (!customer && !product) return true;
+  if (/^(?:得意先|客先|顧客)$/.test(customer) && /^(?:品名|製品名|商品名|彫骨器)$/.test(product)) return true;
+  var labels = [customer, product].filter(function(value) { return value; });
+  return labels.every(function(value) { return /^(?:合計|総合計|小計|計|備考|注意事項|凡例|以上)(?:\s*[:：]?\s*[\d,，]+\s*(?:丁|個|本)?)?$/.test(value); });
 }
 
 function legacyStageColumns_(map) {
@@ -311,11 +404,16 @@ function detectLegacyHeaders_(rows) {
   var best = { row: 0, score: -1, map: {} };
   rows.forEach(function(row, rowIndex) {
     var map = {};
-    row.forEach(function(value, columnIndex) {
-      var normalized = normalizeHeader_(value);
-      Object.keys(aliases).forEach(function(field) {
-        if (map[field] !== undefined) return;
-        if (aliases[field].some(function(alias) { return normalized === normalizeHeader_(alias) || normalized.indexOf(normalizeHeader_(alias)) >= 0; })) map[field] = columnIndex;
+    [true, false].forEach(function(exact) {
+      row.forEach(function(value, columnIndex) {
+        var normalized = normalizeHeader_(value);
+        Object.keys(aliases).forEach(function(field) {
+          if (map[field] !== undefined) return;
+          if (aliases[field].some(function(alias) {
+            var expected = normalizeHeader_(alias);
+            return exact ? normalized === expected : expected.length > 1 && normalized.indexOf(expected) >= 0;
+          })) map[field] = columnIndex;
+        });
       });
     });
     var score = Object.keys(map).length;
@@ -329,21 +427,47 @@ function legacyAliases_() {
     customer: ["得意先", "客先", "発注先", "顧客"], product: ["品名", "商品名", "製品名", "彫骨器"],
     dueDate: ["納期"], quantity: ["数量", "数"], specLength: ["全長"], specShape: ["型", "形状"],
     bladeWidth: ["刃幅", "刃巾"], serialNo: ["連番", "管理番号"], welding: ["溶接"],
-    base: ["元作り", "元づくり", "元造り"], grinding: ["浮き止め～立ち上がり", "浮き止め〜立ち上がり", "すり上げ", "溶接すり上げ"],
-    heat: ["厚みとり", "焼なとり", "焼なまし"], finish: ["仕上げ", "仕上"], note: ["備考"],
-    shippingStatus: ["出荷状況", "出荷"], category: ["大分類", "分類", "製品分類"]
+    base: ["元作り", "元づくり", "元造り"], grinding: ["浮き止め～立ち上がり", "浮き止め〜立ち上がり", "浮き止め立上り", "浮き止め立ち上り", "立ち上り", "立上り", "すり上げ", "溶接すり上げ"],
+    heat: ["厚みとり", "焼なとり", "焼なまし", "頭付け巾取り", "頭付け幅取り"], finish: ["仕上げ", "仕上"], note: ["備考"],
+    shippingStatus: ["出荷状況", "出荷"], category: ["大分類", "分類", "製品分類"], productCode: ["品番", "製品番号"], sourceRow: ["元行番号"]
   };
 }
 
 function normalizeHeader_(value) {
-  return String(value || "").replace(/[\s\n\r\t　・_\-]/g, "").toLowerCase();
+  return String(value || "").normalize("NFKC").replace(/[\s\n\r\t　・_\-～〜~]/g, "").toLowerCase();
 }
 
 function cellAt_(row, index) {
-  return index === undefined ? "" : String(row[index] || "").trim();
+  return index === undefined || row[index] === undefined || row[index] === null ? "" : String(row[index]).trim();
 }
 
 function legacyStageStatus_(value) {
-  var text = String(value || "").trim();
-  return text ? "done" : "not_started";
+  return legacyStageInput_(value).status;
+}
+
+function legacyStageInput_(value) {
+  var text = String(value || "").normalize("NFKC").replace(/[\s　・･:：()（）\[\]【】]/g, "");
+  var statusOnly = {
+    "": "not_started", "未着手": "not_started", "未開始": "not_started", "未": "not_started", "not_started": "not_started",
+    "進行中": "working", "作業中": "working", "着手": "working", "研": "working", "working": "working",
+    "済": "done", "完": "done", "完了": "done", "完成": "done", "done": "done", "○": "done", "〇": "done",
+    "保留": "hold", "中止": "hold", "止": "hold", "待": "hold", "hold": "hold"
+  };
+  if (Object.prototype.hasOwnProperty.call(statusOnly, text)) return { status: statusOnly[text], assignee: "" };
+  var assignee = APP.ASSIGNEES.find(function(name) { return text.indexOf(name) === 0; });
+  if (assignee) {
+    var suffix = text.slice(assignee.length);
+    if (!suffix) return { status: "working", assignee: assignee };
+    if (Object.prototype.hasOwnProperty.call(statusOnly, suffix)) return { status: statusOnly[suffix], assignee: assignee };
+  }
+  throw new Error("工程欄「" + String(value || "").slice(0, 80) + "」を判定できません。担当名・済・研・未着手・作業中・完了・保留を確認してください。");
+}
+
+function legacyShippingStatus_(value) {
+  var text = String(value || "").normalize("NFKC").replace(/[\s　]/g, "");
+  if (/^(?:済|完了|出荷済|出荷済み|出荷完了|shipped)$/.test(text)) return "shipped";
+  if (/^(?:待|待ち|出荷待|出荷待ち|waiting)$/.test(text)) return "waiting";
+  if (/^(?:保留|中止|止|hold)$/.test(text)) return "hold";
+  if (/^(?:|未|未出荷|未完了|未着手|準備中|not_ready)$/.test(text)) return "not_ready";
+  throw new Error("出荷状況「" + String(value || "").slice(0, 80) + "」を判定できません。");
 }

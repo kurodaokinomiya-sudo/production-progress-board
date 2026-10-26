@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
 import path from "node:path";
 import { mkdir } from "node:fs/promises";
-const require = createRequire(import.meta.url);
-const { chromium } = require("C:/Users/kurom/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright");
-const baseUrl = process.env.PROGRESS_BOARD_QA_URL || "http://127.0.0.1:4174";
+import { chromium, qaBaseUrl } from "./browser-runtime.mjs";
+const baseUrl = await qaBaseUrl("/src/index.html");
 const output = path.resolve("output/playwright");
 await mkdir(output, { recursive: true });
-const browser = await chromium.launch({ headless: true, executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe" });
+const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1280, height: 1024 } });
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));

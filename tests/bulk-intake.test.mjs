@@ -3,10 +3,11 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import test from "node:test";
 
-const [config, parser, repository] = await Promise.all([
+const [config, parser, repository, intakeDuplicates] = await Promise.all([
   readFile(new URL("../apps-script/Config.gs", import.meta.url), "utf8"),
   readFile(new URL("../apps-script/Parser.gs", import.meta.url), "utf8"),
   readFile(new URL("../apps-script/Repository.gs", import.meta.url), "utf8"),
+  readFile(new URL("../src/intake-duplicates.js", import.meta.url), "utf8"),
 ]);
 
 const copy = (value) => JSON.parse(JSON.stringify(value));
@@ -42,8 +43,8 @@ function harness({ intakes = [], jobs = [], saveFailure, statusFailure } = {}) {
   const calls = { locks: 0, saves: [], statuses: [], logs: [] };
   let saveCount = 0;
   let statusCount = 0;
-  const context = vm.createContext({ Date, Math, Number, Object, String, JSON, RegExp, Error });
-  vm.runInContext(`${config}\n${parser}\n${repository}`, context);
+  const context = vm.createContext({ requireAppAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireAdminAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireEditorAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireOwnerAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), getAccessSettings: () => ({emails: [], version: 1}), Date, Math, Number, Object, String, JSON, RegExp, Error });
+  vm.runInContext(`${intakeDuplicates}\n${config}\n${parser}\n${repository}`, context);
   Object.assign(context, {
     Utilities: { getUuid: () => `generated-${++saveCount}` },
     ensureSystem_: () => {},
@@ -88,8 +89,8 @@ const pending = (id, overrides = {}) => ({
 test("複数候補を一度のロックで案件化し、管理用状態を上書きする", () => {
   const h = harness({ intakes: [pending("I-1"), pending("I-2")] });
   const result = h.context.approveIntakes({ items: [
-    { intakeId: "I-1", order: validOrder() },
-    { intakeId: "I-2", order: validOrder({ quantity: 3 }) },
+    { intakeId: "I-1", order: validOrder({ productCode: "06-04-08" }) },
+    { intakeId: "I-2", order: validOrder({ quantity: 3, serialNo: "BULK-02" }) },
   ] });
 
   assert.equal(h.calls.locks, 1);
@@ -98,6 +99,7 @@ test("複数候補を一度のロックで案件化し、管理用状態を上�
   assert.equal(h.rows.jobs.length, 2);
   assert.deepEqual(h.rows.intakes.map((entry) => entry.status), ["approved", "approved"]);
   assert.deepEqual(Array.from(result.items, (entry) => entry.job.sourceType), ["intake", "intake"]);
+  assert.equal(result.items[0].job.productCode, "06-04-08");
   for (const [index, order] of h.calls.saves.entries()) {
     assert.equal(order.id, undefined);
     assert.equal(order.version, undefined);
@@ -241,7 +243,7 @@ test("一行の実行失敗で他行を巻き戻さず、次の再試行でも�
   });
   const request = { items: [
     { intakeId: "I-1", order: validOrder() },
-    { intakeId: "I-2", order: validOrder({ quantity: 4 }) },
+    { intakeId: "I-2", order: validOrder({ quantity: 4, serialNo: "BULK-02" }) },
   ] };
   const first = h.context.approveIntakes(request);
 

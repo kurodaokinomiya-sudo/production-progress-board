@@ -26,7 +26,7 @@ test("ローカルAIも同じルールを読取指示と回答補正に使い、
         sent = JSON.parse(options.body);
         return { ok: true, json: async () => ({ candidates: [{ finishReason: "STOP", content: { parts: [{ text: JSON.stringify({
           complete: true, documentItemCount: 1, printedQuantityTotal: null, warnings: [], items: [{
-            customer, product: "鉗子", dueDate: "2026-11-30", quantity: 2, serialNo: "QA-1", specLength: "", specShape: "", bladeWidth: "", note: "", sourceRow: "1", sourcePage: 1, sourceDocument: 0, evidence: "品名 鉗子 数量2", warnings: [],
+            customer, product: "鉗子", productCode: "", dueDate: "2026-11-30", quantity: 2, serialNo: "QA-1", specLength: "", specShape: "", bladeWidth: "", note: "", sourceRow: "1", sourcePage: 1, sourceDocument: 0, evidence: "品名 鉗子 数量2", warnings: [],
           }],
         }) }] } }] }) };
       } });

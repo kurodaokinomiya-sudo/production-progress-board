@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ja" data-theme="light">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="description" content="生産工程管理の利用アカウントを確認します">
+    <meta name="color-scheme" content="light">
+    <title>生産工程管理</title>
+    <link rel="stylesheet" href="../tokens.css" data-inline="tokens">
+    <link rel="stylesheet" href="access.css" data-inline="styles" data-access-shell>
+  </head>
+  <body>
+    <main class="access-page" id="main-content">
+      <section class="access-card" aria-labelledby="access-title">
+        <p class="access-brand">生産工程管理</p>
+        <h1 id="access-title">利用アカウントの確認</h1>
+        <p class="access-intro" id="access-intro">初回だけ、利用するGoogleアカウントのメールアドレスを確認します。同じブラウザーでは次回から自動で接続します。</p>
+
+        <form id="request-form" novalidate>
+          <label class="access-label" for="email">メールアドレス</label>
+          <div class="access-field-row">
+            <input id="email" name="email" type="email" required maxlength="254" autocomplete="email" inputmode="email" autocapitalize="none" spellcheck="false" aria-describedby="email-help access-status">
+            <button class="button button-secondary" id="request-code" type="submit">確認コードを送信</button>
+          </div>
+          <p class="access-help" id="email-help">確認コードは入力したアドレスが対象の場合に送信されます。</p>
+        </form>
+
+        <form id="verify-form" novalidate>
+          <label class="access-label" for="code">確認コード（8桁）</label>
+          <div class="access-field-row">
+            <input id="code" name="code" type="text" required inputmode="numeric" autocomplete="one-time-code" maxlength="8" pattern="[0-9]{8}" aria-describedby="code-help access-status">
+            <button class="button button-primary" id="verify-code" type="submit">確認する</button>
+          </div>
+          <p class="access-help" id="code-help">メールに届いた8桁の数字を入力してください。</p>
+        </form>
+
+        <p class="access-status" id="access-status" role="status" aria-live="polite" aria-atomic="true"></p>
+        <button class="button button-secondary" id="retry-access" type="button" hidden>接続を再試行</button>
+        <a class="button button-primary open-app" id="open-app" href="<?= appUrl ?>" target="_top" hidden>アプリを開く</a>
+      </section>
+    </main>
+    <script src="access-session.js" defer data-inline="access-session"></script>
+    <script src="access-bootstrap.js" defer data-inline="access-bootstrap"></script>
+    <script src="access.js" defer data-inline="script"></script>
+  </body>
+</html>

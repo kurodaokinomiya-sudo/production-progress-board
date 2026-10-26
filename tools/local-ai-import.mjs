@@ -27,10 +27,13 @@ export async function diagnoseLocalAi(input, { transport = fetch } = {}) {
 async function sendLocalAi(input, { transport, step, diagnostic = false }) {
   if (!localAiStatus().ready) throw new Error("ローカルAIは未設定です。サーバーの環境変数に無料プロジェクトのAPIキーと無料枠確認を設定してください。");
   const context = vm.createContext({ Date, Math, Number, Object, RegExp, String, JSON });
-  const [parser, ai] = await Promise.all(["Parser.gs", "AiImport.gs"].map((name) => readFile(new URL(`../apps-script/${name}`, import.meta.url), "utf8")));
-  vm.runInContext(`${parser}\n${ai}`, context);
+  const [parser, ai, learning] = await Promise.all([
+    ...["Parser.gs", "AiImport.gs"].map((name) => readFile(new URL(`../apps-script/${name}`, import.meta.url), "utf8")),
+    readFile(new URL("../src/intake-learning.js", import.meta.url), "utf8"),
+  ]);
+  vm.runInContext(`${learning}\n${parser}\n${ai}`, context);
   const customerRules = diagnostic ? undefined : context.normalizeCustomerRules_(input.customerRules || context.defaultCustomerRules_());
-  const request = diagnostic ? context.aiDiagnosticRequest_(step) : context.aiImportRequest_(input, customerRules);
+  const request = diagnostic ? context.aiDiagnosticRequest_(step) : context.aiImportRequest_(input, customerRules, input.learningRules || []);
   const day = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
   if (usage.day !== day) usage = { day, count: 0, last: 0 };
   const limit = Math.min(100, Math.max(1, Number(process.env.PROGRESS_AI_DAILY_LIMIT) || 10));

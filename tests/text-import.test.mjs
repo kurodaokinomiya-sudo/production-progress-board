@@ -34,7 +34,7 @@ function harness({ withAi = false, properties = new Map() } = {}) {
   const saved = [];
   const logs = [];
   const calls = [];
-  const context = vm.createContext({ Date, Math, Number, Object, RegExp, String, JSON });
+  const context = vm.createContext({ requireAppAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireAdminAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireEditorAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireOwnerAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), getAccessSettings: () => ({emails: [], version: 1}), Date, Math, Number, Object, RegExp, String, JSON });
   vm.runInContext(withAi ? `${parserSource}\n${importSource}\n${aiSource}` : `${parserSource}\n${importSource}`, context);
   Object.assign(context, {
     ensureSystem_: () => {},
@@ -71,6 +71,16 @@ test("Apps Scriptの貼り付け本文は従来 parser で1件の確認候補に
   assert.equal(saved[0].status, "pending");
   assert.equal(saved[0].originalText, mailText);
   assert.equal(logs[0][0], "intake.text");
+});
+
+test("貼り付け本文は田中の品名末尾補助コードを落として仕様を残す", () => {
+  const { context, saved } = harness();
+  context.createIntakeFromText({ name: "注文メール", text: "得意先: 田中医科\n品名: F06-35-30L Yケリソンパンチ3mm/上向 左カーブ:JS07-040-4S-J TM対象\n数量: 5\n納期: 2026-11-30" });
+  assert.equal(saved[0].parsed.customer, "田中医科");
+  assert.equal(saved[0].parsed.product, "Yケリソンパンチ3mm/上向 左カーブ");
+  assert.equal(saved[0].parsed.productCode, "F06-35-30L");
+  assert.equal(saved[0].parsed.bladeWidth, "3mm");
+  assert.equal(saved[0].parsed.specShape, "上曲左");
 });
 
 test("行頭の品名ラベル2ブロックを個別候補にし、共通得意先を引き継ぐ", () => {

@@ -50,12 +50,12 @@ test("田中医科TC発注書の複数品目を案件候補へ分割する", () 
   assert.equal(results[0].parsed.specLength, "18cm");
   assert.equal(results[0].parsed.specShape, "直");
   assert.equal(results[0].parsed.bladeWidth, "6mm");
-  assert.match(results[0].parsed.note, /品番: 06-56-60S/);
+  assert.equal(results[0].parsed.productCode, "06-56-60S");
 
   assert.equal(results[2].parsed.product, "メニスカス鉗子Cl.<2-3爪>16.5cm");
   assert.equal(results[2].parsed.specShape, "2-3爪");
   assert.match(results[2].parsed.note, /支給部品あり/);
-  assert.equal(results[3].parsed.product, "Yケリソンパンチ2mm/上向 左カーブ:JS07-040-3L-J");
+  assert.equal(results[3].parsed.product, "Yケリソンパンチ2mm/上向 左カーブ");
   assert.equal(results[3].parsed.category, "ケリソンパンチ");
   assert.equal(results[3].parsed.bladeWidth, "2mm");
   assert.equal(results[3].parsed.specShape, "上曲左");
@@ -68,16 +68,35 @@ test("品名前の製品コードだけを分離し、品名内の型番や寸�
   for (const code of ["F06-35-30L", "Ｆ０６－３５－３０Ｌ", "F06‐35‐30L"]) {
     const parsed = context.separateImportedProductCode_({ product: `${code} ${name}`, note: "既存の備考" });
     assert.equal(parsed.product, name);
-    assert.equal(parsed.note, "既存の備考 / 品番: F06-35-30L");
+    assert.equal(parsed.productCode, "F06-35-30L");
+    assert.equal(parsed.note, "既存の備考");
     context.separateImportedProductCode_(parsed);
-    assert.equal(parsed.note, "既存の備考 / 品番: F06-35-30L");
+    assert.equal(parsed.productCode, "F06-35-30L");
   }
   for (const product of ["18-20 cm 鉗子", "3M テープ", "JS07-040-6L Yケリソンパンチ", "F06-35-30L", name]) {
     assert.equal(context.splitLeadingProductCode_(product).product, product);
   }
   const result = context.parseOrderText_("得意先: 田中\n品名: F06-35-30L Yケリソンパンチ3mm/上向 左カーブ:JS07-040-6L\n数量: 5", {});
-  assert.equal(result.parsed.product, "Yケリソンパンチ3mm/上向 左カーブ:JS07-040-6L");
-  assert.equal(result.parsed.note, "品番: F06-35-30L");
+  assert.equal(result.parsed.product, "Yケリソンパンチ3mm/上向 左カーブ");
+  assert.equal(result.parsed.productCode, "F06-35-30L");
+  assert.equal(result.parsed.serialNo, "");
+});
+
+test("田中の既知の末尾補助コードとTM対象だけを除き、他社の品名は保持する", () => {
+  const name = "Yケリソンパンチ2mm/上向 左カーブ";
+  for (const customer of ["田中", "田中医科", "田中医科器械製作所"]) {
+    assert.equal(context.cleanTanakaImportedProductName_(`${name}:JS07-040-4S-J`, customer), name);
+    assert.equal(context.cleanTanakaImportedProductName_(`${name} ＴＭ対象`, customer), name);
+    assert.equal(context.cleanTanakaImportedProductName_(`${name}:JS07-040-4S-J TM対象`, customer), name);
+    assert.equal(context.cleanTanakaImportedProductName_(`${name} (TM対象)`, customer), name);
+    assert.equal(context.cleanTanakaImportedProductName_(`${name} TM対象:JS07-040-4S-J`, customer), name);
+    assert.equal(context.cleanTanakaImportedProductName_(`${name}：ＪＳ０７－０４０－４Ｓ－Ｊ`, customer), name);
+    assert.equal(context.cleanTanakaImportedProductName_(`${name}:JS07-040-4S-J （TM対象）`, customer), name);
+    assert.equal(context.cleanTanakaImportedProductName_(`${name} TM対象 (TM対象)`, customer), name);
+  }
+  assert.equal(context.cleanTanakaImportedProductName_(`${name}:JS07-040-4S-J`, "別会社"), `${name}:JS07-040-4S-J`);
+  assert.equal(context.cleanTanakaImportedProductName_("鋭匙鉗子18cm直3mm", "田中"), "鋭匙鉗子18cm直3mm");
+  assert.equal(context.cleanTanakaImportedProductName_("製品 JS07-040-4S-J", "田中"), "製品 JS07-040-4S-J");
 });
 
 test("TC発注書を行内の納期・数量が保持されたOCR結果からも分割する", () => {
@@ -95,7 +114,7 @@ test("TC発注書を行内の納期・数量が保持されたOCR結果からも
   assert.equal(results[0].parsed.product, "千葉大式鋭匙鉗子<直/6mm>18cm");
   assert.equal(results[0].parsed.dueDate, "2026-11-30");
   assert.equal(results[0].parsed.quantity, 10);
-  assert.equal(results[1].parsed.product, "Yケリソンパンチ2mm/上向 左カーブ:JS07-040-3L-J");
+  assert.equal(results[1].parsed.product, "Yケリソンパンチ2mm/上向 左カーブ");
   assert.equal(results[1].parsed.quantity, 5);
 });
 

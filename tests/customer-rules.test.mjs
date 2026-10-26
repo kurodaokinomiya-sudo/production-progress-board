@@ -26,7 +26,7 @@ function makeSheet(initialRows = []) {
 function harness(initialRows = []) {
   const sheet = makeSheet(initialRows);
   const spreadsheet = { getSheetByName: () => sheet };
-  const context = vm.createContext({ Date, Math, Number, Object, String, JSON, RegExp, Array });
+  const context = vm.createContext({ requireAppAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireAdminAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireEditorAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireOwnerAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), getAccessSettings: () => ({emails: [], version: 1}), Date, Math, Number, Object, String, JSON, RegExp, Array });
   vm.runInContext(sources.join("\n"), context);
   Object.assign(context, {
     getSpreadsheet_: () => spreadsheet,
@@ -47,6 +47,7 @@ const rules = (overrides = {}) => ({
 const item = (customer) => ({
   customer,
   product: "ケリソン 18cm 上向 3.5mm",
+  productCode: "",
   quantity: 1,
   dueDate: "2026-11-30",
   serialNo: "TEST-01",

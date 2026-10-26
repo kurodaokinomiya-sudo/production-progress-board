@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import vm from "node:vm";
 
 const [html, sourceHtml, css, tokens, script, config, repository, importer] = await Promise.all([
   readFile(new URL("../dist/Index.html", import.meta.url), "utf8"),
@@ -17,6 +18,17 @@ test("Apps Script用HTMLはCSSとJSを内包する", () => {
   assert.match(html, /data-bundle="tokens"/);
   assert.match(html, /data-bundle="styles"/);
   assert.match(html, /data-bundle="app"/);
+});
+
+test("Tezoe受注投影をブラウザーとApps Scriptの両方に同梱する", async () => {
+  const browserCore = ["finished-stock", "finished-stock-orders"].map((name) => html.match(new RegExp(`<script data-bundle="${name}">([\\s\\S]*?)<\\/script>`))?.[1]).join("\n");
+  const serverCore = await readFile(new URL("../dist/FinishedStockLogic.gs", import.meta.url), "utf8");
+  for (const bundle of [browserCore, serverCore]) {
+    const context = vm.createContext({}); vm.runInContext(bundle, context);
+    const result = context.FinishedStock.snapshot({ jobs: [], events: [] });
+    assert.equal(result.orders.length, 0);
+    assert.equal(context.FinishedStockOrders.forecast(result, "26001", "2026-12-31").quantity, 0);
+  }
 });
 
 test("Hallmarkのレスポンシブ最低条件を満たす", () => {
@@ -45,8 +57,8 @@ test("テーマはトークン経由で利用する", () => {
 test("今月完了と工程専用ダイアログのボタン担当選択を表示・保存する", () => {
   assert.match(html, /今月完了/);
   assert.doesNotMatch(html, /本日完了/);
-  assert.match(html, /id="completed-period"/);
-  assert.match(html, /<option value="current">今月<\/option>/);
+  assert.match(html, /id="completed-year"/);
+  assert.match(html, /id="completed-month"/);
   assert.match(script, /period: "current"/);
   assert.match(script, /showCompleted\("current"\)/);
   assert.match(html, /工程と担当/);
@@ -56,7 +68,10 @@ test("今月完了と工程専用ダイアログのボタン担当選択を表�
   assert.match(script, /data-action="edit-order"/);
   assert.match(script, /isInCurrentMonth\(job\.completedAt\)/);
   assert.match(script, /const ASSIGNEES = \["豊", "幹", "望", "鈴", "河", "誠", "小", "保", "大", "順"\]/);
-  assert.match(script, /class="assignee-trigger"/);
+  assert.doesNotMatch(script, /class="assignee-trigger"/);
+  assert.match(html, /id="process-all-target"/);
+  assert.doesNotMatch(html, /id="process-bulk-assignees"|data-bulk-status|全工程に同じ担当/);
+  assert.match(html, /id="stage-assignee-settings-form"/);
   assert.match(script, /class="assignee-option/);
   assert.match(script, /stage-assignee-input/);
   assert.match(script, /stage-assignee-input" type="hidden"/);
@@ -73,25 +88,31 @@ test("今月完了と工程専用ダイアログのボタン担当選択を表�
   assert.match(config, /"version", "completedAt"/);
 });
 
-test("出荷完了した案件を終了リストへ分離し、進行中へ戻せる", () => {
+test("完成品リストに出荷待ちと出荷済みを表示し、出荷待ちへ戻せる", () => {
   assert.match(html, /data-view="completed"/);
   assert.match(html, /data-view-panel="completed"/);
   assert.match(html, /id="process-lifecycle-action"/);
   assert.match(script, /form\.dataset\.shippingStatus = "shipped"/);
   assert.match(script, /form\.dataset\.shippingStatus = "waiting"/);
   assert.match(script, /form\.dataset\.afterSaveView = "completed"/);
-  assert.match(script, /completedScope !== \(job\.shippingStatus === "shipped"\)/);
+  assert.match(script, /if \(scope === "completed"\) return job\.shippingStatus === "shipped"/);
+  assert.doesNotMatch(html, /data-view-panel="shipping"|data-view="shipping"/);
+  assert.match(html, /id="completed-title"[^>]*>完成品リスト/);
+  assert.ok(html.indexOf('id="shipping-workspace"') < html.indexOf('id="completed-workspace"'));
   assert.match(script, /renderCompletedWorkspace\(\)/);
-  assert.match(script, /shipped \? "進行中へ戻す" : "出荷完了・終了へ"/);
+  assert.match(script, /shipped \? "出荷待ちへ戻す" : "出荷完了・終了へ"/);
   assert.doesNotMatch(script, /全工程完了後に使用/);
-  assert.match(script, /formatDateTime\(job\.completedAt \|\| job\.updatedAt\)/);
-  assert.match(script, /orderCards\(jobs, \{ completed: true \}\)/);
+  assert.match(script, /shipmentDateLabel\(job, true\)/);
+  assert.match(script, /renderLedgerTable\(workspace, jobs, true\)/);
 });
 
 test("仕様と5工程を省略せず、各工程から直接更新できる一覧を表示する", () => {
   assert.match(sourceHtml, /<th>全長<\/th><th>型<\/th><th>刃幅<\/th>/);
-  for (const field of ["specLength", "specShape", "bladeWidth", "note"]) assert.ok(script.includes(`escapeHtml(job.${field} || "—")`));
-  assert.match(script, /STAGES\.map\(\(stage\) => `<td class="cell-stage">\$\{stageCellButton\(job, stage\)\}/);
+  for (const field of ["specShape", "bladeWidth", "note"]) assert.ok(script.includes(`escapeHtml(job.${field} || "—")`));
+  assert.match(script, /const length = ledgerLengthValue\(job\)/);
+  assert.match(script, /class="cell-length" title="\$\{escapeHtml\(length\)\}"/);
+  assert.match(script, /STAGES\.map\(\(stage\) => .*<td class="cell-stage">\$\{stageCellButton\(job, stage\)\}/);
+  assert.match(script, /class="cell-polishing">\$\{polishingCell\(job, completed\)\}/);
   assert.match(script, /data-stage-key="\$\{stage.key\}"/);
   assert.match(script, /class="order-specs"/);
   assert.match(script, /class="order-stage-grid"/);
@@ -128,7 +149,8 @@ test("新旧の工程見出しと刃幅を移行時に読み込める", () => {
   assert.match(importer, /bladeWidth: \["刃幅", "刃巾"\]/);
   assert.match(importer, /base: \["元作り", "元づくり", "元造り"\]/);
   assert.match(importer, /"浮き止め～立ち上がり"/);
-  assert.match(importer, /heat: \["厚みとり", "焼なとり", "焼なまし"\]/);
+  const heatAliases = JSON.parse(importer.match(/heat:\s*(\[[^\]]+\])/)[1]);
+  for (const name of ["厚みとり", "焼なとり", "焼なまし", "頭付け巾取り", "頭付け幅取り"]) assert.ok(heatAliases.includes(name), `${name}の工程見出しを読み込める`);
   assert.match(importer, /finish: \["仕上げ", "仕上"\]/);
 });
 
@@ -175,8 +197,12 @@ test("大分類・連番などをPCとタブレットで同じ操作から並び
   assert.match(html, /class="filter-field-label">並び順<\/span>/);
   assert.match(script, /new Intl\.Collator\("ja", \{ numeric: true/);
   assert.match(script, /function sortedJobs\(scope\)/);
-  assert.match(script, /category:\s*compareCategory/);
-  assert.match(script, /serial:\s*\(a, b\) => compareTextBlankLast/);
+  assert.match(script, /if \(key === "category"\) return compareCategory\(a, b\)/);
+  assert.match(script, /key === "serial" \? job\.serialNo/);
+  for (const scope of ["orders", "completed"]) {
+    assert.match(html, new RegExp(`id="${scope}-sort2"`));
+    assert.match(html, new RegExp(`id="${scope}-sort3"`));
+  }
   assert.match(script, /renderSortState/);
   assert.match(script, /aria-sort/);
   assert.match(script, /class="category-chip"/);
@@ -202,7 +228,7 @@ test("最大9件の製品ラベルを15cm×3cmでA4縦へ一括印刷できる",
 
 test("取込承認後の印刷待ち・印刷済み確認・ラベル変更時の再印刷を全端末で同期する", () => {
   assert.match(config, /"labelPrintStatus", "labelPrintedAt"/);
-  assert.match(repository, /input\.order\.labelPrintStatus = "waiting"/);
+  assert.match(repository, /order\.labelPrintStatus = "waiting"/);
   assert.match(repository, /function markLabelsPrinted\(input\)/);
   assert.match(repository, /job\.labelPrintStatus = "printed"/);
   assert.match(repository, /existing\.labelPrintStatus === "printed" && next\.labelPrintStatus !== "not_required" && labelContentChanged_/);
@@ -224,7 +250,7 @@ test("自動補完値だけを品名変更時に更新し、ダイアログと�
   assert.match(script, /value === productInference\[name\]/);
   assert.match(script, /delete event\.target\.dataset\.autoFilled/);
   assert.match(script, /dialog\._returnFocus = document\.activeElement/);
-  assert.match(script, /addEventListener\("cancel", \(event\) => \{ if \(!event.defaultPrevented\) restoreAfterDialogClose\(dialog\); \}\)/);
+  assert.match(script, /addEventListener\("cancel", \(event\) => \{\s*event.preventDefault\(\);\s*closeDialog\(dialog\);/);
   assert.match(script, /addEventListener\("close", \(\) => restoreAfterDialogClose\(dialog\)\)/);
   assert.match(script, /focusTarget\?\.focus\(\{ preventScroll: true \}\)/);
   assert.match(html, /id="import-email-tab"[^>]+tabindex="-1"/);
@@ -249,7 +275,7 @@ test("TC発注書の複数品目を個別の確認候補へ分割する", () => 
   assert.match(script, /fetch\(isText \? "\/api\/local\/parse-order-text" : useAi \? "\/api\/local\/parse-order-ai" : "\/api\/local\/parse-order-pdf"/);
   assert.match(script, /LOCAL_PDF_ENGINE_VERSION/);
   assert.match(script, /古いローカル解析サーバーが動いています/);
-  assert.match(script, /item\.importFileName !== payload\.name/);
+  assert.doesNotMatch(script, /item\.importFileName !== payload\.name/);
   assert.match(script, /extractPdfTextInBrowser/);
   assert.match(script, /createIntakeFromPdfText/);
   assert.doesNotMatch(script, /ローカルプレビューではOCRを実行しません/);

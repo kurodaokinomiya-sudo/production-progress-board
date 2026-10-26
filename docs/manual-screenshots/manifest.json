@@ -1,0 +1,756 @@
+{
+  "ledger": [
+    {
+      "file": "worker-filters.jpg",
+      "clip": {
+        "x": 8,
+        "y": 95,
+        "width": 764,
+        "height": 91
+      },
+      "caption": "① 検索を開き、工程・状況・並び順を選ぶ",
+      "callouts": [
+        {
+          "number": 1,
+          "x": 104,
+          "y": 70
+        }
+      ]
+    },
+    {
+      "file": "worker-stages.jpg",
+      "clip": {
+        "x": 760,
+        "y": 127,
+        "width": 511,
+        "height": 243
+      },
+      "caption": "② 連番を確認して、担当・状態の欄を押す",
+      "callouts": [
+        {
+          "number": 2,
+          "x": 295,
+          "y": 83
+        }
+      ]
+    },
+    {
+      "file": "worker-zoom.jpg",
+      "clip": {
+        "x": 1028,
+        "y": 49,
+        "width": 245,
+        "height": 41
+      },
+      "caption": "③ 倍率欄、33製品・23製品で調整する",
+      "callouts": [
+        {
+          "number": 3,
+          "x": 23,
+          "y": 20
+        }
+      ]
+    }
+  ],
+  "cover": [
+    {
+      "file": "worker-overview.jpg",
+      "clip": {
+        "x": 8,
+        "y": 49,
+        "width": 1264,
+        "height": 322
+      },
+      "caption": "工程一覧（作業員の画面）",
+      "callouts": []
+    }
+  ],
+  "process": [
+    {
+      "file": "process-upper.jpg",
+      "clip": {
+        "x": 80,
+        "y": 77,
+        "width": 658,
+        "height": 124
+      },
+      "caption": "① 品名・得意先・連番・数量・納期を照合する",
+      "callouts": [
+        {
+          "number": 1,
+          "x": 197,
+          "y": 71
+        }
+      ]
+    },
+    {
+      "file": "process-upper.jpg",
+      "clip": {
+        "x": 81,
+        "y": 370,
+        "width": 532,
+        "height": 54
+      },
+      "caption": "② 変更する工程の「状態」を選ぶ（工程の左側）",
+      "callouts": [
+        {
+          "number": 2,
+          "x": 335,
+          "y": 27
+        }
+      ]
+    },
+    {
+      "file": "process-upper.jpg",
+      "clip": {
+        "x": 616,
+        "y": 370,
+        "width": 583,
+        "height": 54
+      },
+      "caption": "② 同じ工程の「担当」を選ぶ（工程の右側）",
+      "callouts": [
+        {
+          "number": 2,
+          "x": 203,
+          "y": 27
+        }
+      ]
+    },
+    {
+      "file": "process-save.jpg",
+      "clip": {
+        "x": 879,
+        "y": 584,
+        "width": 337,
+        "height": 69
+      },
+      "caption": "③ 変更したら「工程を保存」",
+      "callouts": [
+        {
+          "number": 3,
+          "x": 246,
+          "y": 35
+        }
+      ]
+    }
+  ],
+  "bulk": [
+    {
+      "file": "bulk-held.jpg",
+      "clip": {
+        "x": 608,
+        "y": 174,
+        "width": 591,
+        "height": 135
+      },
+      "caption": "① 担当名を長押し　② 指を上の「全」へ動かして離す",
+      "callouts": [
+        {
+          "number": 1,
+          "x": 68,
+          "y": 106
+        },
+        {
+          "number": 2,
+          "x": 68,
+          "y": 39
+        }
+      ]
+    },
+    {
+      "file": "bulk-result.jpg",
+      "clip": {
+        "x": 80,
+        "y": 216,
+        "width": 1120,
+        "height": 126
+      },
+      "caption": "③ 全工程に入力されたことを確認。「直前の一括変更を戻す」で取り消せます。",
+      "callouts": [
+        {
+          "number": 3,
+          "x": 1023,
+          "y": 31
+        }
+      ]
+    }
+  ],
+  "polishing": [
+    {
+      "file": "polishing-send.jpg",
+      "clip": {
+        "x": 780,
+        "y": 166,
+        "width": 491,
+        "height": 173
+      },
+      "caption": "① 工程一覧の「研」で発送。発送後の「発」で日付を確認。",
+      "callouts": [
+        {
+          "number": 1,
+          "x": 417,
+          "y": 98
+        }
+      ]
+    },
+    {
+      "file": "polishing-return.jpg",
+      "clip": {
+        "x": 134,
+        "y": 264,
+        "width": 520,
+        "height": 136
+      },
+      "caption": "② 全数が戻った案件にチェックする。",
+      "callouts": [
+        {
+          "number": 2,
+          "x": 28,
+          "y": 96
+        }
+      ]
+    },
+    {
+      "file": "polishing-return-button.jpg",
+      "clip": {
+        "x": 882,
+        "y": 206,
+        "width": 327,
+        "height": 54
+      },
+      "caption": "② 未返却分すべてを「選択した案件の戻りを反映」で登録。",
+      "callouts": [
+        {
+          "number": 2,
+          "x": 114,
+          "y": 28
+        }
+      ]
+    }
+  ],
+  "distribution": [
+    {
+      "file": "distribution-controls.jpg",
+      "clip": {
+        "x": 112,
+        "y": 88,
+        "width": 1123,
+        "height": 191
+      },
+      "caption": "① 納期の月と並び順　③ 配布表をA4縦1枚に印刷",
+      "callouts": [
+        {
+          "number": 1,
+          "x": 194,
+          "y": 160
+        },
+        {
+          "number": 3,
+          "x": 1030,
+          "y": 35
+        }
+      ]
+    },
+    {
+      "file": "distribution-table.jpg",
+      "clip": {
+        "x": 136,
+        "y": 306,
+        "width": 1090,
+        "height": 268
+      },
+      "caption": "② 行の担当名を押すと保存。表の下には月全体の担当別合計があります。",
+      "callouts": [
+        {
+          "number": 2,
+          "x": 760,
+          "y": 148
+        }
+      ]
+    }
+  ],
+  "shipping": [
+    {
+      "file": "shipping-complete.jpg",
+      "clip": {
+        "x": 81,
+        "y": 483,
+        "width": 1118,
+        "height": 169
+      },
+      "caption": "① 全工程の完了を確認　② 出荷したら「出荷完了・終了へ」",
+      "callouts": [
+        {
+          "number": 2,
+          "x": 889,
+          "y": 136
+        }
+      ]
+    },
+    {
+      "file": "shipping-reopen.jpg",
+      "clip": {
+        "height": 73,
+        "width": 337,
+        "x": 878,
+        "y": 582
+      },
+      "caption": "③ 終了案件を開き「進行中へ戻す」",
+      "callouts": [
+        {
+          "number": 3,
+          "x": 106,
+          "y": 37.578125
+        }
+      ]
+    }
+  ],
+  "recovery": [
+    {
+      "file": "save-error.jpg",
+      "clip": {
+        "height": 158,
+        "width": 388,
+        "x": 878,
+        "y": 504
+      },
+      "caption": "① 保存失敗時は「入力内容を開く」から復元できます。",
+      "callouts": [
+        {
+          "number": 1,
+          "x": 305,
+          "y": 79.015625
+        }
+      ]
+    },
+    {
+      "file": "worker-settings.jpg",
+      "clip": {
+        "height": 282,
+        "width": 564,
+        "x": 112,
+        "y": 175
+      },
+      "caption": "③ 「設定」→「表示モード」は、この端末だけの設定です。",
+      "callouts": [
+        {
+          "number": 3,
+          "x": 282.359375,
+          "y": 198.359375
+        }
+      ]
+    }
+  ],
+  "order": [
+    {
+      "file": "office-overview.jpg",
+      "clip": {
+        "height": 138,
+        "width": 1124,
+        "x": 112,
+        "y": 175
+      },
+      "caption": "① 「概況」の件数を押すと、対象の一覧を開けます。",
+      "callouts": []
+    },
+    {
+      "file": "order-fields.jpg",
+      "clip": {
+        "x": 207,
+        "y": 108,
+        "width": 850,
+        "height": 277
+      },
+      "caption": "② 得意先・品名・数量・納期を原本と照合して入力する",
+      "callouts": [
+        {
+          "number": 2,
+          "x": 230,
+          "y": 251
+        }
+      ]
+    },
+    {
+      "file": "order-save.jpg",
+      "clip": {
+        "height": 48,
+        "width": 136,
+        "x": 937,
+        "y": 634
+      },
+      "caption": "③ ラベルの要否を選んだら「注文情報を保存」",
+      "callouts": [
+        {
+          "number": 3,
+          "x": 68,
+          "y": 24.1875
+        }
+      ]
+    }
+  ],
+  "edit": [
+    {
+      "file": "order-edit-entry.jpg",
+      "clip": {
+        "x": 937,
+        "y": 128,
+        "width": 336,
+        "height": 103
+      },
+      "caption": "① 一覧の右端「編集」列の鉛筆ボタンを押す",
+      "callouts": [
+        {
+          "number": 1,
+          "x": 321,
+          "y": 66
+        }
+      ]
+    },
+    {
+      "file": "order-edit-header.jpg",
+      "clip": {
+        "x": 192,
+        "y": 28,
+        "width": 896,
+        "height": 219
+      },
+      "caption": "② 「案件を編集」で、原本と照合して訂正する",
+      "callouts": [
+        {
+          "number": 2,
+          "x": 226,
+          "y": 170
+        }
+      ]
+    },
+    {
+      "file": "order-edit-footer.jpg",
+      "clip": {
+        "height": 73,
+        "width": 898,
+        "x": 191,
+        "y": 621
+      },
+      "caption": "② 注文情報を保存　③ 誤登録だけを「案件を削除」",
+      "callouts": [
+        {
+          "number": 2,
+          "x": 814,
+          "y": 37.1875
+        },
+        {
+          "number": 3,
+          "x": 70,
+          "y": 37.1875
+        }
+      ]
+    }
+  ],
+  "material": [
+    {
+      "file": "order-material.jpg",
+      "clip": {
+        "x": 207,
+        "y": 249,
+        "width": 850,
+        "height": 101
+      },
+      "caption": "① 製品番号　② 材料表示（空欄はマスタの自動表示）",
+      "callouts": [
+        {
+          "number": 1,
+          "x": 208,
+          "y": 53
+        },
+        {
+          "number": 2,
+          "x": 642,
+          "y": 53
+        }
+      ]
+    },
+    {
+      "file": "polishing-class.jpg",
+      "clip": {
+        "x": 253,
+        "y": 449,
+        "width": 380,
+        "height": 135
+      },
+      "caption": "③ メニスカスは「B(メニスカス)」に自動判定。訂正はこの区分欄から。",
+      "callouts": [
+        {
+          "number": 3,
+          "x": 276,
+          "y": 87
+        }
+      ]
+    }
+  ],
+  "import": [
+    {
+      "file": "import-method.jpg",
+      "clip": {
+        "x": 335,
+        "y": 141,
+        "width": 609,
+        "height": 185
+      },
+      "caption": "① 取込方法のタブ　② 読取方法を確認",
+      "callouts": [
+        {
+          "number": 1,
+          "x": 104,
+          "y": 157
+        },
+        {
+          "number": 2,
+          "x": 302,
+          "y": 48
+        }
+      ]
+    },
+    {
+      "file": "import-file.jpg",
+      "clip": {
+        "height": 304,
+        "width": 610,
+        "x": 335,
+        "y": 345
+      },
+      "caption": "① ファイルを選ぶと「PDF・画像を読み取る」が使えます。",
+      "callouts": [
+        {
+          "number": 1,
+          "x": 305,
+          "y": 122.875
+        }
+      ]
+    }
+  ],
+  "intake": [
+    {
+      "file": "intake-queue.jpg",
+      "clip": {
+        "x": 445,
+        "y": 176,
+        "width": 806,
+        "height": 395
+      },
+      "caption": "① 原本と確認する　② 複数品目は「まとめて確認・編集」",
+      "callouts": [
+        {
+          "number": 1,
+          "x": 110,
+          "y": 354
+        },
+        {
+          "number": 2,
+          "x": 710,
+          "y": 23
+        }
+      ]
+    },
+    {
+      "file": "intake-apply.jpg",
+      "clip": {
+        "height": 73,
+        "width": 512,
+        "x": 759,
+        "y": 642
+      },
+      "caption": "② 選択した品目を確認後、「○件を案件へ反映」",
+      "callouts": [
+        {
+          "number": 2,
+          "x": 425.5859375,
+          "y": 37
+        }
+      ]
+    }
+  ],
+  "labels": [
+    {
+      "file": "labels-preview.jpg",
+      "clip": {
+        "x": 103,
+        "y": 202,
+        "width": 1044,
+        "height": 130
+      },
+      "caption": "① 印刷対象のチェックと、プレビューの内容を照合する",
+      "callouts": [
+        {
+          "number": 1,
+          "x": 23,
+          "y": 112
+        }
+      ]
+    },
+    {
+      "file": "labels-print.jpg",
+      "clip": {
+        "height": 48,
+        "width": 131,
+        "x": 1074,
+        "y": 634
+      },
+      "caption": "② A4縦・倍率100%で「○枚を印刷」",
+      "callouts": [
+        {
+          "number": 2,
+          "x": 65.5859375,
+          "y": 24.1875
+        }
+      ]
+    },
+    {
+      "file": "labels-confirm.jpg",
+      "clip": {
+        "height": 78,
+        "width": 405,
+        "x": 798,
+        "y": 552
+      },
+      "caption": "③ 紙が正しく出たら「印刷完了・待ちから外す」。失敗時はキャンセル。",
+      "callouts": [
+        {
+          "number": 3,
+          "x": 298,
+          "y": 39.4375
+        }
+      ]
+    }
+  ],
+  "office_totals": [
+    {
+      "file": "polishing-billing.jpg",
+      "clip": {
+        "x": 134,
+        "y": 309,
+        "width": 1079,
+        "height": 157
+      },
+      "caption": "② 「戻り月」を選び、江部・嘉代それぞれの金額を確認。",
+      "callouts": [
+        {
+          "number": 2,
+          "x": 996,
+          "y": 51
+        }
+      ]
+    },
+    {
+      "file": "polishing-billing-meniscus-quantity.jpg",
+      "clip": {
+        "x": 133,
+        "y": 336,
+        "width": 607,
+        "height": 48
+      },
+      "caption": "② 区分別の戻り数量を確認（見本：嘉代・メニスカス4丁）。",
+      "callouts": [
+        {
+          "number": 2,
+          "x": 210,
+          "y": 23
+        }
+      ]
+    },
+    {
+      "file": "polishing-billing-meniscus-price.jpg",
+      "clip": {
+        "x": 738,
+        "y": 336,
+        "width": 475,
+        "height": 48
+      },
+      "caption": "② 同じ行の単価・金額を確認（見本：3,300円／丁・13,200円）。",
+      "callouts": [
+        {
+          "number": 2,
+          "x": 252,
+          "y": 23
+        }
+      ]
+    }
+  ],
+  "login": [
+    {
+      "file": "access-check.jpg",
+      "clip": {
+        "x": 405,
+        "y": 293,
+        "width": 469,
+        "height": 268
+      },
+      "caption": "② この確認画面が出た場合だけ、メールアドレスと8桁のコードで確認します。",
+      "callouts": [
+        {
+          "number": 2,
+          "x": 261,
+          "y": 216
+        }
+      ]
+    }
+  ],
+  "polishing_correction": [
+    {
+      "file": "polishing-history-filter.jpg",
+      "clip": {
+        "x": 133,
+        "y": 127,
+        "width": 268,
+        "height": 74
+      },
+      "caption": "① 表示を「すべて・履歴」にして対象を探す。",
+      "callouts": [
+        {
+          "number": 1,
+          "x": 136,
+          "y": 47
+        }
+      ]
+    },
+    {
+      "file": "polishing-undo-return.jpg",
+      "clip": {
+        "x": 890,
+        "y": 269,
+        "width": 324,
+        "height": 209
+      },
+      "caption": "② 履歴（○回）を開き、「研磨状態に戻す」。",
+      "callouts": [
+        {
+          "number": 2,
+          "x": 180,
+          "y": 174
+        }
+      ]
+    },
+    {
+      "file": "polishing-cancel-send.jpg",
+      "clip": {
+        "x": 412,
+        "y": 343,
+        "width": 456,
+        "height": 154
+      },
+      "caption": "③ 発送を取り消す丁数を入力し、画面下の同名ボタンで保存。",
+      "callouts": [
+        {
+          "number": 3,
+          "x": 228,
+          "y": 53
+        },
+        {
+          "number": 3,
+          "x": 385,
+          "y": 126
+        }
+      ]
+    }
+  ]
+}

@@ -1,38 +1,59 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import test from "node:test";
 
-const sources = await Promise.all(["Parser.gs", "Import.gs", "AiImport.gs", "Repository.gs"].map((name) => readFile(new URL(`../apps-script/${name}`, import.meta.url), "utf8")));
-const item = (overrides = {}) => ({ customer: "検証用商事", product: "ケリソン 18cm 上向 3.5mm", quantity: 10, dueDate: "2026-11-30", serialNo: "TEST-01", specLength: "", specShape: "", bladeWidth: "", note: "", sourceDocument: 1, sourcePage: 1, sourceRow: "1", evidence: "1 ケリソン 18cm 上向 3.5mm 数量10 納期2026/11/30", warnings: [], ...overrides });
+const sources = await Promise.all(["src/intake-duplicates.js", "apps-script/Config.gs", "apps-script/Parser.gs", "apps-script/Import.gs", "apps-script/AiImport.gs", "apps-script/Repository.gs"].map((name) => readFile(new URL(`../${name}`, import.meta.url), "utf8")));
+const item = (overrides = {}) => ({ customer: "検証用商事", product: "ケリソン 18cm 上向 3.5mm", productCode: "", quantity: 10, dueDate: "2026-11-30", serialNo: "TEST-01", externalOrderNo: "", externalLineNo: "", specLength: "", specShape: "", bladeWidth: "", note: "", sourceDocument: 1, sourcePage: 1, sourceRow: "1", evidence: "1 ケリソン 18cm 上向 3.5mm 数量10 納期2026/11/30", warnings: [], ...overrides });
 const document = (overrides = {}) => ({ complete: true, documentItemCount: 1, printedQuantityTotal: null, warnings: [], items: [item()], ...overrides });
 const response = (data = document(), finishReason = "STOP") => ({ candidates: [{ finishReason, content: { parts: [{ text: JSON.stringify(data) }] } }] });
 
-test("AIが品名に含めた先頭の製品コードを備考へ分離し、品名・仕様・連番・根拠を保つ", () => {
+test("AIが品名に含めた先頭の製品コードを分離して保持し、品名・仕様・連番・根拠を保つ", () => {
   const product = "Yｹﾘｿﾝﾊﾟﾝﾁ3㎜/上向 左ｶｰﾌﾞ:JS07-040-6L";
   for (const note of ["支給部品あり", "支給部品あり / 品番: F06-35-30L"]) {
     const original = item({ product: `F06-35-30L ${product}`, note, evidence: `F06-35-30L ${product} 数量5`, quantity: 5 });
     const { context, saved } = harness({ reply: response(document({ items: [original] })) });
     context.createIntakeWithAi({ text: "田中医科の注文" });
     assert.equal(saved[0].parsed.product, product);
-    assert.equal(saved[0].parsed.note, "支給部品あり / 品番: F06-35-30L");
+    assert.equal(saved[0].parsed.note, "支給部品あり");
+    assert.equal(saved[0].parsed.productCode, "F06-35-30L");
     assert.equal(saved[0].parsed.quantity, 5);
     assert.equal(saved[0].parsed.serialNo, "TEST-01");
     assert.equal(saved[0].parsed.bladeWidth, "3mm");
     assert.match(saved[0].parsed._ai.evidence, /F06-35-30L/);
   }
 });
+
+test("AI取込は得意先別名解決後に田中の末尾補助コードを除去する", () => {
+  const rawProduct = "F06-35-30L Yケリソンパンチ3mm/上向 左カーブ:JS07-040-4S-J TM対象";
+  const { context } = harness();
+  const results = context.validateAiImportResponse_(response(document({ items: [item({
+    customer: "田中医科器械製作所",
+    product: rawProduct,
+    quantity: 5,
+    evidence: rawProduct,
+  })] })));
+  assert.equal(results[0].parsed.customer, "田中");
+  assert.equal(results[0].parsed.product, "Yケリソンパンチ3mm/上向 左カーブ");
+  assert.equal(results[0].parsed.productCode, "F06-35-30L");
+  assert.equal(results[0].parsed.bladeWidth, "3mm");
+  assert.equal(results[0].parsed.specShape, "上曲左");
+  assert.equal(results[0].parsed._ai.evidence, rawProduct);
+});
 function harness({ status = 200, reply = response(), confirmed = "true", limit = "10" } = {}) {
   const properties = new Map([["GEMINI_API_KEY", "test-only-not-a-real-key"], ["AI_FREE_TIER_CONFIRMED", confirmed], ["AI_DAILY_LIMIT", limit]]);
   const saved = [];
   const calls = [];
-  const context = vm.createContext({ Date, Math, Number, Object, String, JSON, RegExp });
+  const context = vm.createContext({ requireAppAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireAdminAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireEditorAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireOwnerAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), getAccessSettings: () => ({emails: [], version: 1}), Date, Math, Number, Object, String, JSON, RegExp });
   vm.runInContext(sources.join("\n"), context);
   Object.assign(context, {
     ensureSystem_: () => {}, withDocumentLock_: (fn) => fn(), sanitizeText_: (value) => String(value || ""),
-    appendIntake_: (value) => { saved.push(value); return value; }, appendLog_: () => {},
+    readJobs_: () => [],
+    appendIntake_: (value) => { saved.push(value); return value; },
+    appendIntakes_: (values) => { saved.push(...values); return values; }, appendLog_: () => {}, SpreadsheetApp: { flush() {} },
     PropertiesService: { getScriptProperties: () => ({ getProperty: (key) => properties.get(key), setProperty: (key, value) => properties.set(key, value) }) },
-    Utilities: { formatDate: () => "2026-09-07", getUuid: () => "ai-test" },
+    Utilities: { formatDate: () => "2026-09-07", getUuid: () => "ai-test", DigestAlgorithm: { SHA_256: "sha256" }, Charset: { UTF_8: "utf8" }, computeDigest: (_algorithm, value) => [...createHash("sha256").update(value).digest()] },
     UrlFetchApp: { fetch: (url, options) => { calls.push({ url, options }); return { getResponseCode: () => status, getContentText: () => JSON.stringify(reply) }; } }
   });
   return { context, properties, saved, calls };
@@ -269,7 +290,7 @@ test("AIメール取込は本文と添付を1回で解析し、同じメール�
   context.GmailApp = { search: () => [{ getMessages: () => [message] }] };
   assert.equal(context.scanOrderEmails({ engine: "ai" }).added, 1);
   assert.equal(calls.length, 1);
-  assert.equal(saved[0].sourceRef, "gmail:mock-message:item:1");
+  assert.match(saved[0].sourceRef, /^gmail:mock-message:item:v1:[a-f0-9]{64}$/);
   assert.match(calls[0].options.payload, /添付の明細/);
   assert.equal(context.scanOrderEmails({ engine: "ai" }).added, 0);
   assert.equal(calls.length, 1);

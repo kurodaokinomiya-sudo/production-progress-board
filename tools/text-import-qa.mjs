@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
 import { mkdir } from "node:fs/promises";
-const require = createRequire(import.meta.url);
-const { chromium } = require("C:/Users/kurom/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright");
-const browser = await chromium.launch({ headless: true, executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe" });
+import { chromium, qaBaseUrl } from "./browser-runtime.mjs";
+const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1280, height: 1024 } });
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
@@ -18,7 +16,7 @@ await page.route("**/api/local/parse-order-text", (route) => {
 });
 const body = "得意先: 田中\n品名: ケリソン18cm上向3mm\n数量: 10\n納期: 2026-11-30\n連番: 26-1790-1\n\n品名: 鋭匙鉗子21cm直4mm\n数量: 5\n納期: 2026-11-30\n連番: 26-1790-2";
 try {
-  await page.goto(process.env.PROGRESS_BOARD_QA_URL || "http://127.0.0.1:4177/dist/Index.html", { waitUntil: "networkidle" });
+  await page.goto(await qaBaseUrl("/dist/Index.html"), { waitUntil: "networkidle" });
   const jobsBefore = await page.evaluate(() => JSON.parse(localStorage.getItem("production-board-demo-v2")).jobs.length);
   await page.locator("[data-action='open-import']").first().click();
   await page.locator("#import-text-tab").click();

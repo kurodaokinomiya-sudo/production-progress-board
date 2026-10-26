@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
 import { mkdir } from "node:fs/promises";
-const require = createRequire(import.meta.url);
-const { chromium } = require("C:/Users/kurom/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright");
-const browser = await chromium.launch({ headless: true, executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe" });
+import { chromium, qaBaseUrl } from "./browser-runtime.mjs";
+const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1024 } });
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
@@ -13,7 +11,7 @@ const row = (n) => page.locator(".bulk-intake-row").nth(n);
 const confirm = () => page.locator("#bulk-intake-dialog [data-action='confirm-intake-delete']").click();
 const waitCount = (n) => page.waitForFunction((count) => document.querySelectorAll(".bulk-intake-row").length === count && !bulkIntakeBusy, n);
 try {
-  await page.goto(process.env.PROGRESS_BOARD_QA_URL || "http://127.0.0.1:4178/dist/Index.html", { waitUntil: "networkidle" });
+  await page.goto(await qaBaseUrl("/dist/Index.html"), { waitUntil: "networkidle" });
   const originalJobs = (await data()).jobs;
   await page.locator("[data-action='open-import']").first().click();
   await page.locator("#import-text-tab").click();

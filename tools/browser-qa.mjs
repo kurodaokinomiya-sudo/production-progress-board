@@ -1,20 +1,15 @@
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
 import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { chromium, qaBaseUrl } from "./browser-runtime.mjs";
 
-const require = createRequire(import.meta.url);
-const { chromium } = require("C:/Users/kurom/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright");
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const output = path.join(root, "output", "playwright");
-const baseUrl = process.env.PROGRESS_BOARD_QA_URL || "http://127.0.0.1:4173";
+const baseUrl = await qaBaseUrl("/src/index.html");
 await mkdir(output, { recursive: true });
 
-const browser = await chromium.launch({
-  headless: true,
-  executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe",
-});
+const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, colorScheme: "light" });
 const errors = [];
 await page.route(/https:\/\/fonts\.(?:googleapis|gstatic)\.com\//, async (route) => {
@@ -88,8 +83,6 @@ try {
   const weldingRow = processForm.locator("[data-stage-key='welding']");
   await page.screenshot({ path: path.join(output, "process-dialog-tablet.png"), fullPage: true });
   await weldingRow.getByRole("button", { name: "完了", exact: true }).click();
-  const weldingAssigneeTrigger = weldingRow.locator(".assignee-trigger");
-  if (await weldingAssigneeTrigger.getAttribute("aria-expanded") !== "true") await weldingAssigneeTrigger.click();
   await weldingRow.getByRole("button", { name: "豊", exact: true }).click();
   await processForm.getByRole("button", { name: "工程を保存" }).click();
   await page.locator("#process-dialog").waitFor({ state: "hidden" });
@@ -242,6 +235,7 @@ try {
   await page.waitForTimeout(50);
   assert.equal(await page.evaluate(() => window.__labelPrintCalls), 1);
   assert.equal(await page.locator("#label-print-sheet .product-label").count(), 9);
+  await page.evaluate(() => window.dispatchEvent(new Event("beforeprint")));
   await page.emulateMedia({ media: "print" });
   const labelPhysicalSize = await page.locator("#label-print-sheet .product-label").first().evaluate((element) => {
     const style = getComputedStyle(element);
@@ -255,7 +249,7 @@ try {
   assert.equal(await page.evaluate(() => document.body.classList.contains("is-printing-labels")), false);
   assert.equal(await page.locator("#label-print-result").isVisible(), true);
   await page.screenshot({ path: path.join(output, "label-print-confirmation-tablet.png"), fullPage: true });
-  await page.getByRole("button", { name: "印刷済みにする" }).click();
+  await page.getByRole("button", { name: "印刷完了・待ちから外す" }).click();
   await page.locator("#label-print-result").waitFor({ state: "hidden" });
   assert.equal(await page.locator("#label-selection-count").textContent(), "0 / 9枚");
   assert.equal(await page.locator("#label-job-list [data-label-job-id]").count(), 1);
@@ -346,7 +340,9 @@ try {
 
   await selectView("dashboard");
   await page.locator("[data-action='show-current-completed']").click();
-  assert.equal(await page.locator("#completed-period").inputValue(), "current");
+  const shipmentMonthParts = new Intl.DateTimeFormat("en-US", { year: "numeric", month: "2-digit", timeZone: "Asia/Tokyo" }).formatToParts(new Date());
+  assert.equal(await page.locator("#completed-year").inputValue(), shipmentMonthParts.find((part) => part.type === "year").value);
+  assert.equal(await page.locator("#completed-month").inputValue(), shipmentMonthParts.find((part) => part.type === "month").value);
   await page.locator("#completed-sort").selectOption("category");
   await page.waitForTimeout(50);
   assert.equal(await page.locator("#completed-workspace .order-card").count(), 2);

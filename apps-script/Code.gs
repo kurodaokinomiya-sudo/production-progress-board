@@ -1,19 +1,57 @@
-function doGet() {
-  return HtmlService.createHtmlOutputFromFile("Index")
+function doGet(request) {
+  var browserShortcut = !!(request && request.parameter && request.parameter.launch === "browser");
+  var output;
+  if (readAccessContext_()) output = HtmlService.createHtmlOutputFromFile("Index");
+  else {
+    var template = HtmlService.createTemplateFromFile("Access");
+    template.appUrl = ScriptApp.getService().getUrl() + (browserShortcut ? "?launch=browser" : "");
+    output = template.evaluate();
+  }
+  output
     .setTitle("生産工程管理")
-    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.DEFAULT)
-      .addMetaTag("viewport", "width=device-width, initial-scale=1, viewport-fit=cover");
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.DEFAULT);
+  // 通常URLは専用画面、launch=browserは通常のChromeショートカットとして追加する。
+  // 本人確認の前後で同じ起動方式を保ち、端末側の追加制限は回避しない。
+  if (!browserShortcut) {
+    output.addMetaTag("mobile-web-app-capable", "yes")
+      .addMetaTag("apple-mobile-web-app-capable", "yes");
+  }
+  return output
+    .addMetaTag("viewport", "width=device-width, initial-scale=1, viewport-fit=cover");
 }
 
 function getSnapshot(request) {
-  ensureSystem_();
+  var access = requireAppAccess_();
+  var settings = ensureSystem_() || readSettings_();
+  if (!access.isOwner) {
+    delete settings.gmailQuery;
+    delete settings.maxEmailThreads;
+  }
+  var canReadImports = access.canEdit === true;
+  if (!canReadImports) {
+    delete settings.customerRules;
+    delete settings.importSettings;
+  }
+  var jobs;
+  var materialInventory = null;
+  if (canReadImports && typeof materialInventorySnapshotUnlocked_ === "function" && typeof MaterialInventory !== "undefined") {
+    materialInventory = withDocumentLock_(function() {
+      jobs = readJobs_();
+      return materialInventorySnapshotUnlocked_(access, jobs);
+    });
+  } else jobs = readJobs_();
+  if (typeof materialJobForAccess_ === "function") jobs = jobs.map(function(job) { return materialJobForAccess_(job, access); });
   return {
-    jobs: readJobs_(),
-    intake: readIntake_(),
-    settings: readSettings_(),
+    jobs: typeof decorateProductJobs_ === "function" ? decorateProductJobs_(jobs, settings) : jobs,
+    materialInventory: materialInventory,
+    productMasterStatus: typeof getProductMasterStatus_ === "function" ? getProductMasterStatus_() : null,
+    intake: canReadImports ? readIntake_() : [],
+    settings: settings,
+    access: access,
+    accessSettings: access.isAdmin ? getAccessSettings() : null,
     mode: "live",
-    aiImport: getAiImportStatus(),
-    scriptEditorUrl: "https://script.google.com/home/projects/" + encodeURIComponent(ScriptApp.getScriptId()) + "/edit",
+    aiImport: canReadImports ? getAiImportStatus() : { configured: false, ready: false, model: "" },
+    scriptEditorUrl: access.isOwner ? "https://script.google.com/home/projects/" + encodeURIComponent(ScriptApp.getScriptId()) + "/edit" : "",
     serverTime: new Date().toISOString(),
     setupRequired: false,
     requestedSince: request && request.since ? request.since : null
@@ -21,14 +59,11 @@ function getSnapshot(request) {
 }
 
 function saveSettings(input) {
-  ensureSystem_();
+  var access = requireAdminAccess_();
   input = input || {};
+  if (["gmailQuery", "maxEmailThreads"].some(function(key) { return input[key] !== undefined; })) requireOwnerAccess_();
+  var updates = {};
   var allowed = ["gmailQuery", "maxEmailThreads", "syncIntervalSeconds"];
-  var sheet = getSpreadsheet_().getSheetByName(APP.SHEETS.SETTINGS);
-  var values = sheet.getDataRange().getValues();
-  var rowsByKey = {};
-  for (var i = 1; i < values.length; i += 1) rowsByKey[String(values[i][0])] = i + 1;
-
   allowed.forEach(function(key) {
     if (input[key] === undefined) return;
     var value = String(input[key]).trim();
@@ -39,11 +74,73 @@ function saveSettings(input) {
     if (key === "syncIntervalSeconds" && (!/^\d+$/.test(value) || Number(value) < 10 || Number(value) > 300)) {
       throw new Error("自動更新間隔は10〜300秒で入力してください。");
     }
-    if (rowsByKey[key]) sheet.getRange(rowsByKey[key], 2).setValue(value);
-    else sheet.appendRow([key, value, ""]);
+    updates[key] = value;
+  });
+  if (input.stageAssignees !== undefined) updates.stageAssignees = normalizeStageAssigneesSetting_(input.stageAssignees);
+  if (input.distributionAssignees !== undefined) updates.distributionAssignees = normalizeDistributionAssigneesSetting_(input.distributionAssignees);
+
+  ensureSystem_();
+  withDocumentLock_(function() {
+    var sheet = getSpreadsheet_().getSheetByName(APP.SHEETS.SETTINGS);
+    var values = sheet.getDataRange().getValues();
+    var rowsByKey = {};
+    for (var i = 1; i < values.length; i += 1) rowsByKey[String(values[i][0])] = i + 1;
+    Object.keys(updates).forEach(function(key) {
+      if (rowsByKey[key]) sheet.getRange(rowsByKey[key], 2).setValue(sheetCellValue_(updates[key]));
+      else sheet.appendRow(sheetValues_([[key, updates[key], ""]])[0]);
+    });
   });
   appendLog_("settings.update", "settings", "global", input);
-  return readSettings_();
+  var settings = readSettings_();
+  if (!access.isOwner) {
+    delete settings.gmailQuery;
+    delete settings.maxEmailThreads;
+  }
+  return settings;
+}
+
+function normalizeStageAssigneesSetting_(value) {
+  var parsed;
+  try { parsed = JSON.parse(String(value)); }
+  catch (error) { throw new Error("工程担当者の設定JSONが不正です。"); }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("工程担当者の設定形式が不正です。");
+  var settingStages = APP.STAGES.concat(["heatSharp"]);
+  Object.keys(parsed).forEach(function(stage) {
+    if (settingStages.indexOf(stage) < 0) throw new Error("不明な工程です: " + stage);
+  });
+  var normalized = {};
+  settingStages.forEach(function(stage) {
+    if (!Object.prototype.hasOwnProperty.call(parsed, stage)) {
+      normalized[stage] = stage === "heatSharp" ? normalized.heat.slice() : APP.ASSIGNEES.slice();
+      return;
+    }
+    if (!Array.isArray(parsed[stage])) throw new Error("工程担当者は配列で指定してください: " + stage);
+    var seen = {};
+    normalized[stage] = parsed[stage].map(function(name) {
+      if (typeof name !== "string" || APP.ASSIGNEES.indexOf(name) < 0) throw new Error("不明な担当者です: " + name);
+      if (seen[name]) return null;
+      seen[name] = true;
+      return name;
+    }).filter(function(name) { return name !== null; });
+  });
+  return JSON.stringify(normalized);
+}
+
+function normalizeDistributionAssigneesSetting_(value) {
+  var parsed;
+  try { parsed = JSON.parse(String(value)); }
+  catch (error) { throw new Error("配布担当者の設定JSONが不正です。"); }
+  if (!Array.isArray(parsed)) throw new Error("配布担当者は配列で指定してください。");
+  parsed.forEach(function(name) {
+    if (typeof name !== "string" || APP.ASSIGNEES.indexOf(name) < 0) throw new Error("不明な配布担当者です: " + name);
+  });
+  var seen = {};
+  var normalized = APP.ASSIGNEES.filter(function(name) {
+    if (parsed.indexOf(name) < 0 || seen[name]) return false;
+    seen[name] = true;
+    return true;
+  });
+  return JSON.stringify(normalized);
 }
 
 /**
@@ -53,11 +150,13 @@ function saveSettings(input) {
  * rewritten as a consequence.
  */
 function getCustomerRules() {
+  requireEditorAccess_();
   if (typeof ensureSystem_ === "function") ensureSystem_();
   return readCustomerRulesSnapshot_();
 }
 
 function saveCustomerRules(input) {
+  requireAdminAccess_();
   if (!input || typeof input !== "object") throw new Error("得意先ルールがありません。");
   if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 0) throw new Error("expectedVersionは0以上の整数で指定してください。");
   if (!Object.prototype.hasOwnProperty.call(input, "rules")) throw new Error("保存する得意先ルールがありません。");
@@ -151,12 +250,12 @@ function writeCustomerRulesSetting_(saved) {
   var value = JSON.stringify(saved);
   if (matches.length) {
     var cell = sheet.getRange(matches[0], 2);
-    if (typeof cell.setValue === "function") cell.setValue(value);
-    else cell.setValues([[value]]);
+    if (typeof cell.setValue === "function") cell.setValue(sheetCellValue_(value));
+    else cell.setValues(sheetValues_([[value]]));
   } else if (typeof sheet.appendRow === "function") {
-    sheet.appendRow(["customerRules", value, "AI取込の得意先判定ルール"]);
+    sheet.appendRow(sheetValues_([["customerRules", value, "AI取込の得意先判定ルール"]])[0]);
   } else {
-    sheet.getRange(lastRow + 1, 1, 1, 3).setValues([["customerRules", value, "AI取込の得意先判定ルール"]]);
+    sheet.getRange(lastRow + 1, 1, 1, 3).setValues(sheetValues_([["customerRules", value, "AI取込の得意先判定ルール"]]));
   }
   if (typeof SpreadsheetApp !== "undefined" && SpreadsheetApp.flush) SpreadsheetApp.flush();
   if (typeof appendLog_ === "function") appendLog_("settings.customerRules.update", "settings", "customerRules", { version: saved.version });
