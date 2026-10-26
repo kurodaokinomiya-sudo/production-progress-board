@@ -1,0 +1,230 @@
+--- a/docs/browser-qa.md
++++ b/docs/browser-qa.md
+@@ -24,0 +25,2 @@
++
++`npm run qa:stock-dialog` はTezoe在庫のボタン/背景/Escapeでの下書き保持、遅い保存の閉鎖防止、失敗後再試行、権限失効、フォーカスとinert解除、タブレット幅を確認する。
+--- a/package.json
++++ b/package.json
+@@ -14,0 +15 @@
++    "qa:stock-dialog": "node tools/finished-stock-dialog-qa.mjs",
+--- a/src/app.js
++++ b/src/app.js
+@@ -1000,0 +1001 @@
++      openDialog(dialog) { openDialog(dialog); },
+@@ -4019,0 +4021,5 @@
++  if (dialog.id === "finished-stock-dialog") {
++    if (force) finishedStockUi?.clear();
++    else finishedStockUi?.close();
++    return;
++  }
+@@ -4041,0 +4048 @@
++    if (state.accessRevoked) { qs("#access-required")?.focus({ preventScroll: true }); return; }
+@@ -6223 +6230 @@
+-  qsa("dialog:not(#material-dialog)").forEach((dialog) => dialog.addEventListener("click", (event) => {
++  qsa("dialog:not(#material-dialog):not(#finished-stock-dialog)").forEach((dialog) => dialog.addEventListener("click", (event) => {
+@@ -6226 +6233 @@
+-  qsa("dialog:not(#material-dialog)").forEach((dialog) => dialog.addEventListener("cancel", (event) => {
++  qsa("dialog:not(#material-dialog):not(#finished-stock-dialog)").forEach((dialog) => dialog.addEventListener("cancel", (event) => {
+--- a/src/finished-stock-ui.js
++++ b/src/finished-stock-ui.js
+@@ -21 +21 @@
+-    let draft = null, attempt = null, overviewSignature = "";
++    let draft = null, attempt = null, overviewSignature = "", clearRevision = 0;
+@@ -149,3 +149,5 @@
+-    function close() {
+-      if (pending) return;
+-      remember(); dialog.close();
++    function close({ force = false, keepDraft = true } = {}) {
++      if (pending && !force) return false;
++      if (keepDraft) remember();
++      if (dialog?.open) dialog.close();
++      return true;
+@@ -205 +207,3 @@
+-      controls(); dialog.showModal();
++      controls();
++      if (options.openDialog) options.openDialog(dialog);
++      else dialog.showModal();
+@@ -221,0 +226 @@
++      const capturedClear = clearRevision;
+@@ -226 +231 @@
+-        if (!permitted()) return;
++        if (!permitted() || capturedClear !== clearRevision) return;
+@@ -229 +234 @@
+-        dialog.close(); draft = null; attempt = null;
++        close({ force: true, keepDraft: false }); draft = null; attempt = null;
+@@ -234 +239 @@
+-        if (!permitted()) return;
++        if (!permitted() || capturedClear !== clearRevision) return;
+@@ -259,2 +264,2 @@
+-      revision += 1; snapshot = null; dirty = true; queued = false; draft = null; attempt = null; savedDrafts.clear(); overviewSignature = "";
+-      if (dialog?.open) dialog.close();
++      revision += 1; clearRevision += 1; snapshot = null; dirty = true; queued = false; draft = null; attempt = null; savedDrafts.clear(); overviewSignature = "";
++      close({ force: true, keepDraft: false });
+@@ -292,0 +298 @@
++      dialog.addEventListener("click", (event) => { if (event.target === dialog) close(); });
+@@ -323 +329 @@
+-    return { render, refresh, invalidate, clear };
++    return { render, refresh, invalidate, clear, close };
+--- a/tests/finished-stock-ui.test.mjs
++++ b/tests/finished-stock-ui.test.mjs
+@@ -82 +82 @@
+-    submit: () => form.fire("submit"), close: () => closeButton.fire("click"),
++    submit: () => form.fire("submit"), close: (method = "button") => method === "backdrop" ? dialog.fire("click") : method === "escape" ? dialog.fire("cancel") : closeButton.fire("click"),
+@@ -84,0 +85,50 @@
++
++for (const method of ["button", "backdrop", "escape"]) {
++  test(`${method}: empty and edited stock forms close through the same draft-preserving path`, async () => {
++    const h = harness(); await h.ready(); await h.open();
++    await h.close(method); assert.equal(h.dialog.open, false);
++    await h.open(); assert.equal(h.fields.quantity.value, "");
++    h.fill(); await h.close(method); assert.equal(h.dialog.open, false);
++    await h.open();
++    assert.equal(h.fields.quantity.value, "5"); assert.equal(h.fields.note.value, "現物確認");
++    assert.equal(h.calls.mutations.length, 0);
++  });
++
++  test(`${method}: pending saves refuse normal closure and successful saves do not restore the submitted draft`, async () => {
++    const h = harness(); await h.ready(); await h.open(); h.fill();
++    const write = deferred(); h.setMutation(() => write.promise);
++    const pending = h.submit(); await h.close(method);
++    assert.equal(h.dialog.open, true); assert.equal(h.calls.mutations.length, 1);
++    const result = h.commit("opening", h.calls.mutations[0]);
++    write.resolve(result); await pending;
++    assert.equal(h.dialog.open, false);
++    await h.open(); assert.equal(h.fields.quantity.value, "");
++    assert.equal(h.snapshot().version, 1);
++  });
++
++  test(`${method}: a failed/lost reply remains recoverable with the same request id and no duplicate stock`, async () => {
++    const h = harness(); await h.ready(); await h.open(); h.fill();
++    let lost = true;
++    h.setMutation((action, payload) => { const result = h.commit(action, payload); if (lost) { lost = false; throw new Error("synthetic lost reply"); } return result; });
++    await h.submit(); await h.close(method); await h.open();
++    assert.equal(h.fields.quantity.value, "5"); assert.equal(h.fields.note.value, "現物確認");
++    await h.submit();
++    assert.equal(h.calls.mutations[0].requestId, h.calls.mutations[1].requestId);
++    assert.equal(h.snapshot().version, 1); assert.equal(h.snapshot().products[0].stockQuantity, 5);
++  });
++}
++
++test("forced access clear discards confidential drafts and ignores a late save even if editing is later restored", async () => {
++  for (const success of [true, false]) {
++    const h = harness(); await h.ready(); await h.open(); h.fill();
++    const write = deferred(); h.setMutation(() => write.promise);
++    const pending = h.submit();
++    h.setEditable(false); h.ui.clear(); assert.equal(h.dialog.open, false);
++    h.setEditable(true);
++    if (success) write.resolve(h.snapshot()); else write.reject(new Error("late failure"));
++    await pending;
++    await h.ui.refresh(); await h.open();
++    assert.equal(h.fields.quantity.value, ""); assert.equal(h.fields.note.value, "");
++    assert.equal(h.dialog.open, true);
++  }
++});
+--- /dev/null
++++ b/tools/finished-stock-dialog-qa.mjs
+@@ -0,0 +1,104 @@
++import assert from "node:assert/strict";
++import path from "node:path";
++import { runBrowserQa, selectQaView } from "./browser-runtime.mjs";
++
++const dialogSelector = "#finished-stock-dialog";
++const openSelector = '[data-stock-action="opening"]';
++async function open(page) {
++  await page.locator(openSelector).first().click();
++  await page.locator(dialogSelector).waitFor({ state: "visible" });
++}
++async function close(page, method) {
++  if (method === "button") await page.locator(`${dialogSelector} [data-stock-close]`).first().click();
++  else if (method === "escape") await page.keyboard.press("Escape");
++  else await page.mouse.click(4, 4);
++  await page.locator(dialogSelector).waitFor({ state: "hidden" });
++  await page.waitForFunction(() => ![...document.querySelectorAll("body > header, body > main, body > footer")].some(element => element.inert));
++}
++async function fill(page, note, quantity = "5") {
++  await page.locator('#finished-stock-form [name="quantity"]').fill(quantity);
++  await page.locator('#finished-stock-form [name="note"]').fill(note);
++}
++async function resetDraft(page) {
++  await page.evaluate(async () => { finishedStockUi.clear(); await finishedStockUi.refresh(); });
++}
++const events = page => page.evaluate(() => JSON.parse(localStorage.getItem("production-board-demo-v2")).finishedStockEvents || []);
++
++await runBrowserQa("stock-dialog", async ({ page, output, label }) => {
++  await selectQaView(page, "finishedStock");
++  for (const method of ["button", "backdrop", "escape"]) {
++    await resetDraft(page); await open(page); await close(page, method);
++    await page.waitForFunction(selector => document.activeElement === document.querySelector(selector), openSelector);
++    await open(page); await fill(page, `合成下書き-${method}`); await close(page, method); await open(page);
++    assert.equal(await page.locator('#finished-stock-form [name="quantity"]').inputValue(), "5");
++    assert.equal(await page.locator('#finished-stock-form [name="note"]').inputValue(), `合成下書き-${method}`);
++    await close(page, method);
++  }
++
++  await page.evaluate(() => {
++    globalThis.qaStockWrites = [];
++    globalThis.qaStockGate = new Promise(resolve => { globalThis.qaStockRelease = resolve; });
++    const original = api.openFinishedStock.bind(api);
++    api.openFinishedStock = async payload => {
++      qaStockWrites.push(structuredClone(payload)); await qaStockGate;
++      const result = await original(payload);
++      if (globalThis.qaStockLoseReply) { globalThis.qaStockLoseReply = false; throw new Error("synthetic lost stock reply"); }
++      return result;
++    };
++  });
++  await resetDraft(page); await open(page); await fill(page, "遅い保存の合成fixture");
++  await page.locator("#finished-stock-submit").click();
++  await page.waitForFunction(() => document.querySelector("#finished-stock-form").getAttribute("aria-busy") === "true");
++  const closeButton = page.locator(`${dialogSelector} [data-stock-close]`).first();
++  assert.equal(await closeButton.isDisabled(), true);
++  await closeButton.evaluate(element => element.click());
++  await page.mouse.click(4, 4); await page.keyboard.press("Escape");
++  assert.equal(await page.locator(dialogSelector).isVisible(), true);
++  assert.equal(await page.evaluate(() => qaStockWrites.length), 1);
++  await page.evaluate(() => qaStockRelease());
++  await page.locator(dialogSelector).waitFor({ state: "hidden" });
++  await page.waitForFunction(() => document.querySelector("#finished-stock-form").getAttribute("aria-busy") === "false");
++  assert.equal((await events(page)).length, 1);
++  await page.waitForFunction(() => !document.querySelector("body > main").inert && document.activeElement !== document.body);
++
++  for (const method of ["button", "backdrop", "escape"]) {
++    const before = (await events(page)).length;
++    await open(page); await fill(page, `応答消失-${method}`);
++    await page.evaluate(() => { globalThis.qaStockLoseReply = true; });
++    await page.locator("#finished-stock-submit").click();
++    await page.waitForFunction(() => document.querySelector("#finished-stock-form").getAttribute("aria-busy") === "false" && document.querySelector("#finished-stock-form-status").textContent.includes("入力を保持"));
++    await close(page, method); await open(page);
++    assert.equal(await page.locator('#finished-stock-form [name="note"]').inputValue(), `応答消失-${method}`);
++    await page.locator("#finished-stock-submit").click();
++    await page.locator(dialogSelector).waitFor({ state: "hidden" });
++    await page.waitForFunction(() => document.querySelector("#finished-stock-form").getAttribute("aria-busy") === "false");
++    const stored = await events(page);
++    assert.equal(stored.length, before + 1);
++    assert.equal(await page.evaluate(() => qaStockWrites.at(-1).requestId === qaStockWrites.at(-2).requestId), true);
++  }
++
++  await open(page); await fill(page, "失効時に消す下書き", "2");
++  await page.evaluate(() => { globalThis.qaStockGate = new Promise(resolve => { globalThis.qaStockRelease = resolve; }); });
++  await page.locator("#finished-stock-submit").click();
++  await page.waitForFunction(() => document.querySelector("#finished-stock-form").getAttribute("aria-busy") === "true");
++  await page.evaluate(() => handleAccessRequired());
++  await page.locator(dialogSelector).waitFor({ state: "hidden" });
++  await page.waitForFunction(() => document.activeElement.id === "access-required" && !document.querySelector("body > main").inert);
++  await page.evaluate(() => qaStockRelease());
++  await page.waitForFunction(() => document.querySelector("#finished-stock-form").getAttribute("aria-busy") === "false");
++  await page.evaluate(async () => {
++    state.accessRevoked = false; document.body.classList.remove("access-locked");
++    document.querySelector("#access-required").hidden = true;
++    await refreshData(); switchView("finishedStock"); await finishedStockUi.refresh();
++  });
++  await open(page);
++  assert.equal(await page.locator('#finished-stock-form [name="quantity"]').inputValue(), "");
++  assert.equal(await page.locator('#finished-stock-form [name="note"]').inputValue(), "");
++  await fill(page, "再表示とキーボード操作の合成fixture");
++  await page.setViewportSize({ width: 768, height: 1024 }); await page.keyboard.press("Tab");
++  assert.equal(await page.locator(dialogSelector).evaluate(element => element.contains(document.activeElement)), true);
++  await page.screenshot({ path: path.join(output, `${label}-stock-dialog-tablet.png`), fullPage: true });
++  await close(page, "escape"); await open(page);
++  assert.equal(await page.locator('#finished-stock-form [name="note"]').inputValue(), "再表示とキーボード操作の合成fixture");
++  await close(page, "button");
++});
