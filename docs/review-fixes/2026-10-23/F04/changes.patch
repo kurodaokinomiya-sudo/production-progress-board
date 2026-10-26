@@ -1,0 +1,567 @@
+--- a/apps-script/Config.gs
++++ b/apps-script/Config.gs
+@@ -20 +20 @@
+-    "labelPrintStatus", "labelPrintedAt", "distributionAssignee", "polishingJson", "productCode", "externalOrderNo", "externalLineNo", "materialsJson", "stockPlannedQuantity", "completionKind"
++    "labelPrintStatus", "labelPrintedAt", "distributionAssignee", "polishingJson", "productCode", "externalOrderNo", "externalLineNo", "materialsJson", "stockPlannedQuantity", "completionKind", "processSaveJson"
+--- a/apps-script/Repository.gs
++++ b/apps-script/Repository.gs
+@@ -115 +115,2 @@
+-    _materialsJsonRaw: row.materialsJson || ""
++    _materialsJsonRaw: row.materialsJson || "",
++    _processSaveJsonRaw: row.processSaveJson || ""
+@@ -255 +256,2 @@
+-    _materialsJsonRaw: existing ? existing._materialsJsonRaw : ""
++    _materialsJsonRaw: existing ? existing._materialsJsonRaw : "",
++    _processSaveJsonRaw: existing ? existing._processSaveJsonRaw : ""
+@@ -309,0 +312 @@
++    processSaveJson: job._processSaveJsonRaw || "",
+@@ -370,0 +374,2 @@
++  if (!existing && Number(input.version || 0) > 0) throw new Error("案件が見つかりません。画面を更新してください。");
++  if (existing && existing.archived) throw new Error("削除済みの案件は更新できません。");
+@@ -402,0 +408,2 @@
++    rowJob._processSaveJsonRaw = processOnlyRow.processSaveJson || "";
++    job._processSaveJsonRaw = rowJob._processSaveJsonRaw;
+@@ -455,0 +463,7 @@
++function processSaveIdentity_(input) {
++  return JSON.stringify({ id: input.id, version: input.version, shippingStatus: input.shippingStatus || "",
++    stages: APP.STAGES.filter(function(stage) { return Object.prototype.hasOwnProperty.call(input.stages, stage); }).map(function(stage) {
++      return [stage, input.stages[stage].status, input.stages[stage].assignee];
++    }) });
++}
++
+@@ -459 +473 @@
+-  var allowed = ["id", "version", "stages", "shippingStatus"];
++  var allowed = ["id", "version", "stages", "shippingStatus", "requestId"];
+@@ -461,0 +476 @@
++  if (input.requestId !== undefined && (typeof input.requestId !== "string" || !input.requestId.trim() || input.requestId.length > 120)) throw new Error("工程保存のリクエストIDが不正です。");
+@@ -462,0 +478,8 @@
++  Object.keys(input.stages).forEach(function(stage) {
++    if (APP.STAGES.indexOf(stage) < 0) throw new Error("不明な工程です: " + stage);
++    var update = input.stages[stage];
++    if (!update || typeof update !== "object" || Array.isArray(update) || Object.keys(update).some(function(key) { return key !== "status" && key !== "assignee"; })) throw new Error("工程更新の形式が不正です。");
++    if (["not_started", "working", "done", "hold"].indexOf(update.status) < 0) throw new Error("工程の状態が不正です。");
++    if (!Object.prototype.hasOwnProperty.call(update, "assignee")) throw new Error("工程担当の形式が不正です。");
++    sanitizeAssignee_(update.assignee, stage);
++  });
+@@ -469,0 +493,8 @@
++    if (input.requestId && existing._processSaveJsonRaw) {
++      var previousSave;
++      try { previousSave = JSON.parse(existing._processSaveJsonRaw); } catch (error) { throw new Error("工程保存の再試行情報が不正です。管理者に確認してください。"); }
++      if (previousSave.requestId === input.requestId) {
++        if (previousSave.identity !== processSaveIdentity_(input)) throw new Error("同じリクエストIDで異なる工程を保存できません。");
++        return decorateJobForResponse_(existing);
++      }
++    }
+@@ -480 +510,0 @@
+-      if (APP.STAGES.indexOf(stage) < 0) throw new Error("不明な工程です: " + stage);
+@@ -482,3 +511,0 @@
+-      if (!update || typeof update !== "object" || Array.isArray(update) || Object.keys(update).some(function(key) { return key !== "status" && key !== "assignee"; })) throw new Error("工程更新の形式が不正です。");
+-      if (!Object.prototype.hasOwnProperty.call(update, "status") || ["not_started", "working", "done", "hold"].indexOf(update.status) < 0) throw new Error("工程の状態が不正です。");
+-      if (!Object.prototype.hasOwnProperty.call(update, "assignee")) throw new Error("工程担当の形式が不正です。");
+@@ -501,0 +529 @@
++    if (input.requestId) rawRow.processSaveJson = JSON.stringify({ requestId: input.requestId, identity: processSaveIdentity_(input) });
+--- a/docs/browser-qa.md
++++ b/docs/browser-qa.md
+@@ -22,0 +23,2 @@
++
++`npm run qa:conflicts` は注文・工程の2タブ競合、別項目の併合、同一項目の選択、復旧中の再競合、作業員の送信範囲、応答消失後の工程/新規注文の再試行、削除・権限失効を確認する。
+--- a/package.json
++++ b/package.json
+@@ -13,0 +14 @@
++    "qa:conflicts": "node tools/conflict-recovery-qa.mjs",
+--- a/src/app.js
++++ b/src/app.js
+@@ -158,0 +159 @@
++let appliedSnapshotRevision = 0;
+@@ -526 +527 @@
+-  async saveJobUnlocked(payload) {
++  async saveJobUnlocked(payload, { processOnly = false } = {}) {
+@@ -527,0 +529 @@
++    if (processOnly && (!canWork() || state.accessRevoked)) throw new Error("工程を更新する権限がありません。");
+@@ -536,0 +539,2 @@
++    if (!previous && Number(payload.version || 0) > 0) throw new Error("案件が見つかりません。画面を更新してください。");
++    if (previous?.archived) throw new Error("削除済みの案件は更新できません。");
+@@ -601,8 +605,20 @@
+-    if (!canWork()) throw new Error("工程を更新する権限がありません。");
+-    const previous = this.read().jobs.find((job) => job.id === payload.id && !job.archived);
+-    if (!previous) throw new Error("案件が見つかりません。画面を更新してください。");
+-    if (Number(previous.version || 0) !== Number(payload.version || 0)) throw new Error("別の端末で先に更新されています。画面を更新して内容を確認してください。");
+-    if (!canWorkOnJob(previous)) throw new Error("出荷待ち・出荷済みの案件を更新するには編集権限が必要です。");
+-    const shippingStatus = payload.shippingStatus || previous.shippingStatus || "not_ready";
+-    if (!canEdit() && shippingStatus !== (previous.shippingStatus || "not_ready")) throw new Error("出荷状態を更新するには編集権限が必要です。");
+-    return this.saveJob({ ...previous, stages: { ...previous.stages, ...payload.stages }, shippingStatus });
++    const commit = async () => {
++      if (!canWork() || state.accessRevoked) throw new Error("工程を更新する権限がありません。");
++      if (Object.keys(payload).some(key => !["id", "version", "stages", "shippingStatus", "requestId"].includes(key))) throw new Error("工程更新に許可されていない項目があります。");
++      const previous = this.read().jobs.find(job => job.id === payload.id && !job.archived);
++      if (!previous) throw new Error("案件が見つかりません。画面を更新してください。");
++      const identity = processSaveIdentity(payload);
++      const previousSave = previous._processSaveJsonRaw ? JSON.parse(previous._processSaveJsonRaw) : null;
++      if (payload.requestId && previousSave?.requestId === payload.requestId) {
++        if (previousSave.identity !== identity) throw new Error("同じリクエストIDで異なる工程を保存できません。");
++        return previous;
++      }
++      if (Number(previous.version || 0) !== Number(payload.version || 0)) throw new Error("別の端末で先に更新されています。画面を更新して内容を確認してください。");
++      if (!canWorkOnJob(previous)) throw new Error("出荷待ち・出荷済みの案件を更新するには編集権限が必要です。");
++      const shippingStatus = payload.shippingStatus || previous.shippingStatus || "not_ready";
++      if (!canEdit() && shippingStatus !== (previous.shippingStatus || "not_ready")) throw new Error("出荷状態を更新するには編集権限が必要です。");
++      return this.saveJobUnlocked({ ...previous, stages: { ...previous.stages, ...payload.stages }, shippingStatus, requestId: payload.requestId,
++        _processSaveJsonRaw: payload.requestId ? JSON.stringify({ requestId: payload.requestId, identity }) : previous._processSaveJsonRaw || "" }, { processOnly: true });
++    };
++    if (globalThis.navigator?.locks) return navigator.locks.request(`${this.storageKey}:intake-approval`, commit);
++    return commit();
+@@ -2038,0 +2055 @@
++      appliedSnapshotRevision += 1;
+@@ -3959 +3976 @@
+-    return JSON.stringify([...new FormData(qs("#order-form"))].filter(([name]) => !["id", "version"].includes(name)));
++    return JSON.stringify(Object.entries(orderEditFields(qs("#order-form"))));
+@@ -4292,0 +4310,87 @@
++function saveFailureKind(error) {
++  const message = String(error?.message || error);
++  if (/削除済み|見つかりません|権限|ACCESS_DENIED/.test(message)) return "blocked";
++  return /VERSION_CONFLICT|別の端末|先に更新|更新されています/.test(message) ? "conflict" : "unknown";
++}
++
++function processSaveIdentity(input) {
++  return JSON.stringify({ id: input.id, version: input.version, shippingStatus: input.shippingStatus || "",
++    stages: STAGES.filter(stage => Object.prototype.hasOwnProperty.call(input.stages, stage.key)).map(({ key }) => [key, input.stages[key].status, input.stages[key].assignee]) });
++}
++
++function orderEditFields(form) {
++  return Object.fromEntries([...new FormData(form)].filter(([key]) => !["id", "version"].includes(key) && !key.startsWith("_recovery.")));
++}
++
++function processEditFields(job) {
++  const value = JSON.parse(processEditSnapshot(job)), fields = { shippingStatus: value.shippingStatus };
++  STAGES.forEach(({ key }) => ["status", "assignee"].forEach(part => { fields[`stages.${key}.${part}`] = value.stages[key][part]; }));
++  return fields;
++}
++
++// Three-way merge of editable fields only. A newer version is not permission to
++// resend an old form: unrelated remote changes always come from latest.
++function rebaseEditFields(base, mine, latest) {
++  const values = { ...latest }, conflicts = [];
++  for (const key of Object.keys(mine)) {
++    if (JSON.stringify(mine[key]) === JSON.stringify(base[key])) continue;
++    if (JSON.stringify(latest[key]) !== JSON.stringify(base[key]) && JSON.stringify(latest[key]) !== JSON.stringify(mine[key])) {
++      conflicts.push({ key, base: base[key], mine: mine[key], latest: latest[key] });
++    } else values[key] = mine[key];
++  }
++  return { values, conflicts };
++}
++
++function recoveryFieldLabel(key) {
++  const labels = { customer: "得意先", product: "品名", productCode: "製品番号", labelKeywords: "材料表示", dueDate: "納期", quantity: "数量", stockPlannedQuantity: "うち在庫予定", serialNo: "連番", category: "大分類", priority: "優先度", labelPrintStatus: "製品ラベル", specLength: "全長", specShape: "型", bladeWidth: "刃幅", note: "備考", shippingStatus: "出荷状態" };
++  const [, stage, part] = key.split(".");
++  return labels[key] || `${STAGES.find(item => item.key === stage)?.label || stage}・${part === "status" ? "状態" : "担当"}`;
++}
++
++function recoveryValueLabel(key, value) {
++  if (key.endsWith(".status")) return statusLabel(value);
++  if (key === "shippingStatus") return ({ not_ready: "未出荷", waiting: "出荷待ち", shipped: "出荷完了", hold: "保留" })[value] || value;
++  return String(value ?? "") || "（空欄）";
++}
++
++function showEditRecovery(form, analysis, apply) {
++  const panel = qs("[data-edit-recovery]", form);
++  form._unresolvedRecovery = new Set(analysis?.conflicts.map(item => item.key) || []);
++  if (!panel) return;
++  panel.hidden = !analysis;
++  if (!analysis) { panel.innerHTML = ""; return; }
++  panel.innerHTML = `<h3>他端末の更新を確認</h3><p role="status">${analysis.conflicts.length ? "同じ項目が変更されています。使う値を選び、内容を確認して保存してください。" : "最新の保存内容に、自分が変更した項目だけを反映しました。内容を確認して保存してください。"}</p>${analysis.conflicts.map(item => `<label class="field"><span>${escapeHtml(recoveryFieldLabel(item.key))}</span><small>編集開始時：${escapeHtml(recoveryValueLabel(item.key, item.base))}</small><small>最新の保存値：${escapeHtml(recoveryValueLabel(item.key, item.latest))}</small><small>自分の入力：${escapeHtml(recoveryValueLabel(item.key, item.mine))}</small><select name="_recovery.${escapeHtml(item.key)}" data-recovery-field="${escapeHtml(item.key)}" required><option value="">使う値を選択</option><option value="latest">最新の保存値を使う</option><option value="mine"${item.mineUnavailable ? " disabled" : ""}>自分の入力を使う${item.mineUnavailable ? "（研磨の全数戻りが必要）" : ""}</option></select></label>`).join("")}`;
++  qsa("[data-recovery-field]", panel).forEach(select => select.addEventListener("change", () => {
++    const item = analysis.conflicts.find(entry => entry.key === select.dataset.recoveryField);
++    if (!select.value) { form._unresolvedRecovery.add(item.key); return; }
++    apply(item.key, item[select.value]);
++    form._unresolvedRecovery.delete(item.key);
++  }));
++}
++
++function recoveryHasUnresolved(form) {
++  if (!form._unresolvedRecovery?.size) return false;
++  qs("[data-recovery-field]", form)?.focus();
++  showToast("他端末と同じ項目の変更があります。使う値を選んでください。", { tone: "error" });
++  return true;
++}
++
++async function refreshFailedDraft(kind, id) {
++  const drafts = kind === "order" ? failedOrderDrafts : failedProcessDrafts;
++  if (qs("dialog[open]") || state.accessRevoked) return;
++  const draft = drafts.get(id);
++  if (!draft || (kind === "order" ? !canEdit() : !canWork())) return;
++  const before = appliedSnapshotRevision;
++  await refreshData();
++  if (state.accessRevoked || qs("dialog[open]") || !drafts.has(id)) return;
++  if (appliedSnapshotRevision === before) { showToast("最新情報を取得できませんでした。「今すぐ更新」後に入力内容を開いてください。", { tone: "error" }); return; }
++  const latest = state.jobs.find(job => job.id === id);
++  if (!latest || latest.archived || (kind === "process" && !canWorkOnJob(latest))) {
++    showToast("案件が削除済みか、編集権限が変わっています。下書きは再保存せず、最新の案件を確認してください。", { tone: "error" });
++    return;
++  }
++  if (draft.failureKind === "blocked") { draft.failureKind = "conflict"; draft.failedAtRevision = before; }
++  if (kind === "order") openOrderDialog(latest);
++  else openProcessDialog(latest);
++}
++
+@@ -4295,0 +4400,6 @@
++  const draft = failedOrderDrafts.get(job?.id);
++  if (draft?.failureKind === "blocked") { void refreshFailedDraft("order", job.id); return; }
++  if (draft?.failureKind === "conflict" && appliedSnapshotRevision <= draft.failedAtRevision) { void refreshFailedDraft("order", job.id); return; }
++  if (job?.archived || draft?.previous && !state.jobs.some(entry => entry.id === job.id && !entry.archived)) {
++    showToast("案件が削除済みか、見つかりません。下書きは保持しています。", { tone: "error" }); return;
++  }
+@@ -4329 +4439,2 @@
+-  const draft = failedOrderDrafts.get(job?.id);
++  form._baseFields = orderEditFields(form);
++  form._editJob = structuredClone(baseValue);
+@@ -4331 +4442,9 @@
+-  if (draft) {
++  showEditRecovery(form, null);
++  if (draft?.failureKind === "conflict") {
++    const mine = Object.fromEntries(Object.keys(form._baseFields).map(key => [key, draft.values[key] ?? ""]));
++    const analysis = rebaseEditFields(draft.baseFields || Object.fromEntries(JSON.parse(draft.baseline)), mine, form._baseFields);
++    const apply = (key, value) => { if (form.elements[key]) form.elements[key].value = value; updateFinishedStockOrderSummary(form); };
++    Object.entries(analysis.values).forEach(([key, value]) => apply(key, value));
++    form._saveAttempt = null;
++    showEditRecovery(form, analysis, apply);
++  } else if (draft) {
+@@ -4337,0 +4457,2 @@
++    form._baseFields = draft.baseFields || form._baseFields;
++    form._editJob = structuredClone(draft.editJob || draft.previous || baseValue);
+@@ -4342 +4463,2 @@
+-  openDialog(qs("#order-dialog"), "[name='customer']");
++  openDialog(qs("#order-dialog"), form._unresolvedRecovery?.size ? "[data-recovery-field]" : "[name='customer']");
++  if (draft?.failureKind === "conflict") qs("[data-edit-recovery]", form)?.scrollIntoView({ block: "start" });
+@@ -4351 +4473,15 @@
+-  if (draft) job = draft.order;
++  if (draft?.failureKind === "blocked") { void refreshFailedDraft("process", job.id); return; }
++  if (draft?.failureKind === "conflict" && appliedSnapshotRevision <= draft.failedAtRevision) { void refreshFailedDraft("process", job.id); return; }
++  const latest = structuredClone(job);
++  let analysis = null;
++  if (draft?.failureKind === "conflict") {
++    analysis = rebaseEditFields(draft.baseFields || processEditFields(draft.previous), processEditFields(draft.order), processEditFields(latest));
++    job = structuredClone(latest);
++    Object.entries(analysis.values).forEach(([key, value]) => applyProcessFieldToJob(job, key, value));
++    if (draft.order.stages.finish.status === "done" && !polishingFinishReady(latest)) {
++      const key = "stages.finish.status";
++      if (!analysis.conflicts.some(item => item.key === key)) analysis.conflicts.push({ key, base: draft.baseFields?.[key], mine: "done", latest: latest.stages.finish.status });
++      analysis.conflicts.find(item => item.key === key).mineUnavailable = true;
++      job.stages.finish.status = latest.stages.finish.status;
++    }
++  } else if (draft) job = draft.order;
+@@ -4353,0 +4490,4 @@
++  form._baseFields = draft && !analysis ? draft.baseFields : processEditFields(latest);
++  form._editJob = draft && !analysis ? draft.editJob || latest : latest;
++  form._saveAttempt = draft && !analysis ? draft.saveAttempt : null;
++  form._retryOrder = draft && !analysis ? draft.order : null;
+@@ -4378,0 +4519,10 @@
++  showEditRecovery(form, analysis, (key, value) => {
++    if (key === "shippingStatus") form.dataset.shippingStatus = value;
++    else {
++      const [, stage, part] = key.split(".");
++      const row = qs(`.stage-edit-row[data-stage-key='${stage}']`, form);
++      if (part === "status") updateStageStatus(row, value);
++      else updateAssigneePicker(qs(".assignee-picker", row), value);
++    }
++    renderProcessLifecycleAction();
++  });
+@@ -4382,2 +4532,2 @@
+-  openDialog(qs("#process-dialog"), `.stage-edit-row[data-stage-key='${focusStageKey}'] .stage-control.is-selected`);
+-  const focusTarget = requestedStageKey === "shipping" ? qs("#process-lifecycle-note") : qs(`.stage-edit-row[data-stage-key='${focusStageKey}']`, form);
++  openDialog(qs("#process-dialog"), form._unresolvedRecovery?.size ? "[data-recovery-field]" : `.stage-edit-row[data-stage-key='${focusStageKey}'] .stage-control.is-selected`);
++  const focusTarget = analysis ? qs("[data-edit-recovery]", form) : requestedStageKey === "shipping" ? qs("#process-lifecycle-note") : qs(`.stage-edit-row[data-stage-key='${focusStageKey}']`, form);
+@@ -4384,0 +4535,8 @@
++}
++
++function applyProcessFieldToJob(job, key, value) {
++  if (key === "shippingStatus") job.shippingStatus = value;
++  else {
++    const [, stage, part] = key.split(".");
++    job.stages[stage][part] = value;
++  }
+@@ -4408 +4566 @@
+-  const values = Object.fromEntries(new FormData(form));
++  const values = Object.fromEntries([...new FormData(form)].filter(([key]) => !key.startsWith("_recovery.")));
+@@ -4437,0 +4596 @@
++  if (recoveryHasUnresolved(form)) return;
+@@ -4463 +4622,2 @@
+-  const draft = { order, previous, values: Object.fromEntries(new FormData(form)),
++  const draft = { order, previous, values: { id: form.elements.id.value, version: form.elements.version.value, ...orderEditFields(form) },
++    baseFields: structuredClone(form._baseFields || {}), editJob: structuredClone(form._editJob || previous || {}),
+@@ -4491 +4651,2 @@
+-    failedOrderDrafts.set(order.id, draft);
++    draft.failureKind = saveFailureKind(error); draft.failedAtRevision = appliedSnapshotRevision;
++    if (canEdit()) failedOrderDrafts.set(order.id, draft);
+@@ -4528 +4689,8 @@
+-  const order = processFromForm(form);
++  if (recoveryHasUnresolved(form)) return;
++  let order = processFromForm(form);
++  const fingerprint = processEditSnapshot(order);
++  const saveAttempt = form._saveAttempt?.fingerprint === fingerprint
++    ? form._saveAttempt : { fingerprint, requestId: window.crypto.randomUUID() };
++  if (form._retryOrder && form._saveAttempt === saveAttempt) order = structuredClone(form._retryOrder);
++  form._saveAttempt = saveAttempt;
++  order.requestId = saveAttempt.requestId;
+@@ -4547,0 +4716,2 @@
++  const draft = { order, destination, previous,
++    baseFields: structuredClone(form._baseFields || processEditFields(form._editJob || previous)), editJob: structuredClone(form._editJob || previous), saveAttempt };
+@@ -4559 +4729 @@
+-      ? await api.saveJobProcess({ id: order.id, version: order.version, stages: order.stages, shippingStatus: order.shippingStatus })
++      ? await api.saveJobProcess({ id: order.id, version: order.version, stages: order.stages, shippingStatus: order.shippingStatus, requestId: order.requestId })
+@@ -4572 +4742 @@
+-    failedProcessDrafts.set(order.id, { order, destination });
++    if (canWork()) failedProcessDrafts.set(order.id, { ...draft, failureKind: saveFailureKind(error), failedAtRevision: appliedSnapshotRevision });
+--- a/src/index.html
++++ b/src/index.html
+@@ -473,0 +475 @@
++          <section class="edit-recovery" data-edit-recovery="order-form" aria-label="他端末との更新内容を確認" hidden></section>
+@@ -523,0 +526 @@
++          <section class="edit-recovery" data-edit-recovery="process-form" aria-label="他端末との更新内容を確認" hidden></section>
+--- a/src/styles.css
++++ b/src/styles.css
+@@ -2250,0 +2251,13 @@
++
++.edit-recovery:not([hidden]) {
++  display: grid;
++  gap: var(--space-sm);
++  padding: var(--space-md);
++  margin-block-end: var(--space-md);
++  border-inline-start: 3px solid var(--color-warning);
++  background: var(--color-warning-soft);
++  color: var(--color-ink);
++  overflow-wrap: anywhere;
++}
++.edit-recovery h3, .edit-recovery p { margin: 0; }
++.edit-recovery select { min-height: 44px; max-width: 100%; }
+--- /dev/null
++++ b/tests/edit-recovery.test.mjs
+@@ -0,0 +1,67 @@
++import assert from "node:assert/strict";
++import { readFile } from "node:fs/promises";
++import vm from "node:vm";
++import test from "node:test";
++import { sheetsFixture } from "./helpers/sheets-fixture.mjs";
++
++const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
++const { rebaseEditFields: merge, saveFailureKind } = vm.runInNewContext(`${source.slice(source.indexOf("function saveFailureKind"), source.indexOf("function recoveryFieldLabel"))}\n({rebaseEditFields, saveFailureKind})`);
++const copy = value => JSON.parse(JSON.stringify(value));
++
++test("three-way recovery retains remote untouched fields and reapplies only local edits", () => {
++  const base = { note: "開始", quantity: "2", "stages.welding.status": "working", "stages.welding.assignee": "豊" };
++  const mine = { ...base, note: "自分", "stages.welding.assignee": "幹" };
++  const latest = { ...base, quantity: "5", "stages.welding.status": "done" };
++  assert.deepEqual(copy(merge(base, mine, latest)), { values: { ...latest, note: "自分", "stages.welding.assignee": "幹" }, conflicts: [] });
++  assert.deepEqual(base, { note: "開始", quantity: "2", "stages.welding.status": "working", "stages.welding.assignee": "豊" });
++});
++
++test("same-field changes require a choice, equal edits do not, and another update is compared again", () => {
++  const base = { note: "開始", quantity: "2", labelKeywords: "" };
++  const mine = { note: "自分", quantity: "4", labelKeywords: "白銅" };
++  const latest = { note: "他端末", quantity: "4", labelKeywords: "ｱﾘｼﾞ" };
++  const result = copy(merge(base, mine, latest));
++  assert.deepEqual(result.conflicts.map(item => item.key), ["note", "labelKeywords"]);
++  assert.equal(result.values.note, "他端末");
++  assert.equal(result.values.quantity, "4");
++  const chosen = { ...result.values, note: mine.note };
++  assert.equal(merge(latest, chosen, { ...latest, note: "さらに更新" }).conflicts[0].key, "note");
++});
++
++test("explicit version conflicts and an uncertain network result remain distinct", () => {
++  assert.equal(saveFailureKind(new Error("別の端末で先に更新されています。")), "conflict");
++  assert.equal(saveFailureKind(new Error("response lost after commit")), "unknown");
++});
++
++test("worker process retry after a committed write loses no input and changes neither version nor protected order fields", async () => {
++  const h = await sheetsFixture(), c = h.context;
++  const job = c.saveJob({ customer: "検証用", product: "ケリソン 18cm", quantity: 2, note: "注文を保持", labelPrintStatus: "printed" });
++  c.requireWorkerAccess_ = () => ({ canWork: true, canEdit: false });
++  const request = { id: job.id, version: job.version, requestId: "process-retry", stages: { welding: { status: "working", assignee: "豊" } } };
++  h.state.afterFlush = () => { h.state.afterFlush = null; throw new Error("lost response"); };
++  assert.throws(() => c.saveJobProcess(request), /lost response/);
++  const committed = c.readJobs_()[0], writes = h.state.writes;
++  assert.equal(committed.stages.welding.status, "working");
++  assert.equal(c.saveJobProcess(request).version, committed.version);
++  assert.equal(h.state.writes, writes);
++  assert.equal(c.readJobs_()[0].note, "注文を保持");
++  assert.equal(c.readJobs_()[0].labelPrintStatus, "printed");
++  assert.throws(() => c.saveJobProcess({ ...request, stages: { welding: { status: "hold", assignee: "豊" } } }), /同じリクエストID/);
++  assert.throws(() => c.saveJobProcess({ ...request, customer: "偽造" }), /許可されていない/);
++  const later = c.saveJob({ ...committed, note: "別の編集者", requestId: "later-order" });
++  assert.equal(c.saveJobProcess(request).version, later.version);
++  assert.equal(c.readJobs_()[0].note, "別の編集者");
++  c.setJobArchived({ id: later.id, version: later.version, archived: true });
++  assert.throws(() => c.saveJobProcess(request), /削除済み/);
++});
++
++test("a new process request never bypasses an old version and archived/missing order saves stay blocked", async () => {
++  const h = await sheetsFixture(), c = h.context;
++  const job = c.saveJob({ customer: "検証用", product: "ケリソン 18cm", quantity: 2 });
++  const stages = { welding: { status: "working", assignee: "豊" } };
++  const first = c.saveJobProcess({ id: job.id, version: job.version, stages, requestId: "first" });
++  assert.throws(() => c.saveJobProcess({ id: job.id, version: job.version, stages, requestId: "different" }), /別の端末/);
++  const archived = c.setJobArchived({ id: job.id, version: first.version, archived: true });
++  assert.throws(() => c.saveJob({ ...archived, archived: false }), /削除済み/);
++  assert.throws(() => c.saveJob({ ...job, id: "missing" }), /見つかりません/);
++});
+--- a/tests/process-interactions.test.mjs
++++ b/tests/process-interactions.test.mjs
+@@ -94 +94 @@
+-    window: { google: { script: { run } }, addEventListener() {} }, localStorage: { getItem() { return null; }, setItem() {} },
++    window: { crypto: { randomUUID: () => `process-request-${calls.saves.length}` }, google: { script: { run } }, addEventListener() {} }, localStorage: { getItem() { return null; }, setItem() {} },
+--- /dev/null
++++ b/tools/conflict-recovery-qa.mjs
+@@ -0,0 +1,154 @@
++import assert from "node:assert/strict";
++import path from "node:path";
++import { runBrowserQa, waitForQaReady } from "./browser-runtime.mjs";
++
++const id = "DEMO-001";
++const stored = page => page.evaluate(id => JSON.parse(localStorage.getItem("production-board-demo-v2")).jobs.find(job => job.id === id), id);
++async function openOrder(page) {
++  await page.locator(`[data-action="edit-order"][data-order-id="${id}"]`).first().click();
++  await page.locator("#order-dialog").waitFor({ state: "visible" });
++}
++async function openProcess(page) {
++  await page.locator(`[data-action="open-process"][data-order-id="${id}"][data-stage-key="welding"]`).first().click();
++  await page.locator("#process-dialog").waitFor({ state: "visible" });
++}
++async function submit(page, kind, { failed = false } = {}) {
++  await page.locator(`#${kind}-form button[type="submit"]`).click();
++  await page.locator(`#${kind}-dialog`).waitFor({ state: "hidden" });
++  await page.waitForFunction(({ kind, id, failed }) => {
++    const drafts = kind === "order" ? failedOrderDrafts : failedProcessDrafts;
++    const pending = kind === "order" ? pendingJobMutations : pendingProcessSaves;
++    return !pending.has(id) && (!failed || drafts.has(id));
++  }, { kind, id, failed });
++}
++async function recover(page, kind) {
++  const before = await page.evaluate(() => appliedSnapshotRevision);
++  await page.locator('[data-action="refresh"]:visible').first().click();
++  await page.waitForFunction(before => appliedSnapshotRevision > before && !snapshotLoading, before);
++  await page.getByRole("button", { name: "入力内容を開く", exact: true }).last().click();
++  await page.locator(`#${kind}-dialog`).waitFor({ state: "visible" });
++}
++const stage = page => page.locator('#process-form .stage-edit-row[data-stage-key="welding"]');
++
++await runBrowserQa("conflict-recovery", async ({ page: a, context, origin, label, output }) => {
++  const b = await context.newPage(); b.setDefaultTimeout(10000);
++  await b.goto(`${origin}/${label === "source" ? "src/index.html" : "dist/Index.html"}`); await waitForQaReady(b);
++  await openOrder(a); await openOrder(b);
++  await a.locator('#order-form [name="note"]').fill("Aの下書き");
++  await b.locator('#order-form [name="quantity"]').fill("12");
++  await submit(b, "order"); await submit(a, "order", { failed: true });
++  await recover(a, "order");
++  assert.equal(await a.locator('#order-form [name="note"]').inputValue(), "Aの下書き");
++  assert.equal(await a.locator('#order-form [name="quantity"]').inputValue(), "12");
++  assert.equal(await a.locator("#order-form [data-recovery-field]").count(), 0);
++  await submit(a, "order"); await a.reload(); await waitForQaReady(a);
++  assert.equal((await stored(a)).quantity, 12); assert.equal((await stored(a)).note, "Aの下書き");
++
++  await b.reload(); await waitForQaReady(b);
++  await openOrder(a); await openOrder(b);
++  await a.locator('#order-form [name="note"]').fill("Aの衝突入力");
++  await b.locator('#order-form [name="note"]').fill("Bの保存内容");
++  await submit(b, "order"); await submit(a, "order", { failed: true });
++  await recover(a, "order");
++  const choice = a.locator('#order-form [data-recovery-field="note"]');
++  const recovery = await a.evaluate(id => { const draft = failedOrderDrafts.get(id); return { kind: draft?.failureKind, base: draft?.baseFields?.note, mine: draft?.values?.note, latest: state.jobs.find(job => job.id === id)?.note, form: document.querySelector('#order-form [name="note"]').value }; }, id);
++  assert.equal(recovery.mine, "Aの衝突入力", JSON.stringify(recovery));
++  assert.equal(await choice.inputValue(), "");
++  assert.equal(await choice.evaluate(element => element === document.activeElement), true);
++  await choice.selectOption("mine");
++  await a.setViewportSize({ width: 768, height: 1024 });
++  assert.ok(await a.locator("#order-dialog .dialog-body").evaluate(element => element.scrollWidth <= element.clientWidth));
++  assert.ok(await choice.evaluate(element => element.getBoundingClientRect().height >= 44));
++  await a.screenshot({ path: path.join(output, `${label}-order-conflict.png`), fullPage: true });
++  await a.setViewportSize({ width: 1280, height: 900 });
++  await openOrder(b); await b.locator('#order-form [name="note"]').fill("Bの追加更新"); await submit(b, "order");
++  await submit(a, "order", { failed: true });
++  await recover(a, "order");
++  await a.locator('#order-form [data-recovery-field="note"]').selectOption("latest");
++  await submit(a, "order");
++  assert.equal((await stored(a)).note, "Bの追加更新");
++
++  await a.reload(); await waitForQaReady(a); await b.reload(); await waitForQaReady(b);
++  await a.evaluate(() => {
++    const originalSnapshot = api.getSnapshot.bind(api);
++    api.getSnapshot = async (...args) => ({ ...await originalSnapshot(...args), access: { role: "worker", canWork: true, canEdit: false } });
++    state.access = { role: "worker", canWork: true, canEdit: false }; renderAll();
++    globalThis.qaProcessRequests = [];
++    const original = api.saveJobProcess.bind(api);
++    api.saveJobProcess = async function(payload) {
++      qaProcessRequests.push(structuredClone(payload));
++      const result = await original(payload);
++      if (globalThis.qaLoseProcessReply) { globalThis.qaLoseProcessReply = false; throw new Error("synthetic lost process reply"); }
++      return result;
++    };
++  });
++  await openProcess(a); await openProcess(b);
++  await stage(a).locator('[data-assignee="幹"]').click();
++  await stage(b).locator('[data-status="hold"]').click();
++  await submit(b, "process"); await submit(a, "process", { failed: true });
++  await recover(a, "process");
++  assert.equal(await stage(a).locator('[data-status="hold"]').getAttribute("aria-pressed"), "true");
++  assert.equal(await stage(a).locator('[data-assignee="幹"]').getAttribute("aria-pressed"), "true");
++  await submit(a, "process");
++  let saved = await stored(a);
++  assert.equal(saved.stages.welding.status, "hold"); assert.equal(saved.stages.welding.assignee, "幹");
++  const payload = await a.evaluate(() => qaProcessRequests.at(-1));
++  assert.deepEqual(Object.keys(payload).sort(), ["id", "version", "stages", "shippingStatus", "requestId"].sort());
++  assert.equal(saved.note, "Bの追加更新");
++
++  await b.reload(); await waitForQaReady(b);
++  await openProcess(a); await openProcess(b);
++  await stage(a).locator('[data-assignee="豊"]').click(); await stage(b).locator('[data-assignee="鈴"]').click();
++  await submit(b, "process"); await submit(a, "process", { failed: true }); await recover(a, "process");
++  await a.locator('#process-form [data-recovery-field="stages.welding.assignee"]').selectOption("mine");
++  await submit(a, "process"); assert.equal((await stored(a)).stages.welding.assignee, "豊");
++
++  await openProcess(a); await stage(a).locator('[data-assignee="幹"]').click();
++  await a.evaluate(() => { globalThis.qaLoseProcessReply = true; qaProcessRequests.length = 0; });
++  await submit(a, "process", { failed: true });
++  const committedVersion = (await stored(a)).version;
++  await a.getByRole("button", { name: "入力内容を開く", exact: true }).last().click();
++  await a.locator("#process-dialog").waitFor({ state: "visible" });
++  await submit(a, "process");
++  assert.equal((await stored(a)).version, committedVersion);
++  assert.equal(await a.evaluate(() => JSON.stringify(qaProcessRequests[0]) === JSON.stringify(qaProcessRequests[1])), true);
++
++  await b.reload(); await waitForQaReady(b); await openOrder(b);
++  await b.locator('#order-form [name="note"]').fill("削除前の下書き");
++  await a.evaluate(async id => { const job = api.read().jobs.find(job => job.id === id); await api.setJobArchived({ id, version: job.version, archived: true }); }, id);
++  await submit(b, "order", { failed: true });
++  await b.getByRole("button", { name: "入力内容を開く", exact: true }).last().click();
++  assert.equal(await b.locator("#order-dialog").isVisible(), false);
++  assert.equal((await stored(b)).archived, true);
++  await b.evaluate(() => handleAccessRequired());
++  assert.equal(await b.evaluate(() => failedOrderDrafts.size + failedProcessDrafts.size), 0);
++  await b.close();
++
++  const c = await context.newPage(); c.setDefaultTimeout(10000);
++  await c.goto(`${origin}/${label === "source" ? "src/index.html" : "dist/Index.html"}`); await waitForQaReady(c);
++  await c.evaluate(() => {
++    globalThis.qaOrderRequests = [];
++    const original = api.saveJob.bind(api);
++    api.saveJob = async function(payload) {
++      qaOrderRequests.push(structuredClone(payload));
++      const result = await original(payload);
++      if (qaOrderRequests.length === 1) throw new Error("synthetic lost new-order reply");
++      return result;
++    };
++  });
++  await c.locator('[data-action="new-order"]').first().click();
++  await c.locator('#order-form [name="customer"]').fill("再試行QA");
++  await c.locator('#order-form [name="product"]').fill("鋭匙鉗子 21cm 直 4mm");
++  await c.locator('#order-form [name="quantity"]').fill("1");
++  await c.locator('#order-form [name="serialNo"]').fill("QA-NEW-RETRY");
++  await c.locator('#order-form button[type="submit"]').click();
++  await c.waitForFunction(() => !pendingJobMutations.size && failedOrderDrafts.size === 1);
++  await c.getByRole("button", { name: "入力内容を開く", exact: true }).click();
++  await c.locator("#order-dialog").waitFor({ state: "visible" });
++  await c.locator('#order-form button[type="submit"]').click();
++  await c.waitForFunction(() => !pendingJobMutations.size && failedOrderDrafts.size === 0);
++  assert.equal(await c.evaluate(() => JSON.stringify(qaOrderRequests[0]) === JSON.stringify(qaOrderRequests[1])), true);
++  await c.reload(); await waitForQaReady(c);
++  assert.equal(await c.evaluate(() => JSON.parse(localStorage.getItem("production-board-demo-v2")).jobs.filter(job => job.serialNo === "QA-NEW-RETRY").length), 1);
++  await c.close();
++});
