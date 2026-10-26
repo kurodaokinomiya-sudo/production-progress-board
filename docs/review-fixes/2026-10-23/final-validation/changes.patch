@@ -1,0 +1,18 @@
+--- a/tests/distribution-assignee.test.mjs
++++ b/tests/distribution-assignee.test.mjs
+@@ -112 +112 @@
+-  const unassigned = context.saveJob({ ...makeJob(context, { id: "JOB-NEW", distributionAssignee: undefined }), id: "JOB-NEW", distributionAssignee: undefined });
++  const unassigned = context.saveJob({ ...makeJob(context, { id: "JOB-NEW", distributionAssignee: undefined }), id: "JOB-NEW", version: 0, distributionAssignee: undefined });
+@@ -209 +209 @@
+-  assert.deepEqual(Array.from(legacyGrid[0].slice(-5)), ["productCode", "externalOrderNo", "externalLineNo", "materialsJson", "stockPlannedQuantity"]);
++  assert.deepEqual(Array.from(legacyGrid[0].slice(-7)), ["productCode", "externalOrderNo", "externalLineNo", "materialsJson", "stockPlannedQuantity", "completionKind", "processSaveJson"]);
+--- a/tests/polishing.test.mjs
++++ b/tests/polishing.test.mjs
+@@ -153 +153 @@
+-  assert.throws(() => fresh.context.saveJob(newShipped), /研磨の全数発送と全数の戻り/);
++  assert.throws(() => fresh.context.saveJob({ ...newShipped, version: 0 }), /研磨の全数発送と全数の戻り/);
+--- a/tests/repository.test.mjs
++++ b/tests/repository.test.mjs
+@@ -282 +282 @@
+-  assert.deepEqual(Array.from(context.APP.JOB_HEADERS.slice(productCodeColumn)), ["productCode", "externalOrderNo", "externalLineNo", "materialsJson", "stockPlannedQuantity"]);
++  assert.deepEqual(Array.from(context.APP.JOB_HEADERS.slice(productCodeColumn)), ["productCode", "externalOrderNo", "externalLineNo", "materialsJson", "stockPlannedQuantity", "completionKind", "processSaveJson"]);
