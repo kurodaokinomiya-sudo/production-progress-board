@@ -245,7 +245,9 @@ class AppsScriptApi {
             }
           }
           if (message.includes("ACCESS_DENIED:")) handleAccessRequired();
-          reject(new Error(message.replace(/(?:ACCESS_DENIED|WORKER_REQUIRED|EDITOR_REQUIRED|ADMIN_REQUIRED|OWNER_REQUIRED|FINISHED_STOCK_INVALID):\s*/g, "")));
+          const failure = new Error(message.replace(/(?:ACCESS_DENIED|WORKER_REQUIRED|EDITOR_REQUIRED|ADMIN_REQUIRED|OWNER_REQUIRED|FINISHED_STOCK_INVALID):\s*/g, ""));
+          if (message.includes("FINISHED_STOCK_INVALID:")) failure.code = "FINISHED_STOCK_INVALID";
+          reject(failure);
         })
         [method](payload);
       send();

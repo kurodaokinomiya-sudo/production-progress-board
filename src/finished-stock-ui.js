@@ -32,16 +32,17 @@
     const orderFor = (id) => snapshot?.orders?.find((entry) => entry.jobId === id);
     const nameFor = (id) => { const p = product(id); return p ? `${p.code} ${p.name}` : id; };
     const usable = () => permitted() && snapshot && !dirty && !pending && !reading;
+    const unresolvedShipment = (productId) => [...savedDrafts.values()].find((saved) => saved.draft?.action === "ship" && saved.attempt?.unconfirmed && saved.values.productId === productId);
 
     function controls() {
       panel?.querySelectorAll("[data-stock-action]").forEach((el) => {
         if (el.dataset.stockAction === "job") { el.disabled = !permitted(); return; }
         if (el.dataset.stockAction === "refresh") el.disabled = !permitted() || pending || Boolean(reading);
-        else el.disabled = !usable() || el.dataset.stockUnavailable === "true";
+        else el.disabled = !usable() || el.dataset.stockUnavailable === "true" && !(el.dataset.stockAction === "ship" && unresolvedShipment(el.dataset.productId));
       });
-      form?.querySelectorAll("input, select, textarea, button").forEach((el) => { el.disabled = pending || !permitted(); });
+      form?.querySelectorAll("input, select, textarea, button").forEach((el) => { el.disabled = pending || !permitted() || Boolean(attempt?.unconfirmed && el.name); });
       form?.setAttribute("aria-busy", String(pending));
-      text("#finished-stock-submit", pending ? "記録しています…" : draft?.action === "reverse" ? "理由を残して取り消す" : "記録する");
+      text("#finished-stock-submit", pending ? "記録しています…" : attempt?.unconfirmed ? "前回の記録を確認する" : draft?.action === "reverse" ? "理由を残して取り消す" : "記録する");
     }
 
     function updateForecast() {
@@ -144,7 +145,7 @@
     const draftKey = (d) => `${d.action}:${d.jobId || d.eventId || d.orderJobId || d.lotId || d.productId || "all"}`;
 
     function remember() {
-      if (draft) savedDrafts.set(draftKey(draft), { values: values(), attempt });
+      if (draft) savedDrafts.set(draftKey(draft), { draft: { ...draft }, values: values(), attempt });
     }
     function close({ force = false, keepDraft = true } = {}) {
       if (pending && !force) return false;
@@ -154,11 +155,14 @@
     }
     function open(action, data = {}) {
       if (!usable()) return;
-      if (action === "ship" && !data.orderJobId && number(product(data.productId)?.availableQuantity) <= 0) {
+      let restored = action === "ship" ? unresolvedShipment(data.productId) : null;
+      if (restored) data = { ...restored.draft };
+      if (!restored && action === "ship" && !data.orderJobId && number(product(data.productId)?.availableQuantity) <= 0) {
         const selected = (snapshot.orders || []).find((entry) => entry.productId === data.productId && entry.allocatedQuantity > 0);
         if (selected) data = { ...data, orderJobId: selected.jobId };
       }
       draft = { action, ...data }; attempt = null;
+      restored ||= savedDrafts.get(draftKey(draft));
       const p = snapshot.plans.find((entry) => entry.jobId === data.jobId);
       const o = orderFor(data.jobId || data.orderJobId);
       const production = (snapshot.productions || []).find((entry) => entry.jobId === data.jobId);
@@ -191,6 +195,11 @@
         if (action === "ship") {
           const relevant = snapshot.lots.filter((l) => l.productId === (data.productId || snapshot.products[0]?.id) && l.remainingQuantity > 0);
           const relevantOrders = (snapshot.orders || []).filter((entry) => entry.productId === (data.productId || snapshot.products[0]?.id) && entry.remainingQuantity > 0);
+          // Native selects clear values that have no option. Keep a previous
+          // selection visible even when its lot/order was consumed by the write.
+          const previousLot = restored?.values.lotId, previousOrder = restored?.values.orderJobId;
+          if (previousLot && !relevant.some((entry) => entry.id === previousLot)) relevant.push(lot(previousLot) || { id: previousLot, lotNo: `${previousLot}（前回の選択）`, remainingQuantity: 0 });
+          if (previousOrder && !relevantOrders.some((entry) => entry.jobId === previousOrder)) relevantOrders.push({ jobId: previousOrder, customer: restored.values.customer, serialNo: `${restored.values.orderRef}（前回の選択）`, allocatedQuantity: 0 });
           html += `<label class="field"><span>対象の受注</span><select name="orderJobId"><option value="">受注と紐付けない（未確保の在庫から）</option>${relevantOrders.map((entry) => `<option value="${escape(entry.jobId)}" ${entry.jobId === data.orderJobId ? "selected" : ""}>${escape(entry.customer)} / ${escape(entry.serialNo || entry.jobId)} / 確保 ${count(entry.allocatedQuantity)}丁</option>`).join("")}</select></label><label class="field"><span>出荷元ロット</span><select name="lotId"><option value="">自動（先に入庫したロットから）</option>${relevant.map((l) => `<option value="${escape(l.id)}" ${l.id === data.lotId ? "selected" : ""}>${escape(l.lotNo || l.id)} / ${count(l.remainingQuantity)}丁 / 製造 ${escape(date(l.productionDate))} / ${escape(names(l.producers) || "担当不明")}</option>`).join("")}</select></label>${inputField("customer", "出荷先・得意先", o?.customer || "", 'maxlength="160" required')}${inputField("orderRef", "注文番号・出荷管理番号", o?.serialNo || o?.jobId || "", 'maxlength="160" required')}<label class="field"><span>用途</span><select name="purpose"><option value="sale">販売用</option><option value="demo">デモ用</option></select></label>`;
         } else {
           html += `${inputField("lotNo", "ロット番号（任意）", "", 'maxlength="120"', "空欄の場合は自動採番します。")}${inputField("productionDate", "製造日", receipt ? today() : "", `type="date" max="${today()}" ${receipt ? "required" : ""}`)}${inputField("producers", "製造担当", receipt ? names(p?.producers) : "", `maxlength="240" ${receipt ? "required" : ""}`, receipt ? "複数の場合は「・」で区切って入力できます。" : "不明な場合は空欄にします。")}`;
@@ -198,12 +207,12 @@
       }
       html += `<label class="field"><span>${action === "reverse" ? "取消理由" : "備考・登録理由"}</span><textarea name="note" rows="2" maxlength="800" ${["opening", "reverse"].includes(action) ? "required" : ""}></textarea></label>`;
       q("#finished-stock-form-fields").innerHTML = html;
-      const restored = savedDrafts.get(draftKey(draft));
       if (restored) {
         for (const [name, value] of Object.entries(restored.values)) if (field(name)) field(name).value = value;
         attempt = restored.attempt;
+        draft = { ...restored.draft };
       }
-      status("#finished-stock-form-status", restored ? "前回の入力を復元しました。内容を確認して記録してください。" : "");
+      status("#finished-stock-form-status", attempt?.unconfirmed ? "前回の記録が未確認です。入力を保持しています。「前回の記録を確認する」で同じ出荷の結果を確認してください。" : restored ? "前回の入力を復元しました。内容を確認して記録してください。" : "", attempt?.unconfirmed ? "error" : "");
       controls();
       if (options.openDialog) options.openDialog(dialog);
       else dialog.showModal();
@@ -211,16 +220,16 @@
 
     async function submit(event) {
       event.preventDefault();
-      if (pending || !permitted() || !draft || !form.reportValidity()) return;
+      if (pending || !permitted() || !draft || !attempt?.unconfirmed && !form.reportValidity()) return;
       const data = values();
       for (const name of ["quantity", "orderQuantity", "stockQuantity"]) if (data[name] !== undefined) data[name] = Number(data[name]);
       if (draft.action === "ship") {
         if (data.orderJobId) data.jobVersion = draft.shipVersions[data.orderJobId];
         else delete data.orderJobId;
       }
-      const payload = { ...(draft.scheduleDefaults || {}), ...data, ...(draft.jobId ? { jobId: draft.jobId, jobVersion: draft.jobVersion } : {}), ...(draft.eventId ? { eventId: draft.eventId } : {}) };
+      const payload = attempt?.unconfirmed ? { ...attempt.payload } : { ...(draft.scheduleDefaults || {}), ...data, ...(draft.jobId ? { jobId: draft.jobId, jobVersion: draft.jobVersion } : {}), ...(draft.eventId ? { eventId: draft.eventId } : {}) };
       const fingerprint = JSON.stringify([draft.action, payload]);
-      if (!attempt || attempt.fingerprint !== fingerprint) attempt = { fingerprint, requestId: root.crypto.randomUUID(), expectedVersion: snapshot.version };
+      if (!attempt || attempt.fingerprint !== fingerprint) attempt = { fingerprint, payload: { ...payload }, requestId: root.crypto.randomUUID(), expectedVersion: snapshot.version };
       payload.requestId = attempt.requestId; payload.expectedVersion = attempt.expectedVersion;
       pending = true; revision += 1; controls();
       const capturedClear = clearRevision;
@@ -237,7 +246,10 @@
         options.onMutation?.();
       } catch (error) {
         if (!permitted() || capturedClear !== clearRevision) return;
-        status("#finished-stock-form-status", `記録を確認できませんでした。入力を保持しています。${errorMessage(error)}`, "error");
+        // A validation rejection is known not to have written. A transport
+        // failure must resolve the exact request before accepting another ship.
+        attempt.unconfirmed = draft.action === "ship" && error?.code !== "FINISHED_STOCK_INVALID" && !String(error?.message || error).includes("FINISHED_STOCK_INVALID:");
+        status("#finished-stock-form-status", `記録を確認できませんでした。入力を保持しています。${attempt.unconfirmed ? "「前回の記録を確認する」で同じ出荷の結果を確認してください。" : ""}${errorMessage(error)}`, "error");
         status("#finished-stock-status", "記録が未確認です。入力画面から再試行できます。", "error");
         remember();
         // Refresh the inventory but retain the request id/version: a lost reply
@@ -250,11 +262,12 @@
           if (draft && attempt && snapshot && !dirty) {
             attempt.expectedVersion = snapshot.version;
             const plan = draft.action === "receive" ? snapshot.plans.find((p) => p.jobId === draft.jobId) : draft.action === "schedule" ? orderFor(draft.jobId) : draft.action === "completion" ? (snapshot.productions || []).find((p) => p.jobId === draft.jobId) : null;
-            if (plan && plan.jobVersion !== draft.jobVersion && !snapshot.history.some((entry) => entry.requestId === attempt.requestId)) {
+            if (!attempt.unconfirmed && plan && plan.jobVersion !== draft.jobVersion && !snapshot.history.some((entry) => entry.requestId === attempt.requestId)) {
               draft.jobVersion = plan.jobVersion; attempt = null;
               status("#finished-stock-form-status", "案件の最新状況を読み込みました。入力した数量・製造日・製造担当を確認し、もう一度記録してください。", "error");
             }
-            if (draft.action === "ship" && !snapshot.history.some((entry) => entry.requestId === attempt?.requestId)) draft.shipVersions = Object.fromEntries((snapshot.orders || []).map((entry) => [entry.jobId, entry.jobVersion]));
+            if (draft.action === "ship" && !attempt?.unconfirmed && !snapshot.history.some((entry) => entry.requestId === attempt?.requestId)) draft.shipVersions = Object.fromEntries((snapshot.orders || []).map((entry) => [entry.jobId, entry.jobVersion]));
+            remember();
           }
         }
       }
@@ -302,6 +315,7 @@
         if (draft?.action === "schedule" && event.target.name === "orderQuantity" && field("stockQuantity")) field("stockQuantity").max = field("orderQuantity").value;
       });
       form.addEventListener("change", (event) => {
+        if (attempt?.unconfirmed) return;
         if (event.target.name === "orderJobId" && draft?.action === "ship") {
           const selected = orderFor(event.target.value);
           if (selected) { field("customer").value = selected.customer; field("orderRef").value = selected.serialNo || selected.jobId; field("quantity").value = selected.allocatedQuantity; }

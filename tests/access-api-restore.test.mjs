@@ -52,3 +52,14 @@ test("temporary restore failures retain the screen, and insufficient roles do no
   await assert.rejects(role.api.getSnapshot(), /編集権限/);
   assert.deepEqual(role.counts(), { requests: 1, restores: 0, locked: 0 });
 });
+
+test("stock validation retains a machine-readable rejection code after formatting the Apps Script message", async () => {
+  const rejected = harness([new Error("Error: FINISHED_STOCK_INVALID: 案件が別の端末で更新されています。")]);
+  await assert.rejects(rejected.api.getSnapshot(), error => {
+    assert.equal(error.code, "FINISHED_STOCK_INVALID");
+    assert.doesNotMatch(error.message, /FINISHED_STOCK_INVALID/);
+    return true;
+  });
+  const unknown = harness([new Error("通信応答を受信できませんでした。")]);
+  await assert.rejects(unknown.api.getSnapshot(), error => error.code === undefined);
+});

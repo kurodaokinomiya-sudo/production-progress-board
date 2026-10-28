@@ -45,7 +45,12 @@ function harness() {
         if (tag === "select") {
           const options = [...body.matchAll(/<option\b([^>]*)>([^]*?)<\/option>/g)];
           const selected = options.find(option => /\bselected\b/.test(option[1])) || options[0];
-          input.value = selected?.[1].match(/\bvalue="([^"]*)"/)?.[1] ?? "";
+          const choices = options.map(option => option[1].match(/\bvalue="([^"]*)"/)?.[1] ?? "");
+          let selectedValue = selected?.[1].match(/\bvalue="([^"]*)"/)?.[1] ?? "";
+          Object.defineProperty(input, "value", {
+            get: () => selectedValue,
+            set: value => { selectedValue = choices.includes(String(value)) ? String(value) : ""; },
+          });
         }
         fields[name] = input;
       }
@@ -276,4 +281,93 @@ test("stock-only production can set its completion date without creating custome
   assert.equal(h.snapshot().orders.length, 0);
   assert.equal(h.snapshot().productions[0].dueDate, "2026-11-25");
   assert.equal(h.snapshot().products[0].stockQuantity, 0);
+});
+
+function shipmentHarness(quantity = 5) {
+  const h = harness();
+  const job = { id: "retry-order", version: 7, product: "Tezoe スタンツェ 直上", productCode: "26001", customer: "合成得意先", serialNo: "RETRY", quantity, stockPlannedQuantity: 0, dueDate: "2026-10-30", stages: { finish: { status: "working" } } };
+  h.setJobs([job]);
+  for (const [id, amount] of [["lot-A", 2], ["lot-B", 5]]) h.commit("opening", { requestId: id, expectedVersion: h.snapshot().version, productId: "26001", quantity: amount, date: "2026-10-20", note: "合成在庫", lotNo: id });
+  h.commit("schedule", { requestId: "retry-schedule", expectedVersion: h.snapshot().version, jobId: job.id, jobVersion: job.version, orderQuantity: quantity, stockQuantity: quantity, shipmentMode: "split", shipDate: "2026-10-20" });
+  return { h, job, lotId: h.snapshot().lots.find(lot => lot.lotNo === "lot-A").id };
+}
+
+for (const fullOrder of [false, true]) {
+  test(`lost shipment reply preserves exhausted lot and ${fullOrder ? "fully shipped" : "remaining"} order across reopen`, async () => {
+    const { h, job, lotId } = shipmentHarness(fullOrder ? 2 : 5);
+    await h.ready(); await h.open("ship", { orderJobId: job.id });
+    h.fields.lotId.value = lotId; h.fields.quantity.value = "2";
+    let lost = true;
+    h.setMutation((action, payload) => { const result = h.commit(action, payload); if (lost) { lost = false; throw new Error("lost committed shipment reply"); } return result; });
+    await h.submit();
+    job.version += 1; h.setJobs([job]); await h.ui.refresh();
+    await h.close();
+    // The order's row/button may have disappeared; reopen from the product row.
+    await h.open("ship");
+    assert.equal(h.fields.lotId.value, lotId);
+    assert.equal(h.fields.orderJobId.value, job.id);
+    assert.equal(h.fields.quantity.value, "2");
+    await h.submit();
+    assert.equal(h.calls.mutations[1].requestId, h.calls.mutations[0].requestId);
+    assert.equal(h.calls.mutations[1].jobVersion, 7, "a committed retry must retain the submitted job version");
+    assert.equal(h.snapshot().history.filter(event => event.action === "ship").length, 1);
+    assert.equal(h.snapshot().products[0].stockQuantity, 5);
+    assert.equal(h.snapshot().history.filter(event => event.action === "ship").reduce((sum, event) => sum + event.quantity, 0), 2);
+    if (!fullOrder) {
+      await h.open("ship", { orderJobId: job.id }); h.fields.quantity.value = "1";
+      await h.submit();
+      assert.notEqual(h.calls.mutations[2].requestId, h.calls.mutations[0].requestId);
+      assert.equal(h.snapshot().history.filter(event => event.action === "ship").length, 2);
+      assert.equal(h.snapshot().products[0].stockQuantity, 4);
+    }
+  });
+}
+
+test("shipment failure before a write retries the original content once and refreshes a rejected job version", async () => {
+  const { h, job, lotId } = shipmentHarness();
+  await h.ready(); await h.open("ship", { orderJobId: job.id });
+  h.fields.lotId.value = lotId; h.fields.quantity.value = "2";
+  let failBeforeWrite = true;
+  h.setMutation((action, payload) => { if (failBeforeWrite) { failBeforeWrite = false; throw new Error("network failed before write"); } return h.commit(action, payload); });
+  await h.submit(); await h.close(); await h.open("ship"); await h.submit();
+  assert.equal(h.calls.mutations[0].requestId, h.calls.mutations[1].requestId);
+  assert.equal(h.snapshot().history.filter(event => event.action === "ship").length, 1);
+  assert.equal(h.snapshot().products[0].stockQuantity, 5);
+
+  await h.open("ship", { orderJobId: job.id }); h.fields.quantity.value = "1";
+  job.version += 1; h.setJobs([job]);
+  await h.submit();
+  assert.match(h.get("#finished-stock-form-status").textContent, /別の端末/);
+  await h.submit();
+  assert.equal(h.calls.mutations.at(-1).jobVersion, job.version);
+  assert.equal(h.snapshot().history.filter(event => event.action === "ship").length, 2);
+});
+
+test("confirming a lost shipment reply after its cancellation never ships again", async () => {
+  const { h, job, lotId } = shipmentHarness();
+  await h.ready(); await h.open("ship", { orderJobId: job.id });
+  h.fields.lotId.value = lotId; h.fields.quantity.value = "2";
+  h.setMutation((action, payload) => { const result = h.commit(action, payload); if (h.calls.mutations.length === 1) throw new Error("lost reply"); return result; });
+  await h.submit();
+  const shipped = h.snapshot().history.find(event => event.action === "ship");
+  h.commit("reverse", { requestId: "cancel-retry", expectedVersion: h.snapshot().version, eventId: shipped.id, date: "2026-10-20", note: "出荷取消" });
+  await h.ui.refresh(); await h.close(); await h.open("ship"); await h.submit();
+  assert.equal(h.snapshot().history.filter(event => event.action === "ship").length, 1);
+  assert.equal(h.snapshot().products[0].stockQuantity, 7);
+});
+
+test("formatted Apps Script validation rejections keep shipment fields editable for correction", async () => {
+  const { h, job } = shipmentHarness();
+  await h.ready(); await h.open("ship", { orderJobId: job.id });
+  let reject = true;
+  h.setMutation((action, payload) => {
+    if (reject) { reject = false; throw Object.assign(new Error("出荷数量を確認してください。"), { code: "FINISHED_STOCK_INVALID" }); }
+    return h.commit(action, payload);
+  });
+  await h.submit();
+  assert.equal(h.fields.quantity.disabled, false);
+  assert.equal(h.snapshot().history.filter(event => event.action === "ship").length, 0);
+  h.fields.quantity.value = "1"; await h.submit();
+  assert.equal(h.snapshot().history.filter(event => event.action === "ship").length, 1);
+  assert.equal(h.snapshot().products[0].stockQuantity, 6);
 });
