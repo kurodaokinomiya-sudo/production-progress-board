@@ -181,3 +181,12 @@ test("stock-only customers replenish the whole manufacturing quantity without re
   assert.equal(ui.finishedStockQuantitySummary(10, 5, "顧客向け在庫用"), "製造10丁 = 今回製造の注文向け5丁 + 在庫補充5丁（Tezoeのみ）");
   assert.equal(ui.finishedStockQuantitySummary(10, 5, "検証"), "製造10丁 = 今回製造の注文向け5丁 + 在庫補充5丁（Tezoeのみ）");
 });
+
+test("a zero stock-shipment target does not hide an insufficient manufacturing plan at completion", async () => {
+  const ui = harness();
+  const ready = await saveFinishedJob(ui, job({ id: "underproduction", requestId: "underproduction-ready", quantity: 5, stockPlannedQuantity: 0 }));
+  await ui.api.saveFinishedStockSchedule({ requestId: "underproduction-schedule", expectedVersion: 0, jobId: ready.id, jobVersion: ready.version, orderQuantity: 5, stockQuantity: 0, shipmentMode: "split" });
+  await assert.rejects(ui.api.saveJob({ ...ready, stockPlannedQuantity: 2, shippingStatus: "shipped", requestId: "underproduction-complete" }), /注文数量.*製造|製造.*不足/);
+  assert.notEqual(ui.api.read().jobs.find(job => job.id === ready.id).shippingStatus, "shipped");
+  assert.equal((await ui.api.getFinishedStock()).orders[0].quantity, 5);
+});

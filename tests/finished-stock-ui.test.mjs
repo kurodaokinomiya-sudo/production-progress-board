@@ -371,3 +371,12 @@ test("formatted Apps Script validation rejections keep shipment fields editable 
   assert.equal(h.snapshot().history.filter(event => event.action === "ship").length, 1);
   assert.equal(h.snapshot().products[0].stockQuantity, 6);
 });
+
+test("an unallocated scheduled shipment stays visible as pending stock demand", async () => {
+  const h = harness();
+  h.setJobs([{ id: "unallocated", version: 1, customer: "合成得意先", product: "Tezoe スタンツェ 直上", productCode: "26001", quantity: 3, stockPlannedQuantity: 0 }]);
+  h.commit("schedule", { requestId: "unallocated-schedule", expectedVersion: 0, jobId: "unallocated", jobVersion: 1, orderQuantity: 5, stockQuantity: 2, shipmentMode: "split" });
+  await h.ready();
+  assert.equal(h.snapshot().orders[0].allocatedQuantity, 0);
+  assert.match(h.get("#finished-stock-order-rows").innerHTML, /0<small>出荷予定残 2丁<\/small>/);
+});

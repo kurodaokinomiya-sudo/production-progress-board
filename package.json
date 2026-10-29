@@ -13,6 +13,7 @@
     "qa": "node tools/browser-smoke.mjs",
     "qa:conflicts": "node tools/conflict-recovery-qa.mjs",
     "qa:stock-dialog": "node tools/finished-stock-dialog-qa.mjs",
+    "qa:stock-completion": "node tools/stock-completion-qa.mjs",
     "qa:legacy": "node",
     "check": "npm run build && npm test && npm run test:contrast"
   },

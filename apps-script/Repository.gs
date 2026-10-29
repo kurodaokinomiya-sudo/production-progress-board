@@ -382,7 +382,7 @@ function saveJobUnlocked_(input, processOnlyRow, lockedRows) {
     FinishedStock.validateJob(job, existing, stockEvents);
     if (existing && existing.shippingStatus !== "shipped" && job.shippingStatus === "shipped") {
       var orderBeforeShipment = FinishedStock.snapshot({ jobs: rows.map(jobFromRow_), events: stockEvents }).orders.filter(function(order) { return order.jobId === job.id; })[0];
-      if (orderBeforeShipment && orderBeforeShipment.allocatedQuantity > 0) throw new Error("在庫からの出荷予定分が残っています。Tezoe製品在庫で実際の出荷を記録するか、出荷予定を調整してください。");
+      FinishedStock.validateShipmentCompletion(orderBeforeShipment, job);
     }
   }
   if (!processOnlyRow && typeof prepareJobMaterials_ === "function" && typeof MaterialInventory !== "undefined") job.materials = prepareJobMaterials_(existing, job, input);

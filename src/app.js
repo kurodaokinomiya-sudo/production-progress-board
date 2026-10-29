@@ -529,8 +529,8 @@ class MockApi {
   async saveJobUnlocked(payload, { processOnly = false } = {}) {
     await delay(220);
     if (processOnly && (!canWork() || state.accessRevoked)) throw new Error("工程を更新する権限がありません。");
-    if (payload.shippingStatus === "shipped" && Number(payload.quantity) === 0 && (!canEdit() || state.accessRevoked)) throw new Error("受注履行完了には編集権限が必要です。");
     const data = this.read();
+    if ((payload.shippingStatus === "shipped" || data.jobs.some(job => job.id === payload.id && job.shippingStatus === "shipped")) && (!canEdit() || state.accessRevoked)) throw new Error("出荷完了・再開には編集権限が必要です。");
     const now = new Date().toISOString();
     const materialRequestHash = globalThis.MaterialInventory?.jobRequestHash(payload);
     const retried = globalThis.MaterialInventory?.findRequest(data.jobs, payload.requestId, materialRequestHash);
@@ -544,7 +544,7 @@ class MockApi {
     payload.stockPlannedQuantity = validateFinishedStockPlan(payload, previous, data.finishedStockEvents || []);
     if (globalThis.FinishedStock && previous?.shippingStatus !== "shipped" && payload.shippingStatus === "shipped") {
       const order = FinishedStock.snapshot({ jobs: data.jobs, events: data.finishedStockEvents || [] }).orders?.find((entry) => entry.jobId === previous?.id);
-      if (order?.allocatedQuantity > 0) throw new Error("在庫からの出荷予定分が残っています。Tezoe製品在庫で実際の出荷を記録するか、出荷予定を調整してください。");
+      FinishedStock.validateShipmentCompletion(order, payload);
     }
     const polishing = previous?.polishing || { sentQuantity: 0, returnedQuantity: 0, history: [] };
     const nextForPolishing = { ...payload, polishing };

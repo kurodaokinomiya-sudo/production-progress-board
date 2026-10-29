@@ -201,6 +201,17 @@ var FinishedStock = (function () {
       return null;
     }
   }
+  function validateShipmentCompletion(order, job) {
+    if (!order) return;
+    // Allocation measures stock currently on hand. A saved shipment target
+    // remains due even when no lot is available to reserve against it.
+    var stockRemaining = Number(order.hasSchedule ? order.stockTargetQuantity : order.allocatedQuantity) || 0;
+    if (stockRemaining > 0) throw new Error("在庫からの出荷予定分が残っています。Tezoe製品在庫で実際の出荷を記録するか、出荷予定を調整してください。");
+    // Unscheduled legacy orders derive demand from their manufacturing plan;
+    // only an explicit order quantity is independent of that plan.
+    var orderProduction = Math.max(0, Number(job.quantity || 0) - planned(job));
+    if (order.hasSchedule && Number(order.remainingQuantity) > orderProduction) throw new Error("注文数量を満たす製造分が不足しています。製造計画または出荷予定を確認してください。");
+  }
   function snapshot(options) {
     options = options || {};
     var jobs = options.jobs || [], state = normalizeEvents(options.events || []), products = catalog(), plans = [];
@@ -379,5 +390,5 @@ var FinishedStock = (function () {
     var resultSnapshot = snapshot({ jobs: options.jobs || [], events: candidateEvents });
     return { event: event, snapshot: resultSnapshot, retry: false };
   }
-  return { CATALOG: catalog(), catalog: catalog, snapshot: snapshot, prepareMutation: prepareMutation, normalizePlannedQuantity: normalizePlannedQuantity, validateJob: validateJob, productFor: productFor, fulfillment: fulfillment, hash: hash };
+  return { CATALOG: catalog(), catalog: catalog, snapshot: snapshot, prepareMutation: prepareMutation, normalizePlannedQuantity: normalizePlannedQuantity, validateJob: validateJob, validateShipmentCompletion: validateShipmentCompletion, productFor: productFor, fulfillment: fulfillment, hash: hash };
 }());
