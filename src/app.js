@@ -157,6 +157,9 @@ const failedPolishingAttempts = new Map();
 let mutationRevision = 0;
 let snapshotLoading = false;
 let appliedSnapshotRevision = 0;
+let autoSyncTimer = null;
+let autoSyncDelay = 0;
+let autoSyncStarted = false;
 
 function renderBackgroundActivity() {
   const panel = qs("#background-activity");
@@ -2027,6 +2030,27 @@ function renderSkeletons() {
   qs("#dashboard-order-cards").innerHTML = `<div class="skeleton"></div><div class="skeleton"></div>`;
 }
 
+function updateAutoSyncTimer() {
+  if (!autoSyncStarted) return;
+  const value = state.settings?.syncIntervalSeconds;
+  const seconds = ["number", "string"].includes(typeof value) && /^\d+$/.test(String(value).trim()) ? Number(value) : NaN;
+  const delay = Number.isInteger(seconds) && seconds >= 10 && seconds <= 300 ? seconds * 1000 : 20000;
+  if (!state.accessRevoked && autoSyncTimer !== null && autoSyncDelay === delay) return;
+  if (autoSyncTimer !== null) clearInterval(autoSyncTimer);
+  autoSyncTimer = null;
+  autoSyncDelay = 0;
+  if (state.accessRevoked) return;
+  autoSyncDelay = delay;
+  autoSyncTimer = setInterval(() => {
+    if (document.visibilityState === "visible") return refreshData({ quiet: true });
+  }, delay);
+}
+
+function startAutoSync() {
+  autoSyncStarted = true;
+  updateAutoSyncTimer();
+}
+
 async function refreshData({ quiet = false } = {}) {
   if (state.accessRevoked) return;
   if (snapshotLoading || (quiet && backgroundOperations.size)) return;
@@ -2087,6 +2111,7 @@ async function refreshData({ quiet = false } = {}) {
   } finally {
     if (slowTimer) clearTimeout(slowTimer);
     snapshotLoading = false;
+    updateAutoSyncTimer();
   }
 }
 
@@ -3680,6 +3705,7 @@ function renderSettings() {
 
 function handleAccessRequired() {
   state.accessRevoked = true;
+  updateAutoSyncTimer();
   state.jobs = [];
   state.intake = [];
   state.settings = {};
@@ -6338,9 +6364,7 @@ async function init() {
       if (result?.storageUnavailable && !state.accessRevoked) showToast("このブラウザーに本人確認を保存できませんでした。ブラウザーの保存設定を確認してください。", { tone: "error" });
     }).catch(() => { /* A later reload can retry without blocking current work. */ });
   }
-  setInterval(() => {
-    if (document.visibilityState === "visible") refreshData({ quiet: true });
-  }, 20000);
+  startAutoSync();
 }
 
 init();
