@@ -542,7 +542,7 @@ class MockApi {
     if (previous?.archived) throw new Error("削除済みの案件は更新できません。");
     if (previous && Number(previous.version || 0) !== Number(payload.version || 0)) throw new Error("別の端末で先に更新されています。画面を更新してください。");
     payload.stockPlannedQuantity = validateFinishedStockPlan(payload, previous, data.finishedStockEvents || []);
-    if (globalThis.FinishedStock && previous?.shippingStatus !== "shipped" && payload.shippingStatus === "shipped") {
+    if (globalThis.FinishedStock?.needsJobValidation(payload, previous) && previous?.shippingStatus !== "shipped" && payload.shippingStatus === "shipped") {
       const order = FinishedStock.snapshot({ jobs: data.jobs, events: data.finishedStockEvents || [] }).orders?.find((entry) => entry.jobId === previous?.id);
       FinishedStock.validateShipmentCompletion(order, payload);
     }

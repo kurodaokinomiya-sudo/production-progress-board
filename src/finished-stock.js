@@ -30,11 +30,17 @@ var FinishedStock = (function () {
     return quantity;
   }
   function catalog() { return clone(CATALOG); }
+  function isTezoe(job) { return /tezoe/i.test(text(job && job.product).normalize("NFKC")); }
+  // Use the same spelling normalization at the save boundary and product lookup.
+  // The previous identity keeps linked history protected during product edits.
+  function needsJobValidation(job, previous) {
+    return [job, previous].some(function (entry) { return entry && (Number(entry.stockPlannedQuantity || 0) > 0 || isTezoe(entry)); });
+  }
   function productFor(job) {
     job = job || {};
     var code = text(job.productCode).normalize("NFKC").toUpperCase();
     var product = text(job.product).normalize("NFKC");
-    if (!/tezoe/i.test(product)) return null;
+    if (!isTezoe(job)) return null;
     var matches = CATALOG.filter(function (item) { return item.code === code; });
     if (matches.length !== 1) fail("Tezoe在庫は登録済みの製品番号を指定してください。");
     var entry = matches[0];
@@ -60,7 +66,7 @@ var FinishedStock = (function () {
   function planned(job) {
     var raw = normalizePlannedQuantity(job && job.stockPlannedQuantity, job && job.quantity);
     var total = Number(job && job.quantity);
-    if (FinishedStockOrders.isStockOnly(job) && /tezoe/i.test(text(job && job.product)) && Number.isSafeInteger(total) && total >= 0 && total <= MAX_QUANTITY) return total;
+    if (FinishedStockOrders.isStockOnly(job) && isTezoe(job) && Number.isSafeInteger(total) && total >= 0 && total <= MAX_QUANTITY) return total;
     return raw;
   }
   function hashStable(value) {
@@ -390,5 +396,5 @@ var FinishedStock = (function () {
     var resultSnapshot = snapshot({ jobs: options.jobs || [], events: candidateEvents });
     return { event: event, snapshot: resultSnapshot, retry: false };
   }
-  return { CATALOG: catalog(), catalog: catalog, snapshot: snapshot, prepareMutation: prepareMutation, normalizePlannedQuantity: normalizePlannedQuantity, validateJob: validateJob, validateShipmentCompletion: validateShipmentCompletion, productFor: productFor, fulfillment: fulfillment, hash: hash };
+  return { CATALOG: catalog(), catalog: catalog, snapshot: snapshot, prepareMutation: prepareMutation, normalizePlannedQuantity: normalizePlannedQuantity, needsJobValidation: needsJobValidation, validateJob: validateJob, validateShipmentCompletion: validateShipmentCompletion, productFor: productFor, fulfillment: fulfillment, hash: hash };
 }());

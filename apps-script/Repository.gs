@@ -377,7 +377,7 @@ function saveJobUnlocked_(input, processOnlyRow, lockedRows) {
     throw new Error("別の端末で先に更新されています。画面を更新して内容を確認してください。");
   }
   var job = normalizeJobInput_(input, existing);
-  if (typeof FinishedStock !== "undefined" && (Number(job.stockPlannedQuantity || 0) > 0 || Number(existing && existing.stockPlannedQuantity || 0) > 0 || /tezoe/i.test(job.product || "") || /tezoe/i.test(existing && existing.product || ""))) {
+  if (typeof FinishedStock !== "undefined" && FinishedStock.needsJobValidation(job, existing)) {
     var stockEvents = readFinishedStockEventsIfPresent_();
     FinishedStock.validateJob(job, existing, stockEvents);
     if (existing && existing.shippingStatus !== "shipped" && job.shippingStatus === "shipped") {

@@ -105,9 +105,9 @@ test("server repairs automatic reopening after reversal committed but its job wr
   assert.equal((await a.getFinishedStock()).products.find(p => p.id === "26001").stockQuantity, 5);
 });
 
-async function manufacturingReady(h, { quantity = 3, stockPlannedQuantity = 0, initialStock = 0, scheduledStock = 2, customer = "検証受注" } = {}) {
+async function manufacturingReady(h, { quantity = 3, stockPlannedQuantity = 0, initialStock = 0, scheduledStock = 2, customer = "検証受注", product = "Tezoe スタンツェ 直・上向" } = {}) {
   const a = h.api;
-  let job = await a.saveJob({ customer, product: "Tezoe スタンツェ 直・上向", productCode: "26001", quantity, stockPlannedQuantity, serialNo: "MIXED", requestId: "mixed-order", stages: { finish: { status: "working", assignee: "豊" } } });
+  let job = await a.saveJob({ customer, product, productCode: "26001", quantity, stockPlannedQuantity, serialNo: "MIXED", requestId: "mixed-order", stages: { finish: { status: "working", assignee: "豊" } } });
   if (initialStock) await a.openFinishedStock({ requestId: "mixed-opening", expectedVersion: 0, productId: "26001", quantity: initialStock, date: "2026-10-01", note: "合成在庫" });
   if (scheduledStock !== null) await a.saveFinishedStockSchedule({ requestId: "mixed-schedule", expectedVersion: (await a.getFinishedStock()).version, jobId: job.id, jobVersion: job.version, orderQuantity: 5, stockQuantity: scheduledStock, shipmentMode: "split", shipDate: "2026-10-02" });
   const sent = await a.savePolishingMovement({ action: "send", requestId: "mixed-send", date: "2026-10-01", items: [{ id: job.id, version: job.version, quantity }] });
@@ -121,6 +121,33 @@ async function shipMixed(a, job, quantity) {
 }
 
 for (const [name, factory] of [["server", server], ["MockApi", mock]]) {
+  for (const brand of ["Tezoe", "TEZOE", "tezoe", "Ｔｅｚｏｅ", "ＴＥＺＯＥ"]) {
+    for (const [initialStock, shippedQuantity] of [[0, 0], [1, 1], [2, 0], [2, 2]]) {
+      test(`N01 ${name}: ${brand} stock ${initialStock}, shipped ${shippedQuantity} has the same completion boundary`, async () => {
+        const h = await factory(), a = h.api;
+        const job = await manufacturingReady(h, { product: `${brand} スタンツェ 直・上向`, initialStock });
+        if (shippedQuantity) await shipMixed(a, job, shippedQuantity);
+        const before = await a.getFinishedStock(), stored = JSON.stringify(h.jobs());
+        for (const method of ["saveJob", "saveJobProcess"]) {
+          const input = method === "saveJob" ? { ...job } : { id: job.id, version: job.version, stages: job.stages };
+          input.shippingStatus = "shipped"; input.requestId = `wide-complete-${method}`;
+          if (shippedQuantity < 2) {
+            await assert.rejects(async () => a[method](input), /在庫からの出荷予定分が残っています/);
+            assert.equal(JSON.stringify(h.jobs()), stored, "rejection preserves the job and version");
+          } else {
+            const saved = await a[method](input);
+            assert.equal(saved.shippingStatus, "shipped");
+            assert.equal(saved.product, job.product, "stored spelling is preserved");
+            // Reopen explicitly so both entry points start from the same boundary.
+            const reopened = await a.saveJob({ ...saved, shippingStatus: "waiting", requestId: `wide-reopen-${method}` });
+            Object.assign(job, reopened);
+          }
+          const after = await a.getFinishedStock();
+          for (const key of ["version", "products", "lots", "history"]) assert.equal(JSON.stringify(after[key]), JSON.stringify(before[key]), "completion never changes inventory or history");
+        }
+      });
+    }
+  }
   for (const [initialStock, shippedQuantity] of [[0, 0], [1, 1], [2, 0], [2, 2]]) {
     test(`${name}: order5/manufacture3/stock target2 with stock ${initialStock} and shipped ${shippedQuantity}`, async () => {
       const h = await factory(), a = h.api;

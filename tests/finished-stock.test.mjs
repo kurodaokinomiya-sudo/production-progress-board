@@ -53,6 +53,22 @@ test("stock plan quantities are bounded and supported Tezoe identity is exact", 
   assert.equal(stock.CATALOG.length, 7);
 });
 
+test("N01 save relevance follows normalized product identity and the previous job", () => {
+  const stock = pureContext();
+  for (const brand of ["Tezoe", "tezoe", "TEZOE", "Ｔｅｚｏｅ"]) {
+    const job = productJob({ product: `${brand} スタンツェ 直・上向`, stockPlannedQuantity: 0 });
+    assert.equal(stock.needsJobValidation(job, null), true);
+    assert.equal(stock.productFor(job).id, "26001");
+    assert.equal(stock.needsJobValidation({ product: "別製品" }, job), true);
+    assert.throws(() => stock.validateJob({ ...job, productCode: "invalid", stockPlannedQuantity: 1 }, job, []), /製品番号/);
+    assert.throws(() => stock.validateJob({ ...job, specShape: "強弯", stockPlannedQuantity: 1 }, job, []), /型/);
+  }
+  assert.equal(stock.needsJobValidation({ product: "鋭匙鉗子", stockPlannedQuantity: 0 }, null), false);
+  assert.equal(stock.needsJobValidation({ product: "鋭匙鉗子", stockPlannedQuantity: 1 }, null), true);
+  const wideStock = productJob({ customer: "在庫用", product: "Ｔｅｚｏｅ スタンツェ 直・上向", stockPlannedQuantity: 0 });
+  assert.equal(stock.snapshot({ jobs: [wideStock], events: [] }).plans[0].quantity, wideStock.quantity);
+});
+
 test("Tezoe以外の在庫用案件は製品在庫の補充計画へ混入しない", () => {
   const stock = pureContext();
   const ordinary = productJob({ id: "OTHER-STOCK", customer: "在庫用", product: "鋭匙鉗子 直", productCode: "OTHER", bladeWidth: "2mm", stockPlannedQuantity: 0 });
