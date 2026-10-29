@@ -1162,8 +1162,10 @@ function inferSpecsFromProductName(product, existing = {}) {
 
   if (!inferred.specShape) {
     const compact = name.replace(/\s+/g, "");
+    const compound = compact.match(/((?:強|弱)[弯湾彎])[・/、,\-]*(上向(?:き)?|下向(?:き)?)/);
     const jawMatch = compact.match(/[<〈]([^<>〈〉]{1,20}爪)[>〉]/);
-    if (jawMatch) inferred.specShape = jawMatch[1];
+    if (compound) inferred.specShape = `${compound[1].replace(/[湾彎]/g, "弯")}・${compound[2].replace(/き$/, "")}`;
+    else if (jawMatch) inferred.specShape = jawMatch[1];
     else if (/上向(?:き)?左(?:カーブ|曲)/.test(compact)) inferred.specShape = "上曲左";
     else if (/上向(?:き)?右(?:カーブ|曲)/.test(compact)) inferred.specShape = "上曲右";
     else if (/下向(?:き)?左(?:カーブ|曲)/.test(compact)) inferred.specShape = "下曲左";
