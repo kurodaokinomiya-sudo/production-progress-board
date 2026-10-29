@@ -43,7 +43,10 @@ function materialInventorySnapshotUnlocked_(access, jobs) {
 function getMaterialInventory() {
   var access = requireEditorAccess_();
   ensureSystem_();
-  return withDocumentLock_(function () { return materialInventorySnapshotUnlocked_(access); });
+  return withDocumentLock_(function () {
+    access = requireEditorAccess_();
+    return materialInventorySnapshotUnlocked_(access);
+  });
 }
 
 function saveMaterialOrder(input) {
@@ -69,6 +72,7 @@ function cancelMaterialOrder(input) {
 function mutateMaterials_(action, input, access) {
   ensureSystem_();
   return withDocumentLock_(function () {
+    access = requireEditorAccess_();
     var events = initializeMaterialsUnlocked_(access);
     var prepared = MaterialInventory.prepareMutation(action, input, { events: events, at: new Date().toISOString(), actor: access.email || "", id: Utilities.getUuid() });
     if (prepared.event) { appendMaterialEvents_([prepared.event]); events.push(prepared.event); }

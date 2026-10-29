@@ -324,7 +324,7 @@ function runAiDiagnosticStep(input) {
   requireOwnerAccess_();
   var step = input && input.step;
   // Ignore all caller-provided documents, prompts and model overrides.
-  var decoded = sendAiRequest_(aiDiagnosticRequest_(step), []);
+  var decoded = sendAiRequest_(aiDiagnosticRequest_(step), [], requireOwnerAccess_);
   var result = { step: step, model: AI_IMPORT_MODEL, accepted: true };
   if (step === "format") {
     try { validateAiImportResponse_(decoded, defaultCustomerRules_()); result.outputValid = true; }
@@ -341,20 +341,21 @@ function aiCustomerRulesSnapshot_() {
   return customerRulesApiObject_(0, defaultCustomerRules_());
 }
 
-function runAiImport_(input) {
+function runAiImport_(input, requireAccess) {
   var customerRules = aiCustomerRulesSnapshot_();
   var learningRules = typeof readIntakeLearningRules_ === "function" ? readIntakeLearningRules_() : [];
   var request = aiImportRequest_(input, customerRules, learningRules);
-  var response = sendAiRequest_(request, [input && input.text, input && input.name]);
+  var response = sendAiRequest_(request, [input && input.text, input && input.name], requireAccess);
   return validateAiImportResponse_(response, customerRules);
 }
 
-function sendAiRequest_(request, secrets) {
+function sendAiRequest_(request, secrets, requireAccess) {
   var properties = PropertiesService.getScriptProperties();
   var key = properties.getProperty("GEMINI_API_KEY");
   if (!key || properties.getProperty("AI_FREE_TIER_CONFIRMED") !== "true") throw new Error("AI取込は未設定です。無料プロジェクトのAPIキーとAI_FREE_TIER_CONFIRMEDを設定してください。");
   // Application safety cap, not a claim about Google's actual quota or billing tier.
   withDocumentLock_(function() {
+    (requireAccess || requireEditorAccess_)();
     var day = Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy-MM-dd");
     var usage;
     try { usage = JSON.parse(properties.getProperty("AI_IMPORT_USAGE") || "{}"); } catch (error) { usage = {}; }
@@ -466,7 +467,7 @@ function scanOrderEmailsWithAi_(input) {
       var results = runAiImport_({
         name: message.getSubject(), text: "送信者: " + message.getFrom() + "\n" + message.getPlainBody(),
         files: attachments.map(function(file) { return { mimeType: file.getContentType(), base64: Utilities.base64Encode(file.getBytes()) }; })
-      });
+      }, requireOwnerAccess_);
       var batch = prepareAiMailBatch_(base, results, { receivedAt: message.getDate().toISOString(), sender: message.getFrom(), subject: message.getSubject() });
       return withDocumentLock_(function() {
         requireOwnerAccess_();

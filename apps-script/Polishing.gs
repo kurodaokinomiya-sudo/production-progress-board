@@ -118,14 +118,20 @@ function syncPolishingMirrorBestEffort_(lockedJobs, lockedSettings) {
   }
 }
 
-function repairPolishingMirrorIfNeeded_() {
+function repairPolishingMirrorIfNeeded_(alreadyLocked) {
   if (typeof PropertiesService === "undefined") return;
   var properties;
   try { properties = PropertiesService.getScriptProperties(); } catch (error) { return; }
   if (properties.getProperty(POLISHING_MIRROR_REPAIR_PROPERTY) !== "true") return;
-  try {
-    withDocumentLock_(function() { syncPolishingMirror_(); });
+  function repair() {
+    // A viewer may repair this derived mirror; a revoked user may not.
+    requireAppAccess_();
+    syncPolishingMirror_();
     properties.deleteProperty(POLISHING_MIRROR_REPAIR_PROPERTY);
+  }
+  try {
+    if (alreadyLocked) repair();
+    else withDocumentLock_(repair);
   } catch (error) {
     properties.setProperty(POLISHING_MIRROR_REPAIR_PROPERTY, "true");
   }
@@ -172,6 +178,7 @@ function savePolishingMovement(input) {
   });
   ensureSystem_();
   return withDocumentLock_(function() {
+    requireEditorAccess_();
     var sheet = getSpreadsheet_().getSheetByName(APP.SHEETS.JOBS);
     var rows = readRows_(APP.SHEETS.JOBS, APP.JOB_HEADERS, true);
     var now = new Date().toISOString();
@@ -264,6 +271,7 @@ function savePolishingEventDate(input) {
   var at = polishingDateAt_(input.date);
   ensureSystem_();
   return withDocumentLock_(function() {
+    requireEditorAccess_();
     var rows = readRows_(APP.SHEETS.JOBS, APP.JOB_HEADERS, true);
     var row = rows.find(function(record) { return String(record.id) === input.id; });
     if (!row) throw new Error("案件が見つかりません。画面を更新してください。");

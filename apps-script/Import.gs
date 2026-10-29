@@ -101,8 +101,9 @@ function saveParsedIntake_(parsedResults, text, input) {
   var fileName = sanitizeText_(input.name, 200);
   var sourceType = input.sourceType || "image";
   var items = withDocumentLock_(function() {
+    requireEditorAccess_();
     var learningRules = typeof readIntakeLearningRules_ === "function" ? readIntakeLearningRules_() : [];
-    return parsedResults.map(function(parsedResult, index) {
+    var saved = parsedResults.map(function(parsedResult, index) {
       var itemNumber = parsedResult.itemNumber || index + 1;
       var multiItem = parsedResults.length > 1;
       var sourceRef = sourceType === "text"
@@ -126,8 +127,9 @@ function saveParsedIntake_(parsedResults, text, input) {
         status: "pending"
       });
     });
+    appendLog_("intake." + sourceType, "intake", "batch:" + batchId, { name: input.name, added: saved.length });
+    return saved;
   });
-  appendLog_("intake." + sourceType, "intake", "batch:" + batchId, { name: input.name, added: items.length });
   return { added: items.length, items: items };
 }
 
@@ -208,7 +210,10 @@ function scanOrderEmails(input) {
     });
   });
 
-  appendLog_("intake.email.scan", "intake", "batch", { query: query, added: added, skipped: skipped, warnings: warnings.length });
+  withDocumentLock_(function() {
+    requireOwnerAccess_();
+    appendLog_("intake.email.scan", "intake", "batch", { query: query, added: added, skipped: skipped, warnings: warnings.length });
+  });
   return { added: added, skipped: skipped, warnings: warnings.slice(0, 10), scannedThreads: threads.length };
 }
 
@@ -259,6 +264,7 @@ function migrateLegacySheet(input) {
   }
 
   return withDocumentLock_(function() {
+    requireOwnerAccess_();
     var spreadsheet = getSpreadsheet_();
     var values;
     if (csvMode) {

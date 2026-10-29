@@ -23,23 +23,26 @@ function doGet(request) {
 function getSnapshot(request) {
   var access = requireAppAccess_();
   var settings = ensureSystem_() || readSettings_();
-  if (!access.isOwner) {
-    delete settings.gmailQuery;
-    delete settings.maxEmailThreads;
-  }
+  access = requireAppAccess_();
   var canReadImports = access.canEdit === true;
-  if (!canReadImports) {
-    delete settings.customerRules;
-    delete settings.importSettings;
-  }
   var jobs;
   var materialInventory = null;
   if (canReadImports && typeof materialInventorySnapshotUnlocked_ === "function" && typeof MaterialInventory !== "undefined") {
     materialInventory = withDocumentLock_(function() {
+      access = requireAppAccess_();
+      canReadImports = access.canEdit === true;
       jobs = readJobs_();
-      return materialInventorySnapshotUnlocked_(access, jobs);
+      return canReadImports ? materialInventorySnapshotUnlocked_(access, jobs) : null;
     });
   } else jobs = readJobs_();
+  if (!access.isOwner) {
+    delete settings.gmailQuery;
+    delete settings.maxEmailThreads;
+  }
+  if (!canReadImports) {
+    delete settings.customerRules;
+    delete settings.importSettings;
+  }
   if (typeof materialJobForAccess_ === "function") jobs = jobs.map(function(job) { return materialJobForAccess_(job, access); });
   return {
     jobs: typeof decorateProductJobs_ === "function" ? decorateProductJobs_(jobs, settings) : jobs,
@@ -61,7 +64,8 @@ function getSnapshot(request) {
 function saveSettings(input) {
   var access = requireAdminAccess_();
   input = input || {};
-  if (["gmailQuery", "maxEmailThreads"].some(function(key) { return input[key] !== undefined; })) requireOwnerAccess_();
+  var ownerSettings = ["gmailQuery", "maxEmailThreads"].some(function(key) { return input[key] !== undefined; });
+  if (ownerSettings) requireOwnerAccess_();
   var updates = {};
   var allowed = ["gmailQuery", "maxEmailThreads", "syncIntervalSeconds"];
   allowed.forEach(function(key) {
@@ -80,7 +84,9 @@ function saveSettings(input) {
   if (input.distributionAssignees !== undefined) updates.distributionAssignees = normalizeDistributionAssigneesSetting_(input.distributionAssignees);
 
   ensureSystem_();
-  withDocumentLock_(function() {
+  return withDocumentLock_(function() {
+    access = requireAdminAccess_();
+    if (ownerSettings) access = requireOwnerAccess_();
     var sheet = getSpreadsheet_().getSheetByName(APP.SHEETS.SETTINGS);
     var values = sheet.getDataRange().getValues();
     var rowsByKey = {};
@@ -89,14 +95,14 @@ function saveSettings(input) {
       if (rowsByKey[key]) sheet.getRange(rowsByKey[key], 2).setValue(sheetCellValue_(updates[key]));
       else sheet.appendRow(sheetValues_([[key, updates[key], ""]])[0]);
     });
+    appendLog_("settings.update", "settings", "global", input);
+    var settings = readSettings_();
+    if (!access.isOwner) {
+      delete settings.gmailQuery;
+      delete settings.maxEmailThreads;
+    }
+    return settings;
   });
-  appendLog_("settings.update", "settings", "global", input);
-  var settings = readSettings_();
-  if (!access.isOwner) {
-    delete settings.gmailQuery;
-    delete settings.maxEmailThreads;
-  }
-  return settings;
 }
 
 function normalizeStageAssigneesSetting_(value) {
@@ -166,6 +172,7 @@ function saveCustomerRules(input) {
   var normalized = normalizeCustomerRules_(input.rules);
   if (typeof ensureSystem_ === "function") ensureSystem_();
   return withCustomerRulesLock_(function() {
+    requireAdminAccess_();
     var current = readCustomerRulesSnapshot_();
     if (current.version !== input.expectedVersion) {
       throw new Error("得意先ルールが別の端末で更新されています。画面を更新して再試行してください。");

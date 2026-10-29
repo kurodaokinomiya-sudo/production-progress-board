@@ -42,6 +42,7 @@ function forgetIntakeLearningRule(input) {
   }
   ensureSystem_();
   return withDocumentLock_(function() {
+    requireEditorAccess_();
     var rules = readIntakeLearningRules_();
     var current = rules.find(function(rule) { return rule.key === input.key; });
     if (!current) return { rules: rules };

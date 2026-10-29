@@ -71,13 +71,16 @@ function setupSystem() {
   requireOwnerAccess_();
   var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   if (!spreadsheet) throw new Error("このスクリプトを管理対象のスプレッドシートに紐づけて実行してください。");
-  PropertiesService.getScriptProperties().setProperty("SPREADSHEET_ID", spreadsheet.getId());
-  REQUEST_SPREADSHEET_ = spreadsheet;
-  ensureSystem_();
-  return { ok: true, spreadsheetId: spreadsheet.getId(), spreadsheetName: spreadsheet.getName() };
+  return withDocumentLock_(function() {
+    requireOwnerAccess_();
+    PropertiesService.getScriptProperties().setProperty("SPREADSHEET_ID", spreadsheet.getId());
+    REQUEST_SPREADSHEET_ = spreadsheet;
+    ensureSystem_(true);
+    return { ok: true, spreadsheetId: spreadsheet.getId(), spreadsheetName: spreadsheet.getName() };
+  });
 }
 
-function ensureSystem_() {
+function ensureSystem_(alreadyLocked) {
   var spreadsheet = getSpreadsheet_();
   ensureSheet_(spreadsheet, APP.SHEETS.JOBS, APP.JOB_HEADERS);
   ensureSheet_(spreadsheet, APP.SHEETS.INTAKE, APP.INTAKE_HEADERS);
@@ -86,7 +89,7 @@ function ensureSystem_() {
   ensureSheet_(spreadsheet, APP.SHEETS.LEARNING, APP.LEARNING_HEADERS);
   if (typeof ensurePolishingSheet_ === "function") ensurePolishingSheet_(spreadsheet);
   var settings = ensureDefaultSettings_();
-  if (typeof repairPolishingMirrorIfNeeded_ === "function") repairPolishingMirrorIfNeeded_();
+  if (typeof repairPolishingMirrorIfNeeded_ === "function") repairPolishingMirrorIfNeeded_(alreadyLocked);
   return settings;
 }
 

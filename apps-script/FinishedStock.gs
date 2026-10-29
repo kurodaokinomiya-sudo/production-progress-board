@@ -30,6 +30,7 @@ function getFinishedStock() {
   var access = requireEditorAccess_();
   ensureSystem_();
   return withDocumentLock_(function () {
+    access = requireEditorAccess_();
     var events = readFinishedStockEventsIfPresent_();
     return FinishedStock.snapshot({ jobs: reconcileStockFulfillments_(readJobs_(), events), events: events });
   });
@@ -81,6 +82,7 @@ function mutateFinishedStock_(action, input) {
   ensureSystem_();
   var access = requireEditorAccess_();
   return withDocumentLock_(function () {
+    access = requireEditorAccess_();
     var jobs = readJobs_();
     var events = readFinishedStockEventsIfPresent_();
     var result = FinishedStock.prepareMutation(action, input, {

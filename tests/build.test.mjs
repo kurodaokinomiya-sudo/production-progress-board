@@ -289,7 +289,33 @@ test("Apps Script版へPDF.js本体とWorkerを同梱する", () => {
 });
 
 test("複数端末からの更新と取込重複をサーバー側で止める", () => {
-  assert.match(repository, /withDocumentLock_\(function\(\) \{ return saveJobUnlocked_\(input\); \}\)/);
+  let role = "editor", locked = false;
+  const events = [];
+  const context = vm.createContext({
+    requireEditorAccess_() {
+      events.push({ kind: "access", locked, role });
+      if (role !== "editor") throw new Error("EDITOR_REQUIRED");
+    },
+    LockService: { getScriptLock: () => ({
+      waitLock() { assert.equal(locked, false); locked = true; events.push({ kind: "lock" }); },
+      releaseLock() { assert.equal(locked, true); locked = false; },
+    }) },
+  });
+  vm.runInContext(`${config}\n${repository}`, context);
+  context.ensureSystem_ = () => {};
+  context.saveJobUnlocked_ = input => {
+    assert.equal(locked, true, "the save delegates inside the shared lock");
+    assert.ok(events.some(event => event.kind === "access" && event.locked && event.role === "editor"), "the lock has a current editor authorization before the writer runs");
+    return input;
+  };
+  const input = { id: "same-request" };
+  assert.equal(context.saveJob(input), input);
+  assert.equal(events[0].kind, "access");
+  assert.equal(events[0].locked, false, "unauthorized calls are rejected before lock acquisition");
+  assert.equal(locked, false);
+  role = "viewer"; events.length = 0;
+  assert.throws(() => context.saveJob(input), /EDITOR_REQUIRED/);
+  assert.ok(events.every(event => event.kind === "access" && !event.locked));
   assert.match(repository, /row: row, rowNumber: index \+ 2/);
   assert.match(repository, /record\.sourceRef[\s\S]*input\.sourceRef/);
   assert.match(importer, /appendIntakeIfNew_/);

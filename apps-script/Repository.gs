@@ -323,7 +323,10 @@ function jobToRow_(job) {
 function saveJob(input) {
   requireEditorAccess_();
   ensureSystem_();
-  return withDocumentLock_(function() { return saveJobUnlocked_(input); });
+  return withDocumentLock_(function() {
+    requireEditorAccess_();
+    return saveJobUnlocked_(input);
+  });
 }
 
 function decorateJobForResponse_(job, settings) {
@@ -434,6 +437,7 @@ function setJobArchived(input) {
   ensureSystem_();
   if (!input || !input.id) throw new Error("案件を特定できません。");
   return withDocumentLock_(function() {
+    requireEditorAccess_();
     var sheet = getSpreadsheet_().getSheetByName(APP.SHEETS.JOBS);
     var rows = readRows_(APP.SHEETS.JOBS, APP.JOB_HEADERS);
     var row = rows.find(function(record) { return String(record.id) === String(input.id); });
@@ -485,6 +489,7 @@ function saveJobProcess(input) {
   });
   ensureSystem_();
   return withDocumentLock_(function() {
+    access = requireWorkerAccess_();
     var rows = readRows_(APP.SHEETS.JOBS, APP.JOB_HEADERS, true);
     var row = rows.find(function(record) { return String(record.id) === String(input.id); });
     if (!row) throw new Error("案件が見つかりません。画面を更新してください。");
@@ -536,6 +541,7 @@ function setDistributionAssignee(input) {
   ensureSystem_();
   if (!input || !input.id) throw new Error("案件を特定できません。");
   return withDocumentLock_(function() {
+    access = requireWorkerAccess_();
     var sheet = getSpreadsheet_().getSheetByName(APP.SHEETS.JOBS);
     var rows = readRows_(APP.SHEETS.JOBS, APP.JOB_HEADERS);
     var row = rows.find(function(record) { return String(record.id) === String(input.id); });
@@ -568,6 +574,7 @@ function markLabelsPrinted(input) {
   var requested = input && Array.isArray(input.jobs) ? input.jobs.slice(0, 9) : [];
   if (!requested.length) throw new Error("印刷済みにする案件がありません。");
   return withDocumentLock_(function() {
+    requireEditorAccess_();
     var sheet = getSpreadsheet_().getSheetByName(APP.SHEETS.JOBS);
     var rows = readRows_(APP.SHEETS.JOBS, APP.JOB_HEADERS);
     var now = new Date().toISOString();
@@ -652,6 +659,7 @@ function appendIntakes_(items) {
 
 function appendIntakeIfNew_(item) {
   return withDocumentLock_(function() {
+    requireOwnerAccess_();
     var exists = readIntake_().some(function(entry) { return entry.sourceRef === item.sourceRef && entry.status === "pending"; }) ||
       readJobs_().some(function(job) { return !job.archived && job.sourceRef === item.sourceRef; });
     return exists ? null : appendIntake_(item);
@@ -695,6 +703,7 @@ function approveIntakes(input) {
   if (!requests || !requests.length || requests.length > 100) throw new Error("1〜100件を選択してください。");
 
   return withDocumentLock_(function() {
+    requireEditorAccess_();
     var intakeItems = readIntake_();
     var jobs = readJobs_();
     var prepared = [];
@@ -947,6 +956,7 @@ function rejectIntakes(input) {
   if (!requested || !requested.length || requested.length > 100) throw new Error("1〜100件を選択してください。");
 
   return withDocumentLock_(function() {
+    requireEditorAccess_();
     var intakeItems = readIntake_();
     var jobs = readJobs_();
     var prepared = [];

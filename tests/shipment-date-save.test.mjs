@@ -24,7 +24,8 @@ const job = (overrides = {}) => ({
 });
 
 function harness(initialJobs = [], initialRole = "editor") {
-  let now = firstNow, role = initialRole, locked = false;
+  let now = firstNow, role = initialRole, locked = false, beforeLock, lockedAuthorization;
+  const locks = { acquired: 0, released: 0 };
   class FixedDate extends Date {
     constructor(...args) { super(...(args.length ? args : [now])); }
     static now() { return Date.parse(now); }
@@ -37,7 +38,7 @@ function harness(initialJobs = [], initialRole = "editor") {
       setValues: (values) => values.forEach((cells, r) => {
         grid[row - 1 + r] ||= [];
         cells.forEach((value, c) => { grid[row - 1 + r][column - 1 + c] = value; });
-        writes.push({ locked });
+        writes.push({ locked, authorization: lockedAuthorization });
       }),
     }),
   };
@@ -45,9 +46,22 @@ function harness(initialJobs = [], initialRole = "editor") {
     Date: FixedDate, Math, Number, Object, RegExp, String,
     Utilities: { getUuid: () => "new-date-job" },
     SpreadsheetApp: { flush() {} },
-    LockService: { getScriptLock: () => ({ waitLock() { locked = true; }, releaseLock() { locked = false; } }) },
-    requireEditorAccess_: () => { checks.push("editor"); if (!["owner", "admin", "editor"].includes(role)) throw new Error("EDITOR_REQUIRED"); },
-    requireWorkerAccess_: () => { checks.push("worker"); if (!["owner", "admin", "editor", "worker"].includes(role)) throw new Error("WORKER_REQUIRED"); return { role, canWork: true, canEdit: ["owner", "admin", "editor"].includes(role) }; },
+    LockService: { getScriptLock: () => ({
+      waitLock() { const update = beforeLock; beforeLock = null; update?.(); locked = true; lockedAuthorization = null; locks.acquired += 1; },
+      releaseLock() { locked = false; lockedAuthorization = null; locks.released += 1; },
+    }) },
+    requireEditorAccess_: () => {
+      const check = { scope: "editor", locked, role }; checks.push(check);
+      if (!["owner", "admin", "editor"].includes(role)) throw new Error("EDITOR_REQUIRED");
+      if (locked) lockedAuthorization = check;
+      return { role, canEdit: true };
+    },
+    requireWorkerAccess_: () => {
+      const check = { scope: "worker", locked, role }; checks.push(check);
+      if (!["owner", "admin", "editor", "worker"].includes(role)) throw new Error("WORKER_REQUIRED");
+      if (locked) lockedAuthorization = check;
+      return { role, canWork: true, canEdit: ["owner", "admin", "editor"].includes(role) };
+    },
   });
   vm.runInContext(`${config}\n${parser}\n${repository}`, server);
   Object.assign(server, { ensureSystem_() {}, getSpreadsheet_: () => ({ getSheetByName: () => sheet }), appendLog_() {} });
@@ -64,8 +78,16 @@ function harness(initialJobs = [], initialRole = "editor") {
   uiContext.delay = async () => {};
   const ui = uiContext.ui;
   ui.state.access = { role: "owner", canEdit: true, canWork: true };
-  return { server, ui, elements, writes, checks, grid,
+  return { server, ui, elements, writes, checks, grid, locks,
     setNow(value) { now = value; }, setRole(value) { role = value; },
+    beforeLock(callback) { beforeLock = callback; },
+    assertAuthorizedSave(scope) {
+      assert.equal(checks[0]?.scope, scope);
+      assert.equal(checks[0]?.locked, false, "entry authorization runs before waiting");
+      assert.ok(checks.some(check => check.scope === scope && check.locked), "authorization is reacquired inside the lock");
+      assert.ok(checks.every(check => check.scope === scope), "ordinary and process saves retain their respective access scopes");
+      assert.ok(writes.every(write => write.locked && write.authorization?.scope === scope && write.authorization.role === "editor"), "every persisted cell uses current authorization under the lock");
+    },
     storedJobs: () => server.readJobs_(),
   };
 }
@@ -84,7 +106,7 @@ for (const completedAt of ["", oldDate, undefined]) {
     assert.equal(saved.updatedAt, firstNow);
     assert.equal(saved.version, 5);
     assert.equal(h.writes[0].locked, true);
-    assert.deepEqual(h.checks, ["editor"]);
+    h.assertAuthorizedSave("editor");
     h.ui.state.jobs = [saved];
     h.ui.state.filters.completed.period = "undated";
     assert.equal(h.ui.filteredJobs("completed").length, completedAt ? 0 : 1);
@@ -148,7 +170,7 @@ for (const completedAt of ["", oldDate]) {
       if (!changed.has(header)) assert.equal(h.grid[1][index], before[index], header);
     });
     assert.equal(h.writes[0].locked, true);
-    assert.deepEqual(h.checks, ["worker"]);
+    h.assertAuthorizedSave("worker");
     assert.throws(() => h.server.saveJobProcess({ ...payload, version: 5, completedAt: forgedDate }), /許可されていない項目/);
     assert.throws(() => h.server.saveJobProcess(payload), /別の端末/);
     h.setRole("worker");
@@ -157,5 +179,26 @@ for (const completedAt of ["", oldDate]) {
     h.setRole("viewer");
     assert.throws(() => h.server.saveJobProcess({ ...payload, version: 5 }), /WORKER_REQUIRED/);
     assert.equal(h.writes.length, 1, "denied and stale requests never persist");
+  });
+}
+
+for (const method of ["saveJob", "saveJobProcess"]) {
+  test(`${method} rejects a shipped-row edit before locking when its required scope is absent`, () => {
+    const existing = job({ completedAt: oldDate }), h = harness([existing], "viewer"), before = JSON.stringify(h.grid);
+    const input = method === "saveJob" ? { ...existing, note: "denied" } : { id: existing.id, version: existing.version, stages: existing.stages };
+    assert.throws(() => h.server[method](input), /EDITOR_REQUIRED|WORKER_REQUIRED/);
+    assert.deepEqual(h.locks, { acquired: 0, released: 0 });
+    assert.equal(h.writes.length, 0); assert.equal(JSON.stringify(h.grid), before);
+  });
+
+  test(`${method} rechecks a queued editor downgrade without changing the shipped date or protected cells`, () => {
+    const existing = job({ completedAt: oldDate }), h = harness([existing]), before = JSON.stringify(h.grid);
+    const input = method === "saveJob" ? { ...existing, note: "denied after wait" } : { id: existing.id, version: existing.version, stages: { ...existing.stages, welding: { status: "working", assignee: "豊" } } };
+    h.beforeLock(() => h.setRole(method === "saveJobProcess" ? "worker" : "viewer"));
+    assert.throws(() => h.server[method](input), /EDITOR_REQUIRED/);
+    assert.deepEqual(h.locks, { acquired: 1, released: 1 });
+    assert.equal(h.writes.length, 0); assert.equal(JSON.stringify(h.grid), before);
+    assert.equal(h.storedJobs()[0].completedAt, oldDate);
+    assert.equal(h.storedJobs()[0].version, existing.version);
   });
 }

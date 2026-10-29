@@ -14,7 +14,7 @@ function getProductMasterStatus_() {
   return { status: PRODUCT_MASTER_STATE_.status, warning: PRODUCT_MASTER_STATE_.warning || "", asOf: PRODUCT_MASTER_STATE_.asOf || "", count: Number(PRODUCT_MASTER_STATE_.count || 0) };
 }
 
-function loadProductMaster_(forceLive) {
+function loadProductMaster_(forceLive, deferCachePublication) {
   if (!forceLive && PRODUCT_MASTER_REQUEST_ROWS_) return PRODUCT_MASTER_REQUEST_ROWS_;
   var cache = null;
   try { if (typeof CacheService !== "undefined") cache = CacheService.getScriptCache(); } catch (error) {}
@@ -47,7 +47,7 @@ function loadProductMaster_(forceLive) {
     }
     if (!rows.length) throw new Error("製品マスタに照合できる行がありません。");
     var asOf = new Date().toISOString();
-    if (cache) try { writeProductMasterCache_(cache, rows, asOf, "", "live"); } catch (error) {}
+    if (cache && !deferCachePublication) try { writeProductMasterCache_(cache, rows, asOf, "", "live"); } catch (error) {}
     PRODUCT_MASTER_REQUEST_ROWS_ = rows;
     PRODUCT_MASTER_STATE_ = { status: "live", warning: "", asOf: asOf, count: rows.length };
     return rows;
@@ -60,7 +60,7 @@ function loadProductMaster_(forceLive) {
       return previous.rows;
     }
     var snapshotWarning = "製品マスタのライブ読込に失敗しました。" + String(error && error.message || error) + " 2026-10-06時点の組込スナップショットを使用しています。";
-    if (cache) try { writeProductMasterCache_(cache, PRODUCT_MASTER_SNAPSHOT_, PRODUCT_MASTER_SNAPSHOT_AS_OF_, snapshotWarning, "snapshot"); } catch (cacheWriteError) {}
+    if (cache && !deferCachePublication) try { writeProductMasterCache_(cache, PRODUCT_MASTER_SNAPSHOT_, PRODUCT_MASTER_SNAPSHOT_AS_OF_, snapshotWarning, "snapshot"); } catch (cacheWriteError) {}
     PRODUCT_MASTER_REQUEST_ROWS_ = PRODUCT_MASTER_SNAPSHOT_;
     PRODUCT_MASTER_STATE_ = { status: "snapshot", warning: snapshotWarning, asOf: PRODUCT_MASTER_SNAPSHOT_AS_OF_, count: PRODUCT_MASTER_SNAPSHOT_.length };
     return PRODUCT_MASTER_SNAPSHOT_;
@@ -97,12 +97,19 @@ function refreshProductMaster() {
   requireAdminAccess_();
   ensureSystem_();
   PRODUCT_MASTER_REQUEST_ROWS_ = null;
-  loadProductMaster_(true);
+  // Fetch outside the shared lock. Publish only after checking the current role.
+  var rows = loadProductMaster_(true, true);
   var status = getProductMasterStatus_();
   if (status.status !== "live") throw new Error(status.warning || "製品マスタを更新できませんでした。");
-  var settings = readSettings_() || {};
-  var mirrorWarning = typeof syncPolishingMirrorBestEffort_ === "function" ? withDocumentLock_(function() { return syncPolishingMirrorBestEffort_(); }) : "";
-  return { jobs: decorateProductJobs_(readJobs_(), settings), productMasterStatus: getProductMasterStatus_(), mirrorWarning: mirrorWarning };
+  return withDocumentLock_(function() {
+    requireAdminAccess_();
+    if (typeof CacheService !== "undefined") {
+      try { writeProductMasterCache_(CacheService.getScriptCache(), rows, status.asOf, "", "live"); } catch (cacheError) {}
+    }
+    var settings = readSettings_() || {};
+    var mirrorWarning = typeof syncPolishingMirrorBestEffort_ === "function" ? syncPolishingMirrorBestEffort_() : "";
+    return { jobs: decorateProductJobs_(readJobs_(), settings), productMasterStatus: getProductMasterStatus_(), mirrorWarning: mirrorWarning };
+  });
 }
 
 function decorateProductJobs_(jobs, settings) {
@@ -384,6 +391,7 @@ function savePolishingRates(input) {
   var month = String(input.month), rates = normalizeMonthlyPolishingRates_(input.rates), expected = normalizeMonthlyPolishingRates_(input.expectedRates);
   ensureSystem_();
   return withDocumentLock_(function() {
+    access = requireAdminAccess_();
     var settings = readSettings_() || {}, all;
     try { all = settings.polishingRates ? JSON.parse(settings.polishingRates) : {}; } catch (error) { throw new Error("保存済み研磨単価のJSONが不正です。修正してから再試行してください。"); }
     if (!all || typeof all !== "object" || Array.isArray(all)) throw new Error("保存済み研磨単価の形式が不正です。");
@@ -439,6 +447,7 @@ function savePolishingProductRule(input) {
   var customRates = hasCustomRates ? normalizePolishingCustomRates_(input.customRates) : null;
   ensureSystem_();
   return withDocumentLock_(function() {
+    access = requireEditorAccess_();
     var jobs = readJobs_(), job = jobs.find(function(item) { return String(item.id) === String(input.id); });
     if (!job) throw new Error("案件が見つかりません。画面を更新してください。");
     if (Number(job.version || 0) !== input.version) throw new Error("案件が別の端末で更新されています。画面を更新して再試行してください。");
