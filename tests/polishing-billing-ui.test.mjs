@@ -92,19 +92,35 @@ test("嘉代の全区分に既定単価が入り、江部通常840円を別会�
   assert.deepEqual(Array.from(summary.rows.filter((row) => row.vendor === "嘉代" && row.classCode !== "未分類"), (row) => row.unitPrice), [2000, 2500, 3300, 3000, 3500, 4500]);
 });
 
-test("B(メニスカス)は3300円、江部電解・江部磨きは江部だけで計算する", () => {
+test("江部電解・磨きのみ2000円・磨き＋電解2800円は江部だけで計算し、旧区分も引き継ぐ", () => {
   const { ui } = harness();
   const meniscus = returned("B(メニスカス)", 10, "2026-10-07");
   const electro = returned("江部電解", 2, "2026-10-07");
   const polished = returned("江部磨き", 2, "2026-10-07");
+  const polishedOnly = returned("江部磨きのみ", 3, "2026-10-07");
+  const combined = returned("江部磨き＋電解", 4, "2026-10-07");
   electro.product = polished.product = "メニスカス鉗子";
-  const summary = ui.polishingMonthlySummary([meniscus, electro, polished], {}, "2026-10");
-  assert.equal(summary.quantity, 14, "両研磨先の数量を重複計上しない");
-  assert.equal(summary.vendorTotals.find((row) => row.vendor === "江部").totalAmount, 14280);
+  const summary = ui.polishingMonthlySummary([meniscus, electro, polished, polishedOnly, combined], {}, "2026-10");
+  assert.equal(summary.quantity, 21, "両研磨先の数量を重複計上しない");
+  assert.equal(summary.vendorTotals.find((row) => row.vendor === "江部").totalAmount, 32280);
   assert.equal(summary.vendorTotals.find((row) => row.vendor === "嘉代").quantity, 10);
   assert.equal(summary.vendorTotals.find((row) => row.vendor === "嘉代").totalAmount, 33000);
   assert.equal(summary.rows.find((row) => row.classCode === "B(メニスカス)").amount, 33000);
-  assert.equal(summary.totalAmount, 47280);
+  assert.equal(summary.rows.find((row) => row.classCode === "江部").quantity, 10);
+  assert.equal(summary.rows.find((row) => row.classCode === "江部磨きのみ").amount, 6000);
+  assert.equal(summary.rows.find((row) => row.classCode === "江部磨き＋電解").amount, 16800);
+  assert.equal(summary.totalAmount, 65280);
+});
+
+test("江部磨きの月別保存単価を新名称へ引き継ぎ、新名称の0や未設定を優先する", () => {
+  const { ui } = harness();
+  for (const value of [2400, 0, null]) {
+    const legacy = { polishingRates: JSON.stringify({"2026-09":{"江部磨き":value}}) };
+    assert.equal(ui.polishingRatesForMonth(legacy, "2026-09")["江部磨き＋電解"], value);
+    assert.equal(ui.polishingRatesForMonth(legacy, "2026-10")["江部磨き＋電解"], 2800);
+    const explicit = { polishingRates: JSON.stringify({"2026-10":{"江部磨き":2400,"江部磨き＋電解":value}}) };
+    assert.equal(ui.polishingRatesForMonth(explicit, "2026-10")["江部磨き＋電解"], value);
+  }
 });
 
 test("旧加算の設定は集計に使わず、通常Bの保存済み単価とB(メニスカス)を分ける", () => {
@@ -177,14 +193,29 @@ test("区分の自動判定へのリセットと、江部の追加区分を選�
   let sent;
   ui.api.savePolishingProductRule = async (payload) => {sent=payload; return {jobs:[],settings:{polishingProductRules:"{}"}};};
   const control = ui.polishingClassControl(ui.state.jobs[0]);
-  assert.match(control, /value="江部電解"/);
-  assert.match(control, /value="江部磨き"/);
+  assert.match(control, /value="江部電解"[^>]*>電解\(特殊\)</);
+  assert.match(control, /value="江部磨きのみ"[^>]*>A 磨き 電解無し</);
+  assert.match(control, /value="江部磨き＋電解"[^>]*>A 磨き\(通常\)</);
+  assert.doesNotMatch(control, /value="江部磨き"/);
   assert.match(control, /value="B\(メニスカス\)" selected/);
   assert.match(control, /自動判定に戻す/);
   assert.doesNotMatch(control, /メニスカス加算|data-polishing-meniscus/);
   await ui.savePolishingClassification({dataset:{polishingClassId:"J2"},value:""});
   assert.equal(sent.classCode, "");
   assert.equal(sent.expectedRule.classCode, "B(メニスカス)");
+});
+
+test("単価表・編集欄・旧区分の選択表示を新名称と指定順にそろえる", () => {
+  const { ui, elements } = harness();
+  ui.state.polishingBillingMonth = "2026-10";
+  ui.renderPolishingBilling();
+  const summary = elements.get("#polishing-billing-summary").innerHTML;
+  assert.match(summary, />電解<[\s\S]*¥840[\s\S]*電解\(特殊\)[\s\S]*¥540[\s\S]*A 磨き 電解無し[\s\S]*¥2,000[\s\S]*A 磨き\(通常\)[\s\S]*¥2,800/);
+  const fields = elements.get("#polishing-rate-fields").innerHTML;
+  assert.match(fields, /data-polishing-rate="江部電解"[\s\S]*data-polishing-rate="江部磨きのみ"[^>]*value="2000"[\s\S]*data-polishing-rate="江部磨き＋電解"[^>]*value="2800"/);
+  const control = ui.polishingClassControl({id:"legacy",product:"鉗子",productMaster:{classCode:"江部磨き",source:"manual"}});
+  assert.match(control, /value="江部磨き＋電解" selected>A 磨き\(通常\)</);
+  assert.match(control, /江部のみ・電解840円は除外/);
 });
 
 test("月別集計と単価編集にB(メニスカス)3300円を表示し、加算項目を表示しない", () => {

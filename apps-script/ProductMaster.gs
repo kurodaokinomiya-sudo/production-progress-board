@@ -126,7 +126,7 @@ function decorateProductJobs_(jobs, settings) {
     var override = key && rules[key];
     productMaster = Object.assign({}, match, { key: key });
     if (override && Object.prototype.hasOwnProperty.call(override, "classCode")) {
-      productMaster = Object.assign({}, productMaster, { classCode: override.classCode || "未分類", source: "manual", message: "手動設定" });
+      productMaster = Object.assign({}, productMaster, { classCode: normalizePolishingClassCode_(override.classCode) || "未分類", source: "manual", message: "手動設定" });
     }
     if (productMaster.classCode === "自由設定") productMaster.customRates = normalizePolishingCustomRates_(override && override.customRates);
     var productKeywords = extractProductLabelKeywords_(cleanProduct);
@@ -356,8 +356,11 @@ function commitProductLabelRule_(prepared, job) {
   appendLog_("settings.product-label-rule.update", "job", job.id, { key: prepared.key });
 }
 
-var POLISHING_RATE_DEFAULTS_ = Object.freeze({ "A": 2000, "B": 2500, "B(メニスカス)": 3300, "C": 3000, "D": 3500, "特殊": 4500, "江部": 840, "江部電解": 540, "江部磨き": 2400 });
-var POLISHING_RATE_CODES_ = Object.freeze(["A", "B", "B(メニスカス)", "C", "D", "特殊", "江部", "江部電解", "江部磨き"]);
+var EBE_POLISHING_CLASSES_ = Object.freeze(["江部電解", "江部磨きのみ", "江部磨き＋電解"]);
+var POLISHING_RATE_DEFAULTS_ = Object.freeze({ "A": 2000, "B": 2500, "B(メニスカス)": 3300, "C": 3000, "D": 3500, "特殊": 4500, "江部": 840, "江部電解": 540, "江部磨きのみ": 2000, "江部磨き＋電解": 2800 });
+var POLISHING_RATE_CODES_ = Object.freeze(["A", "B", "B(メニスカス)", "C", "D", "特殊", "江部"].concat(EBE_POLISHING_CLASSES_));
+
+function normalizePolishingClassCode_(code) { return code === "江部磨き" ? "江部磨き＋電解" : code; }
 
 function normalizePolishingRatesSetting_(value) {
   var parsed;
@@ -410,6 +413,7 @@ function normalizeMonthlyPolishingRates_(rates) {
   POLISHING_RATE_CODES_.forEach(function(code) {
     if (Object.prototype.hasOwnProperty.call(rates, code)) result[code] = normalizePolishingRate_(rates[code]);
   });
+  if (!Object.prototype.hasOwnProperty.call(rates, "江部磨き＋電解") && Object.prototype.hasOwnProperty.call(rates, "江部磨き")) result["江部磨き＋電解"] = normalizePolishingRate_(rates["江部磨き"]);
   return result;
 }
 function effectiveMonthlyPolishingRates_(rates) {
@@ -440,7 +444,8 @@ function savePolishingProductRule(input) {
   var access = requireEditorAccess_();
   if (!input || typeof input !== "object" || !input.id || !Number.isInteger(input.version)) throw new Error("案件情報が不正です。");
   if (!Object.prototype.hasOwnProperty.call(input, "classCode")) throw new Error("保存する研磨区分を指定してください。");
-  if (["", "A", "B", "B(メニスカス)", "C", "D", "特殊", "未分類", "江部電解", "江部磨き", "自由設定"].indexOf(input.classCode) < 0) throw new Error("研磨区分が不正です。");
+  var classCode = normalizePolishingClassCode_(input.classCode);
+  if (["", "A", "B", "B(メニスカス)", "C", "D", "特殊", "未分類", "自由設定"].concat(EBE_POLISHING_CLASSES_).indexOf(classCode) < 0) throw new Error("研磨区分が不正です。");
   if (Object.prototype.hasOwnProperty.call(input, "expectedRule") && input.expectedRule !== null && (typeof input.expectedRule !== "object" || Array.isArray(input.expectedRule))) throw new Error("保存前の研磨設定が不正です。");
   var hasCustomRates = Object.prototype.hasOwnProperty.call(input, "customRates");
   if (hasCustomRates && input.customRates === undefined) throw new Error("自由設定の研磨単価は江部・嘉代ごとに指定してください。");
@@ -465,7 +470,7 @@ function savePolishingProductRule(input) {
     if (hasCustomRates) next.customRates = customRates;
     else if (input.classCode === "自由設定") next.customRates = normalizePolishingCustomRates_(next.customRates);
     if (input.classCode === "") delete next.classCode;
-    else next.classCode = input.classCode;
+    else next.classCode = classCode;
     if (!Object.prototype.hasOwnProperty.call(next, "classCode")) delete rules[key];
     else rules[key] = Object.assign(next, { updatedAt: new Date().toISOString(), productCode: match.productCode || job.productCode || "", product: cleanProduct || "", customer: job.customer || "" });
     writeProductSetting_("polishingProductRules", JSON.stringify(rules), "研磨区分の手動設定");
@@ -489,9 +494,8 @@ function monthlyPolishingSummary_(jobs, settings, month) {
   try { allRates = settings && settings.polishingRates ? JSON.parse(settings.polishingRates) : {}; } catch (error) { throw new Error("研磨単価の設定JSONが不正です。"); }
   if (!allRates || typeof allRates !== "object" || Array.isArray(allRates)) throw new Error("研磨単価の設定形式が不正です。");
   var rates = effectiveMonthlyPolishingRates_(allRates[month]), codes = ["A", "B", "B(メニスカス)", "C", "D", "特殊"];
-  var lines = [
-    { vendor: "江部", classCode: "江部" }, { vendor: "江部", classCode: "江部電解" }, { vendor: "江部", classCode: "江部磨き" }
-  ].concat(codes.concat(["未分類"]).map(function(code) { return { vendor: "嘉代", classCode: code }; }));
+  var lines = ["江部"].concat(EBE_POLISHING_CLASSES_).map(function(code) { return { vendor: "江部", classCode: code }; })
+    .concat(codes.concat(["未分類"]).map(function(code) { return { vendor: "嘉代", classCode: code }; }));
   var byKey = {};
   lines.forEach(function(line) { line.quantity = 0; byKey[line.vendor + ":" + line.classCode] = line; });
   var totalReturned = 0, missingQuantity = 0;
@@ -501,7 +505,7 @@ function monthlyPolishingSummary_(jobs, settings, month) {
       if (!event.at) return;
       var date = new Date(event.at);
       if (!isFinite(date.getTime()) || Utilities.formatDate(date, "Asia/Tokyo", "yyyy-MM") !== month) return;
-      var metadata = job.productMaster || {}, code = metadata.classCode, quantity = Number(event.quantity || 0);
+      var metadata = job.productMaster || {}, code = normalizePolishingClassCode_(metadata.classCode), quantity = Number(event.quantity || 0);
       if (code === "自由設定") {
         var customRates = normalizePolishingCustomRates_(metadata.customRates);
         totalReturned += quantity;
@@ -518,7 +522,7 @@ function monthlyPolishingSummary_(jobs, settings, month) {
         if (customRates["江部"] === null || customRates["嘉代"] === null) missingQuantity += quantity;
         return;
       }
-      var exceptional = code === "江部電解" || code === "江部磨き", ebeCode = exceptional ? code : "江部", kCode = codes.indexOf(code) >= 0 ? code : "未分類";
+      var exceptional = EBE_POLISHING_CLASSES_.indexOf(code) >= 0, ebeCode = exceptional ? code : "江部", kCode = codes.indexOf(code) >= 0 ? code : "未分類";
       totalReturned += quantity;
       byKey["江部:" + ebeCode].quantity += quantity;
       if (!exceptional) {

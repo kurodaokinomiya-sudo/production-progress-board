@@ -485,12 +485,13 @@ class MockApi {
     const rule = { ...(existing || {}) };
     delete rule.wheelLever;
     delete rule.meniscus;
-    if (!["", ...POLISHING_CLASSES].includes(payload.classCode)) throw new Error("研磨区分が不正です。");
+    const classCode = normalizePolishingClassCode(payload.classCode);
+    if (!["", ...POLISHING_CLASSES].includes(classCode)) throw new Error("研磨区分が不正です。");
     if (Object.hasOwn(payload, "customRates")) {
       if (payload.customRates === undefined) throw new Error("自由設定の単価形式が不正です。");
       rule.customRates = normalizeCustomPolishingRates(payload.customRates);
     }
-    if (payload.classCode) rule.classCode = payload.classCode;
+    if (classCode) rule.classCode = classCode;
     else delete rule.classCode;
     if (rule.classCode === "自由設定") rule.customRates = normalizeCustomPolishingRates(rule.customRates);
     if (Object.hasOwn(rule, "classCode")) rules[key] = {...rule,updatedAt:new Date().toISOString(),productCode:job.productCode || "",product:job.product,customer:job.customer};
@@ -2202,14 +2203,20 @@ function applyAccessVisibility() {
 }
 
 
-const POLISHING_CLASSES = ["A", "B", "B(メニスカス)", "C", "D", "特殊", "江部電解", "江部磨き", "自由設定", "未分類"];
-const POLISHING_DEFAULT_RATES = { "江部": 840, "江部電解": 540, "江部磨き": 2400, A: 2000, B: 2500, "B(メニスカス)": 3300, C: 3000, D: 3500, "特殊": 4500 };
+const EBE_POLISHING_CLASSES = ["江部電解", "江部磨きのみ", "江部磨き＋電解"];
+const POLISHING_CLASSES = ["A", "B", "B(メニスカス)", "C", "D", "特殊", ...EBE_POLISHING_CLASSES, "自由設定", "未分類"];
+const POLISHING_DEFAULT_RATES = { "江部": 840, "江部電解": 540, "江部磨きのみ": 2000, "江部磨き＋電解": 2800, A: 2000, B: 2500, "B(メニスカス)": 3300, C: 3000, D: 3500, "特殊": 4500 };
 const KAYO_POLISHING_CLASSES = ["A", "B", "B(メニスカス)", "C", "D", "特殊", "未分類"];
+const POLISHING_CLASS_LABELS = { "江部": "電解", "江部電解": "電解(特殊)", "江部磨きのみ": "A 磨き 電解無し", "江部磨き＋電解": "A 磨き(通常)" };
 
-function isEbeOnlyPolishing(job) { return ["江部電解", "江部磨き"].includes(polishingClass(job)); }
+function normalizePolishingClassCode(code) { return code === "江部磨き" ? "江部磨き＋電解" : code; }
+
+function polishingClassLabel(code) { const canonical = normalizePolishingClassCode(code); return POLISHING_CLASS_LABELS[canonical] || canonical; }
+
+function isEbeOnlyPolishing(job) { return EBE_POLISHING_CLASSES.includes(polishingClass(job)); }
 
 function polishingClass(job) {
-  const code = job.productMaster?.classCode;
+  const code = normalizePolishingClassCode(job.productMaster?.classCode);
   return POLISHING_CLASSES.includes(code) ? code : "未分類";
 }
 
@@ -2237,10 +2244,10 @@ function polishingClassControl(job, busy = false) {
   const master = job.productMaster || {};
   const code = polishingClass(job);
   const manual = master.source === "manual";
-  const label = code === "未分類" ? "未分類・要確認" : code;
+  const label = code === "未分類" ? "未分類・要確認" : polishingClassLabel(code);
   const warningClass = code === "未分類" ? ' class="polishing-class-unclassified"' : "";
-  const control = canEdit() ? `<select${warningClass} data-polishing-class-id="${escapeHtml(job.id)}" aria-label="${escapeHtml(productDisplayName(job))}の研磨区分（同じ製品にも反映）" ${busy || state.polishingRulesSaving.size || state.polishingSaving.size ? "disabled" : ""}><option value="" ${!manual ? "selected" : ""}>自動判定${!manual ? `（${label}）` : "に戻す"}</option>${POLISHING_CLASSES.map((value) => `<option value="${value}" ${manual && code === value ? "selected" : ""}>${value === "未分類" ? "未分類・要確認" : value}</option>`).join("")}</select>` : `<strong${warningClass}>${label}</strong>`;
-  return `${control}${customPolishingRateControl(job, busy)}${isEbeOnlyPolishing(job) ? "<small>江部のみ・通常840円は除外</small>" : ""}<details><summary>${manual ? "保存した区分" : "判定の詳細"}</summary><p>${escapeHtml(master.message || "マスタの該当製品を確認してください。")}</p>${master.product ? `<p>${escapeHtml(master.product)}</p>` : ""}<p>使用材料：${escapeHtml(master.material || "未登録")}</p>${canEdit() ? '<p>変更は同じ製品と月別集計に反映します。</p>' : ""}</details>`;
+  const control = canEdit() ? `<select${warningClass} data-polishing-class-id="${escapeHtml(job.id)}" aria-label="${escapeHtml(productDisplayName(job))}の研磨区分（同じ製品にも反映）" ${busy || state.polishingRulesSaving.size || state.polishingSaving.size ? "disabled" : ""}><option value="" ${!manual ? "selected" : ""}>自動判定${!manual ? `（${label}）` : "に戻す"}</option>${POLISHING_CLASSES.map((value) => `<option value="${value}" ${manual && code === value ? "selected" : ""}>${value === "未分類" ? "未分類・要確認" : polishingClassLabel(value)}</option>`).join("")}</select>` : `<strong${warningClass}>${label}</strong>`;
+  return `${control}${customPolishingRateControl(job, busy)}${isEbeOnlyPolishing(job) ? "<small>江部のみ・電解840円は除外</small>" : ""}<details><summary>${manual ? "保存した区分" : "判定の詳細"}</summary><p>${escapeHtml(master.message || "マスタの該当製品を確認してください。")}</p>${master.product ? `<p>${escapeHtml(master.product)}</p>` : ""}<p>使用材料：${escapeHtml(master.material || "未登録")}</p>${canEdit() ? '<p>変更は同じ製品と月別集計に反映します。</p>' : ""}</details>`;
 }
 
 function parsePolishingSetting(value) {
@@ -2258,7 +2265,7 @@ function polishingMonth(value) {
 function polishingRatesForMonth(settings, month) {
   const stored = parsePolishingSetting(settings.polishingRates)[month] || {};
   return Object.fromEntries(Object.entries(POLISHING_DEFAULT_RATES).map(([key, fallback]) => {
-    const value = Object.hasOwn(stored, key) ? stored[key] : fallback;
+    const value = Object.hasOwn(stored, key) ? stored[key] : key === "江部磨き＋電解" && Object.hasOwn(stored, "江部磨き") ? stored["江部磨き"] : fallback;
     return [key, typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1000000 ? value : null];
   }));
 }
@@ -2267,7 +2274,7 @@ function polishingMonthlySummary(jobs, settings, month) {
   const prices = polishingRatesForMonth(settings, month);
   const round = (value) => Math.round(value * 100) / 100;
   const rows = [
-    ...["江部", "江部電解", "江部磨き"].map((classCode) => ({ vendor: "江部", classCode })),
+    ...["江部", ...EBE_POLISHING_CLASSES].map((classCode) => ({ vendor: "江部", classCode })),
     ...KAYO_POLISHING_CLASSES.map((classCode) => ({ vendor: "嘉代", classCode })),
   ].map((row) => ({...row, quantity: 0, unitPrice: prices[row.classCode] ?? null, knownAmount: 0, missingQuantity: 0, amount: 0}));
   const customRows = new Map();
@@ -2324,12 +2331,12 @@ function renderPolishingBilling() {
   const summary = polishingMonthlySummary(state.jobs, state.settings, month);
   const yen = (value) => value == null ? "未設定" : `¥${value.toLocaleString("ja-JP", {maximumFractionDigits:2})}`;
   const totalLabel = (total) => total.totalAmount == null ? `未確定（要確認 ${total.missingQuantity}丁）・計算済み ${yen(total.knownAmount)}` : yen(total.totalAmount);
-  qs("#polishing-billing-summary").innerHTML = `<div class="polishing-vendor-totals">${summary.vendorTotals.map((total) => `<p><span>${total.vendor} ${total.quantity}丁</span><strong>${totalLabel(total)}</strong></p>`).join("")}</div><div class="polishing-billing-table-wrap" tabindex="0" role="region" aria-label="研磨先別の月別研磨代"><table><caption>${escapeHtml(month)} の戻り ${summary.quantity}丁</caption><thead><tr><th scope="col">研磨先</th><th scope="col">区分</th><th scope="col">戻り数量</th><th scope="col">単価（円 / 丁）</th><th scope="col">金額</th></tr></thead><tbody>${summary.rows.filter((row) => row.classCode !== "未分類").map((row) => `<tr><td>${row.vendor}</td><th scope="row">${row.classCode === "江部" ? "通常" : row.classCode}${row.productNames?.length ? `<small class="polishing-billing-products">${row.productNames.map(escapeHtml).join("・")}</small>` : ""}</th><td>${row.quantity}丁</td><td>${yen(row.unitPrice)}</td><td>${row.amount == null ? "未確定" : yen(row.amount)}</td></tr>`).join("")}</tbody></table></div><p class="polishing-billing-total">支払額合計：${totalLabel(summary)}</p>`;
+  qs("#polishing-billing-summary").innerHTML = `<div class="polishing-vendor-totals">${summary.vendorTotals.map((total) => `<p><span>${total.vendor} ${total.quantity}丁</span><strong>${totalLabel(total)}</strong></p>`).join("")}</div><div class="polishing-billing-table-wrap" tabindex="0" role="region" aria-label="研磨先別の月別研磨代"><table><caption>${escapeHtml(month)} の戻り ${summary.quantity}丁</caption><thead><tr><th scope="col">研磨先</th><th scope="col">区分</th><th scope="col">戻り数量</th><th scope="col">単価（円 / 丁）</th><th scope="col">金額</th></tr></thead><tbody>${summary.rows.filter((row) => row.classCode !== "未分類").map((row) => `<tr><td>${row.vendor}</td><th scope="row">${polishingClassLabel(row.classCode)}${row.productNames?.length ? `<small class="polishing-billing-products">${row.productNames.map(escapeHtml).join("・")}</small>` : ""}</th><td>${row.quantity}丁</td><td>${yen(row.unitPrice)}</td><td>${row.amount == null ? "未確定" : yen(row.amount)}</td></tr>`).join("")}</tbody></table></div><p class="polishing-billing-total">支払額合計：${totalLabel(summary)}</p>`;
   if (!state.polishingRatesDirty && !state.polishingRatesSaving) {
     const rates = polishingRatesForMonth(state.settings, month);
     state.polishingRatesBase = parsePolishingSetting(state.settings.polishingRates)[month] || null;
     state.polishingRatesBase = state.polishingRatesBase ? structuredClone(state.polishingRatesBase) : null;
-    qs("#polishing-rate-fields").innerHTML = [["江部", ["江部", "江部電解", "江部磨き"]], ["嘉代", ["A", "B", "B(メニスカス)", "C", "D", "特殊"]]].map(([vendor, codes]) => `<fieldset><legend>${vendor}</legend><div class="polishing-rate-group">${codes.map((code) => `<label class="field"><span>${code === "江部" ? "通常" : code}</span><input data-polishing-rate="${code}" aria-label="${vendor} ${code === "江部" ? "通常" : code}の単価" type="number" min="0" max="1000000" step="0.01" inputmode="decimal" value="${rates[code] ?? ""}" placeholder="未設定"></label>`).join("")}</div></fieldset>`).join("");
+    qs("#polishing-rate-fields").innerHTML = [["江部", ["江部", ...EBE_POLISHING_CLASSES]], ["嘉代", ["A", "B", "B(メニスカス)", "C", "D", "特殊"]]].map(([vendor, codes]) => `<fieldset><legend>${vendor}</legend><div class="polishing-rate-group">${codes.map((code) => `<label class="field"><span>${polishingClassLabel(code)}</span><input data-polishing-rate="${code}" aria-label="${vendor} ${polishingClassLabel(code)}の単価" type="number" min="0" max="1000000" step="0.01" inputmode="decimal" value="${rates[code] ?? ""}" placeholder="未設定"></label>`).join("")}</div></fieldset>`).join("");
   }
   qs("#polishing-rates-save").disabled = state.polishingRatesSaving;
   qs("#polishing-rate-settings").hidden = !isAdminUser();
@@ -2567,7 +2574,7 @@ function polishingJobs({ jobs = state.jobs, filter = state.polishingFilter, quer
     const matches = filter === "vendor" ? counts.outstanding > 0
       : filter === "finishing" ? counts.returned > 0 && stageStatus(job, "finish") !== "done" && job.shippingStatus !== "shipped"
         : counts.sent > 0 || Boolean(job.polishing?.history?.length);
-    return matches && (!normalized || [job.customer, productDisplayName(job), job.productCode, job.serialNo, job.productMaster?.classCode].some((value) => String(value || "").toLocaleLowerCase("ja").includes(normalized)));
+    return matches && (!normalized || [job.customer, productDisplayName(job), job.productCode, job.serialNo, polishingClass(job), polishingClassLabel(polishingClass(job))].some((value) => String(value || "").toLocaleLowerCase("ja").includes(normalized)));
   }).sort((a, b) => compareTextBlankLast(a.dueDate, b.dueDate) || compareTextBlankLast(a.customer, b.customer) || compareTextBlankLast(a.serialNo, b.serialNo) || compareTextBlankLast(a.id, b.id));
 }
 
@@ -2606,7 +2613,7 @@ function renderPolishingWorkspace() {
   const all = polishingJobs({ filter: "all", query: "" });
   const vendor = all.filter((job) => polishingCounts(job).outstanding > 0);
   const finishing = all.filter((job) => polishingCounts(job).returned > 0 && stageStatus(job, "finish") !== "done" && job.shippingStatus !== "shipped");
-  const classTotals = POLISHING_CLASSES.filter((code) => code !== "未分類").map((code) => `<span>${code}: ${vendor.filter((job) => polishingClass(job) === code).reduce((sum, job) => sum + polishingCounts(job).outstanding, 0)}丁</span>`).join("");
+  const classTotals = POLISHING_CLASSES.filter((code) => code !== "未分類").map((code) => `<span>${polishingClassLabel(code)}: ${vendor.filter((job) => polishingClass(job) === code).reduce((sum, job) => sum + polishingCounts(job).outstanding, 0)}丁</span>`).join("");
   const vendorQuantity = vendor.reduce((sum, job) => sum + polishingCounts(job).outstanding, 0);
   const finishingQuantity = finishing.reduce((sum, job) => sum + polishingCounts(job).returned, 0);
   qs("#polishing-totals").innerHTML = `<p><span>研磨屋にある数量</span><strong>${vendorQuantity.toLocaleString("ja-JP")} <small>丁 / ${vendor.length}件</small></strong></p><p><span>最終仕上げ待ち・仕上げ中</span><strong>${finishingQuantity.toLocaleString("ja-JP")} <small>丁 / ${finishing.length}件</small></strong></p><div class="polishing-class-summary" aria-label="研磨屋にある区分別数量">${classTotals}</div>`;

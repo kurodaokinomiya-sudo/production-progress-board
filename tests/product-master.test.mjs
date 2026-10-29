@@ -342,7 +342,7 @@ test("江部840 and 嘉代 class prices are separate accounts for the same retur
   const jobs = ["A", "B", "B(メニスカス)", "C", "D", "特殊"].map((code) => returnedJob(code));
   const summary = h.context.monthlyPolishingSummary_(jobs, {}, "2026-10");
   assert.equal(summary.totalQuantity, 6, "actual returned quantities are counted once");
-  assert.equal(summary.classes.length, 10);
+  assert.equal(summary.classes.length, 11);
   assert.equal(summary.classes.find((line) => line.classCode === "江部").quantity, 6);
   const ebe = summary.vendorTotals.find((vendor) => vendor.vendor === "江部"), kayo = summary.vendorTotals.find((vendor) => vendor.vendor === "嘉代");
   assert.equal(ebe.totalAmount, 5040);
@@ -352,18 +352,54 @@ test("江部840 and 嘉代 class prices are separate accounts for the same retur
   assert.equal(summary.missingQuantity, 0);
 });
 
-test("江部電解 and 江部磨き replace the840 account and exclude 嘉代", () => {
+test("江部電解・磨きのみ2000円・磨き＋電解2800円は通常840円と嘉代を除外し、旧区分も引き継ぐ", () => {
   const h = harness();
-  const jobs = [returnedJob("江部電解", 3), returnedJob("江部磨き", 4)];
+  const jobs = [returnedJob("江部電解", 3), returnedJob("江部磨き", 4), returnedJob("江部磨きのみ", 2), returnedJob("江部磨き＋電解", 1)];
   jobs.forEach(job => { job.product = "メニスカス鉗子"; job.productMaster.meniscus = true; });
   const summary = h.context.monthlyPolishingSummary_(jobs, {}, "2026-10");
-  assert.equal(summary.totalQuantity, 7);
+  assert.equal(summary.totalQuantity, 10);
   assert.equal(summary.classes.find((line) => line.classCode === "江部").quantity, 0);
   assert.equal(summary.classes.find((line) => line.classCode === "江部電解").amount, 1620);
-  assert.equal(summary.classes.find((line) => line.classCode === "江部磨き").amount, 9600);
+  assert.equal(summary.classes.find((line) => line.classCode === "江部磨きのみ").amount, 4000);
+  assert.equal(summary.classes.find((line) => line.classCode === "江部磨き＋電解").amount, 14000);
+  assert.deepEqual(Array.from(summary.classes.filter(line => line.vendor === "江部"), line => line.classCode), ["江部", "江部電解", "江部磨きのみ", "江部磨き＋電解"]);
   assert.equal(summary.vendorTotals.find((vendor) => vendor.vendor === "嘉代").quantity, 0);
   assert.equal(summary.vendorTotals.find((vendor) => vendor.vendor === "嘉代").totalAmount, 0);
-  assert.equal(summary.totalAmount, 11220);
+  assert.equal(summary.totalAmount, 19620);
+});
+
+test("江部磨きの旧月別単価を保持し、新名称での保存と競合判定を行う", () => {
+  const h = harness();
+  for (const value of [2400, 0, null]) {
+    const rates = h.context.effectiveMonthlyPolishingRates_({"江部磨き":value});
+    assert.equal(rates["江部磨き＋電解"], value);
+    assert.equal(rates["江部磨きのみ"], 2000);
+    assert.equal(Object.hasOwn(rates, "江部磨き"), false);
+    assert.equal(h.context.effectiveMonthlyPolishingRates_({"江部磨き":2400,"江部磨き＋電解":value})["江部磨き＋電解"], value);
+  }
+  h.settings = {polishingRates: JSON.stringify({"2026-09":{"江部磨き":2400},"2026-10":{"江部磨き":2400}})};
+  const payload = {month:"2026-10",rates:{"江部磨きのみ":2000,"江部磨き＋電解":2800},expectedRates:{"江部磨き":2400}};
+  h.context.savePolishingRates(payload);
+  const stored = JSON.parse(h.settings.polishingRates);
+  assert.deepEqual(stored["2026-09"], {"江部磨き":2400});
+  assert.deepEqual(stored["2026-10"], payload.rates);
+  assert.throws(() => h.context.savePolishingRates(payload), /別の端末/);
+});
+
+test("旧江部磨きの製品設定を新名称で返し、新しい両区分を保存できる", () => {
+  const h = harness();
+  const metadata = h.context.decorateProductJobs_(h.jobs, {})[0].productMaster;
+  const legacy = {classCode:"江部磨き",updatedAt:"2026-10-01"};
+  h.settings = {polishingProductRules: JSON.stringify({[metadata.key]:legacy})};
+  assert.equal(h.context.decorateProductJobs_(h.jobs, h.settings)[0].productMaster.classCode, "江部磨き＋電解");
+  assert.equal(JSON.parse(h.settings.polishingProductRules)[metadata.key].classCode, "江部磨き");
+  for (const code of ["江部磨きのみ", "江部磨き＋電解", "江部磨き"]) {
+    const expectedRule = JSON.parse(h.settings.polishingProductRules)[metadata.key];
+    const saved = h.context.savePolishingProductRule({id:"J1",version:3,classCode:code,expectedRule});
+    const canonical = code === "江部磨き" ? "江部磨き＋電解" : code;
+    assert.equal(saved.jobs[0].productMaster.classCode, canonical);
+    assert.equal(JSON.parse(h.settings.polishingProductRules)[metadata.key].classCode, canonical);
+  }
 });
 
 test("B(メニスカス) has its own3300 嘉代 rate and keeps normal B2500 and unknown totals separate", () => {
