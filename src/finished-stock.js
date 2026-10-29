@@ -384,6 +384,12 @@ var FinishedStock = (function () {
     } else {
       var target = state.byId[text(input.eventId)];
       if (!target || ["opening", "receive", "ship"].indexOf(target.action) < 0 || state.reversed[target.id]) fail("取消対象の在庫記録が見つかりません。");
+      if (target.action === "ship" && target.orderJobId) {
+        var completedOrder = (options.jobs || []).filter(function (job) { return job.id === target.orderJobId; })[0];
+        if (completedOrder && completedOrder.shippingStatus === "shipped" && completedOrder.completionKind !== "stock_fulfillment") {
+          fail("この注文は出荷完了しています。完成品リストで注文を再開してから、在庫出荷を取り消してください。");
+        }
+      }
       if (!note) fail("取消理由を入力してください。");
       if (date < target.date) fail("取消日は元の記録日以降にしてください。");
       if (target.action !== "ship") {

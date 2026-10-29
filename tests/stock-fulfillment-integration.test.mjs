@@ -231,4 +231,45 @@ for (const [name, factory] of [["server", server], ["MockApi", mock]]) {
     await assert.rejects(async () => a.saveJob({ ...reopened, shippingStatus: "shipped", requestId: "after-cancel-complete" }), /在庫からの出荷予定分が残っています/);
     assert.equal((await a.getFinishedStock()).products.find(product => product.id === "26001").stockQuantity, 2);
   });
+
+  test(`N02 ${name}: mixed shipment reversal requires reopening and survives lost replies and later completion`, async () => {
+    const h = await factory(), a = h.api, job = await manufacturingReady(h, { initialStock: 2 });
+    const shipped = await shipMixed(a, job, 2);
+    const done = await a.saveJob({ ...job, shippingStatus: "shipped", requestId: "n02-complete" });
+    const request = { requestId: "n02-reverse", expectedVersion: shipped.version, eventId: shipped.history.find(event => event.requestId === "mixed-stock-ship").id, date: "2026-10-03", note: "訂正" };
+    const before = JSON.stringify(await a.getFinishedStock()), beforeJobs = JSON.stringify(h.jobs());
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await assert.rejects(async () => a.reverseFinishedStock(request), /再開.*在庫出荷.*取り消/);
+      assert.equal(JSON.stringify(await a.getFinishedStock()), before, "rejected cancellation appends no event and restores no stock");
+      assert.equal(JSON.stringify(h.jobs()), beforeJobs, "rejected cancellation preserves job/version");
+    }
+    await assert.rejects(async () => a.reverseFinishedStock({ ...request, expectedVersion: 0 }), /別の端末/);
+    assert.equal(JSON.stringify(h.jobs()), beforeJobs);
+    const reopened = await a.saveJob({ ...done, shippingStatus: "waiting", requestId: "n02-reopen" });
+    await assert.rejects(async () => { await a.reverseFinishedStock(request); throw new Error("synthetic lost reply after persistence"); }, /lost reply/);
+    const reversed = await a.reverseFinishedStock(request);
+    assert.equal(reversed.version, shipped.version + 1);
+    assert.equal(reversed.products.find(product => product.id === "26001").stockQuantity, 2);
+    assert.equal(reversed.orders.find(order => order.jobId === job.id).stockTargetQuantity, 2);
+    assert.equal(h.jobs().find(entry => entry.id === job.id).version, reopened.version);
+    await assert.rejects(async () => a.saveJob({ ...reopened, shippingStatus: "shipped", requestId: "n02-premature-complete" }), /在庫からの出荷予定分が残っています/);
+    await a.shipFinishedStock({ requestId: "n02-replacement", expectedVersion: reversed.version, productId: "26001", orderJobId: job.id, jobVersion: reopened.version, quantity: 2, date: "2026-10-03", purpose: "sale" });
+    await a.saveJob({ ...reopened, shippingStatus: "shipped", requestId: "n02-complete-again" });
+    const completedAgain = JSON.stringify(h.jobs()), stockAgain = JSON.stringify(await a.getFinishedStock());
+    await a.reverseFinishedStock(request);
+    assert.equal(JSON.stringify(h.jobs()), completedAgain, "a committed cancellation retry never reopens a later completion");
+    assert.equal(JSON.stringify(await a.getFinishedStock()), stockAgain);
+    await assert.rejects(async () => a.reverseFinishedStock({ ...request, note: "different content" }), /同じリクエストID/);
+  });
+
+  test(`N02 ${name}: unlinked shipment reversal is independent of completed manufacturing orders`, async () => {
+    const h = await factory(), a = h.api;
+    const job = await manufacturingReady(h, { initialStock: 2, quantity: 5, scheduledStock: 0 });
+    const done = await a.saveJob({ ...job, shippingStatus: "shipped", requestId: "n02-unlinked-complete" });
+    const shipped = await a.shipFinishedStock({ requestId: "n02-unlinked-ship", expectedVersion: (await a.getFinishedStock()).version, productId: "26001", quantity: 2, date: "2026-10-02", customer: "別得意先", orderRef: "別注文", purpose: "sale" });
+    const result = await a.reverseFinishedStock({ requestId: "n02-unlinked-reverse", expectedVersion: shipped.version, eventId: shipped.history.find(event => event.requestId === "n02-unlinked-ship").id, date: "2026-10-03", note: "訂正" });
+    assert.equal(result.products.find(product => product.id === "26001").stockQuantity, 2);
+    assert.equal(h.jobs().find(entry => entry.id === job.id).version, done.version);
+    assert.equal(h.jobs().find(entry => entry.id === job.id).shippingStatus, "shipped");
+  });
 }
