@@ -18,7 +18,7 @@
     "check": "npm run build && npm test && npm run test:contrast"
   },
   "engines": {
-    "node": ">=20"
+    "node": "^22.13.0 || >=24"
   },
   "dependencies": {
     "pdfjs-dist": "6.3.289"

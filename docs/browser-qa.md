@@ -1,6 +1,6 @@
 # ローカルブラウザー回帰検証
 
-Node.js 20以上とnpmを使う。個人のホームやCodex内部ランタイムを参照しない。
+Node.js 22.13.0以降の22系、または24以降とnpmを使う。Node.js 24系を推奨する。固定依存の `pdfjs-dist@6.3.289` はNode.js 22.13.0以降を要求する。本プロジェクトは `engines.node` を `^22.13.0 || >=24` とし、23系を対応対象に含めない。Node.js/npmは各自の環境から提供し、個人のホームディレクトリやCodex内部ランタイムの固定パスに依存しない。Windows PowerShellでは、以下の `npm` を `npm.cmd` に読み替える。
 
 ```sh
 npm ci
@@ -53,5 +53,7 @@ npm run qa:legacy -- tools/project-link-qa.mjs
 ## 検証の限界
 
 どちらの画面もローカルのMockApiを使う。生成物の組み込み漏れやブラウザー操作の確認であり、HtmlService上のgoogle.script.run、GASロック、Sheets永続化、Google認証、本番との一致は確認しない。サーバー単体回帰は別途 `node --test --test-isolation=none tests/*.test.mjs` で実行する。
+
+2026-10-29の環境確認はWindows / Node.js v24.19.0 / npm 11.6.2で実施した。Node.js 22系の下限、macOS、Linuxは未検証であり、宣言範囲全体や全OSでの成功を保証するものではない。Node.js 20での実クラッシュも未検証。導入・ビルド・テスト・専用devサーバーの起動・ブラウザーQA・合成PDFの実抽出を確認する再現手順は [N05検証記録](improvements/2026-10-29/N05.md) を参照する。
 
 Playwright公式: https://playwright.dev/docs/library / https://playwright.dev/docs/browsers
