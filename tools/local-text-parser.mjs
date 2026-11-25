@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import { parseLocalOrderAi } from "./local-ai-import.mjs";
+import { parseRememberedOrderAutomatically } from "./local-auto-import.mjs";
 
 export const LOCAL_TEXT_ENGINE_VERSION = 2;
 export const LOCAL_TEXT_MAX_LENGTH = 30000;
@@ -20,7 +21,7 @@ export function validateLocalOrderTextInput(input) {
   if (name.length > LOCAL_TEXT_NAME_MAX_LENGTH) throw new Error(`名前は${LOCAL_TEXT_NAME_MAX_LENGTH}文字以下にしてください。`);
 
   const engine = input.engine === undefined ? "legacy" : input.engine;
-  if (engine !== "legacy" && engine !== "ai") throw new Error("読取エンジンが不正です。従来の読取またはAIを選択してください。");
+  if (engine !== "legacy" && engine !== "ai" && engine !== "auto") throw new Error("読取エンジンが不正です。自動・従来の読取・AIから選択してください。");
   return { name: name.trim(), text: input.text, engine };
 }
 
@@ -42,7 +43,16 @@ async function loadTextParserContext() {
 export async function parseLocalOrderText(input, { aiParser = parseLocalOrderAi } = {}) {
   const normalized = validateLocalOrderTextInput(input);
   let results;
-  if (normalized.engine === "ai") {
+  if (normalized.engine === "auto") {
+    const auto = await parseRememberedOrderAutomatically({
+      name: normalized.name,
+      text: normalized.text,
+      mimeType: "text/plain",
+      customerRules: input.customerRules,
+      learningRules: input.learningRules,
+    }, { aiParser });
+    return auto;
+  } else if (normalized.engine === "ai") {
     const parsed = await aiParser({ name: normalized.name, text: normalized.text, ...(input.customerRules ? { customerRules: input.customerRules } : {}) });
     if (!parsed || !Array.isArray(parsed.results)) throw new Error("AIの応答が不正です。候補は登録していません。");
     results = parsed.results;

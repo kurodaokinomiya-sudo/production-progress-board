@@ -1,6 +1,11 @@
 function createIntakeFromImage(input) {
   requireEditorAccess_();
   ensureSystem_();
+  var text = ocrBlob_(intakeFileBlob_(input));
+  return createIntakeFromExtractedText_(text, input);
+}
+
+function intakeFileBlob_(input) {
   if (!input || !input.base64 || !input.mimeType) throw new Error("画像データがありません。");
   if (!["image/jpeg", "image/png", "image/gif", "image/bmp", "image/webp", "application/pdf"].includes(input.mimeType)) {
     throw new Error("JPEG・PNG・GIF・BMP・WEBP・PDFを選択してください。");
@@ -8,9 +13,37 @@ function createIntakeFromImage(input) {
   if (String(input.base64).length > 12 * 1024 * 1024) throw new Error("ファイルが大きすぎます。8 MB以下にしてください。");
 
   var bytes = Utilities.base64Decode(input.base64);
-  var blob = Utilities.newBlob(bytes, input.mimeType, sanitizeText_(input.name, 200) || "order-image");
-  var text = ocrBlob_(blob);
-  return createIntakeFromExtractedText_(text, input);
+  return Utilities.newBlob(bytes, input.mimeType, sanitizeText_(input.name, 200) || "order-image");
+}
+
+function createIntakeAutomatically(input) {
+  requireEditorAccess_();
+  ensureSystem_();
+  var blob = intakeFileBlob_(input);
+  var rules = readIntakeLearningRules_(), text = "", results = null;
+  if (rules.length) {
+    if (input.mimeType === "application/pdf") {
+      text = completePdfIntakeText_(input.pdfText);
+    } else {
+      try { text = ocrBlob_(blob); } catch (error) { /* AI can still read the original file. */ }
+    }
+    if (text) results = parseRememberedOrderItems_(text, { subject: input.name || "" }, rules, aiCustomerRulesSnapshot_());
+  }
+  if (!results) results = runAiImport_({ name: input.name, mimeType: input.mimeType, base64: input.base64 });
+  return saveParsedIntake_(results, text || "原本を別途開き、明細数・数量・納期を確認してください。", input);
+}
+
+function completePdfIntakeText_(extraction) {
+  if (!extraction || !Array.isArray(extraction.pages) || !Number.isSafeInteger(extraction.pageCount) ||
+      extraction.pageCount < 1 || extraction.pages.length !== extraction.pageCount) return "";
+  var length = (extraction.pageCount - 1) * 2;
+  for (var index = 0; index < extraction.pages.length; index += 1) {
+    var page = extraction.pages[index];
+    if (typeof page !== "string" || !page.trim() || page.indexOf("\uFFFD") >= 0) return "";
+    length += page.length;
+    if (length > 200000) return "";
+  }
+  return extraction.pages.join("\n\n");
 }
 
 function createIntakeFromPdfText(input) {
@@ -33,7 +66,10 @@ function createIntakeFromText(input) {
   ensureSystem_();
   var saveInput = { name: validated.name, sourceType: "text" };
   var results;
-  if (validated.engine === "ai") {
+  if (validated.engine === "auto") {
+    results = readRememberedOrderItems_(validated.text, { subject: validated.name });
+    if (!results) results = runAiImport_({ name: validated.name, text: validated.text });
+  } else if (validated.engine === "ai") {
     // Paste intake deliberately drops files/base64 so the text endpoint never
     // turns into an attachment or Gmail import path.
     results = runAiImport_({ name: validated.name, text: validated.text });
@@ -54,7 +90,7 @@ function validateTextIntakeInput_(input) {
   if (name.length > 200) throw new Error("名前は200文字以下にしてください。");
 
   var engine = input.engine === undefined ? "legacy" : input.engine;
-  if (engine !== "legacy" && engine !== "ai") throw new Error("読取エンジンが不正です。従来の読取またはAIを選択してください。");
+  if (["legacy", "ai", "auto"].indexOf(engine) < 0) throw new Error("読取エンジンが不正です。自動・従来の読取・AIから選択してください。");
   return { name: name.trim(), text: input.text, engine: engine };
 }
 
@@ -92,6 +128,153 @@ function parsePastedOrderItems_(text, context) {
 function createIntakeFromExtractedText_(text, input) {
   var parsedResults = parseOrderItems_(text, { subject: input.name || "" });
   return saveParsedIntake_(parsedResults, text, input);
+}
+
+function readRememberedOrderItems_(text, context) {
+  return parseRememberedOrderItems_(text, context || {}, readIntakeLearningRules_(), aiCustomerRulesSnapshot_());
+}
+
+/** Only proven row layouts may bypass AI; one unresolved row rejects the batch. */
+function parseRememberedOrderItems_(text, context, rules, customerRules) {
+  if (typeof IntakeLearning === "undefined" || !IntakeLearning.sanitizeRules(rules).length) return null;
+  var source = normalizeOrderText_(text), results;
+  if (!source || source.length > 200000) return null;
+  try {
+    if (/\bTC[_\-\s]*[0-9]{2}[_\-\s]*[0-9]{3,5}\b/i.test(source)) {
+      var purchaseNumbers = source.match(/\bTC[_\-\s]*[0-9]{2}[_\-\s]*[0-9]{3,5}\b/gi);
+      if (purchaseNumbers.some(function(number) { return number.replace(/[_\-\s]/g, "").toUpperCase() !== purchaseNumbers[0].replace(/[_\-\s]/g, "").toUpperCase(); })) return null;
+      var issuer = extractLabeledValue_(source, ["得意先", "客先", "顧客名", "発注元", "注文元", "会社名"]);
+      var issuerLine = source.match(/発注致します[。.]?\s*((?:株式会社|有限会社|合同会社)[^\n]{2,80})/);
+      if (!issuer && issuerLine) issuer = issuerLine[1].trim();
+      if (!issuer) return null;
+      results = parseOrderItems_(source, context || {});
+      results.forEach(function(result) { result.parsed.customer = issuer; });
+      var lines = source.split("\n").map(function(line) { return line.trim(); });
+      var rows = lines.filter(function(line) { return /^\d+\s*[_＿]/.test(line); });
+      if (!rows.length || rows.length !== results.length || rows.some(function(line, index) {
+        return Number(line.match(/^\d+/)[0]) !== index + 1;
+      })) return null;
+      var inline = rows.every(function(line) {
+        return (line.match(/20\d{2}[-\/]\d{1,2}[-\/]\d{1,2}/g) || []).length === 1 &&
+          /20\d{2}[-\/]\d{1,2}[-\/]\d{1,2}\s+\d+\s*(?:個|本|丁|組|セット)\s*$/.test(line);
+      });
+      if (!inline) {
+        var tail = lines.slice(lines.findIndex(function(line) { return /^\d+\s*[_＿]/.test(line); }));
+        var dates = tail.filter(function(line) { return /^20\d{2}[-\/]\d{1,2}[-\/]\d{1,2}$/.test(line); });
+        var columns = tail.slice(tail.findIndex(function(line) { return /^20\d{2}[-\/]\d{1,2}[-\/]\d{1,2}$/.test(line); }));
+        columns = columns.filter(Boolean);
+        var quantities = columns.filter(function(line) { return /^\d+$/.test(line); });
+        // In particular, never accept Parser.gs's header-date fallback.
+        if (!/数量\s+単位/.test(source) || dates.length !== rows.length || quantities.length !== rows.length ||
+            columns.length !== rows.length * 3 || columns.some(function(line, index) {
+              return index < rows.length ? !/^20\d{2}[-\/]\d{1,2}[-\/]\d{1,2}$/.test(line)
+                : index < rows.length * 2 ? !/^\d+$/.test(line) : !/^(?:個|本|丁|組|セット)$/.test(line);
+            })) return null;
+      } else if (lines.slice(lines.findIndex(function(line) { return /^\d+\s*[_＿]/.test(line); })).some(function(line) {
+        return line && !/^\d+\s*[_＿]/.test(line);
+      })) {
+        return null;
+      }
+    } else {
+      results = parseRememberedLabeledItems_(source);
+      if (!results) return null;
+    }
+    if (!results.length || results.length > 100) return null;
+    var recalled = results.map(function(result, index) {
+      var parsed = Object.assign({}, result.parsed);
+      if (customerRules && typeof resolveAiCustomer_ === "function") parsed.customer = resolveAiCustomer_(parsed.customer, customerRules).customer;
+      parsed = IntakeLearning.recall({ parsed: parsed, rules: rules });
+      if (!parsed) return null;
+      parsed._memory.document = context && context.document || 0;
+      parsed._memory.page = 1;
+      parsed._memory.row = String(index + 1);
+      return Object.assign({}, result, { parsed: parsed });
+    });
+    return recalled.every(Boolean) ? recalled : null;
+  } catch (error) {
+    // A parser's incomplete-table error is a reason to use AI, never to save a
+    // partial deterministic reading. No network or writes happen in preflight.
+    return null;
+  }
+}
+
+function parseRememberedLabeledItems_(source) {
+  var labels = {
+    "得意先": "customer", "客先": "customer", "顧客名": "customer", "発注元": "customer", "注文元": "customer", "会社名": "customer",
+    "品名": "product", "商品名": "product", "製品名": "product", "器具名": "product", "注文品": "product",
+    "数量": "quantity", "注文数": "quantity", "個数": "quantity", "本数": "quantity",
+    "納期": "dueDate", "希望納期": "dueDate", "希望日": "dueDate", "出荷予定日": "dueDate", "納品日": "dueDate",
+    "製品番号": "productCode", "品番": "productCode", "商品番号": "productCode", "製品コード": "productCode",
+    "連番": "serialNo", "製造番号": "serialNo", "管理番号": "serialNo", "注文番号": "externalOrderNo", "発注番号": "externalOrderNo", "購入番号": "externalOrderNo", "注文書番号": "externalOrderNo", "発注書番号": "externalOrderNo",
+    "注文明細番号": "externalLineNo", "発注明細番号": "externalLineNo", "明細番号": "externalLineNo", "明細No": "externalLineNo",
+    "全長": "specLength", "長さ": "specLength", "型": "specShape", "形状": "specShape", "曲がり": "specShape", "刃幅": "bladeWidth", "刃巾": "bladeWidth", "幅": "bladeWidth",
+    "備考": "note", "特記事項": "note", "注意事項": "note", "件名": "subject", "合計数量": "total"
+  };
+  var headerFields = ["customer", "dueDate", "externalOrderNo", "subject"];
+  var identityFields = ["customer", "externalOrderNo"];
+  var order = { header: {}, items: [], total: null };
+  var orders = [order], item = null, afterBlank = false, separatedDate = false;
+  var inlineLabel = new RegExp("(?:^|\\s)(?:" + Object.keys(labels).map(escapeRegExp_).join("|") + ")\\s*[:：]");
+  var valid = source.split("\n").every(function(line) {
+    if (!line.trim()) { afterBlank = true; return true; }
+    var match = line.match(/^\s*([^:：]+)[:：]\s*(.+?)\s*$/);
+    if (!match || match[2].length > 160) return false;
+    var label = match[1].replace(/[ \t]/g, "");
+    if (!Object.prototype.hasOwnProperty.call(labels, label)) return false;
+    var field = labels[label];
+    if (inlineLabel.test(match[2])) return false;
+
+    // A blank line followed by an order identity opens a new header. A date
+    // by itself after a blank could head the next item or belong to this one.
+    if (item && afterBlank && identityFields.indexOf(field) >= 0) {
+      if (separatedDate) return false;
+      order = { header: {}, items: [], total: null };
+      orders.push(order);
+      item = null;
+    } else if (item && afterBlank && field === "dueDate") {
+      separatedDate = true;
+    }
+    afterBlank = false;
+
+    if (field === "product") {
+      if (separatedDate) return false;
+      item = {};
+      order.items.push(item);
+    }
+    if (field === "total") {
+      if (order.total !== null || !/^\d+(?:\s*(?:本|個|丁|台|組|セット))?$/.test(match[2])) return false;
+      order.total = parseQuantity_(match[2]);
+      return true;
+    }
+    if (!item && headerFields.indexOf(field) < 0) return false;
+    var current = item || order.header;
+    if (Object.prototype.hasOwnProperty.call(current, field)) return false;
+    current[field] = { line: line, value: match[2] };
+    return true;
+  });
+  if (!valid) return null;
+  var results = [];
+  var complete = orders.every(function(order) {
+    if (!order.items.length || (orders.length > 1 && !order.header.customer)) return false;
+    var rows = order.items.map(function(item) {
+      // Header fields between item lines could describe either adjacent order.
+      if (identityFields.some(function(field) {
+        return item[field] && (order.header[field] || order.items.length > 1);
+      })) return null;
+      var values = Object.assign({}, order.header, item);
+      if (!values.customer || !values.quantity || !values.dueDate ||
+          !/^\d+(?:\s*(?:本|個|丁|台|組|セット))?$/.test(values.quantity.value) ||
+          !/^20\d{2}\s*[年\/-]\s*\d{1,2}\s*[月\/-]\s*\d{1,2}\s*日?$/.test(values.dueDate.value)) return null;
+      var productToken = separateImportedProductCode_({ product: values.product.value, productCode: "" }).productCode;
+      if (values.productCode && productToken && normalizeOrderText_(productToken).toUpperCase() !== normalizeOrderText_(values.productCode.value).toUpperCase()) return null;
+      return parseOrderText_(Object.keys(values).map(function(field) { return values[field].line; }).join("\n"), {});
+    });
+    if (rows.some(function(result) { return !result; })) return false;
+    if (order.total !== null && rows.reduce(function(sum, result) { return sum + Number(result.parsed.quantity); }, 0) !== order.total) return false;
+    rows.forEach(function(row) { results.push(row); });
+    return true;
+  });
+  return complete ? results : null;
 }
 
 function saveParsedIntake_(parsedResults, text, input) {
@@ -141,6 +324,9 @@ function intakeSubject_(subject, parsedResult, index, total) {
 }
 
 function intakePreviewText_(text, parsedResult, index, total) {
+  if (parsedResult.parsed && parsedResult.parsed._memory) {
+    return "製品記録で読取（AIなし）・要確認\n\n" + text;
+  }
   if (parsedResult.parsed && parsedResult.parsed._ai) {
     var ai = parsedResult.parsed._ai;
     return "AI読取・要確認（精度を保証する数値ではありません）\n文書 " + ai.document + "（0は本文） / ページ " + ai.page + " / 明細 " + ai.row + "\n根拠: " + ai.evidence + "\n確認事項: " + (ai.warnings.join(" / ") || "原本と全項目を照合してください。") + "\n\n" + text;
@@ -151,70 +337,200 @@ function intakePreviewText_(text, parsedResult, index, total) {
   return "この確認候補: 品目" + itemNumber + " " + product + "\n\n--- 発注書の読取全文 ---\n" + text;
 }
 
+function listOrderEmailMessages_(query, maxThreads) {
+  query = String(query || "").trim();
+  if (!query) throw new Error("Gmail検索式を入力してください。");
+  if (query.length > 1000) throw new Error("Gmail検索式は1000文字以内で入力してください。");
+  var threads = new Map(), pageToken, hasMoreThreads = false;
+  do {
+    var options = { q: query, maxResults: 500, fields: "nextPageToken,messages(id,threadId)" };
+    if (pageToken) options.pageToken = pageToken;
+    var page;
+    try {
+      page = Gmail.Users.Messages.list("me", options);
+    } catch (error) {
+      throw new Error("Gmailを検索できません。検索式とGmail APIの設定を確認してください。");
+    }
+    // Group only matching message IDs to apply the existing thread limit.
+    (page.messages || []).forEach(function(message) {
+      if (!message.id || !message.threadId) throw new Error("Gmailの検索結果を確認できませんでした。");
+      if (!threads.has(message.threadId)) {
+        if (threads.size >= maxThreads) { hasMoreThreads = true; return; }
+        threads.set(message.threadId, new Set());
+      }
+      threads.get(message.threadId).add(message.id);
+    });
+    pageToken = page.nextPageToken;
+  } while (pageToken && !hasMoreThreads);
+
+  var messageIds = [];
+  threads.forEach(function(ids) {
+    // As in the conversation view, process each thread's oldest matches first.
+    messageIds = messageIds.concat(Array.from(ids).reverse());
+  });
+  return { query: query, messageIds: messageIds, scannedThreads: threads.size };
+}
+
+function gmailHeader_(part, name) {
+  var header = (part.headers || []).find(function(entry) { return entry.name.toLowerCase() === name; });
+  return header && header.value || "";
+}
+
+function gmailHeaderText_(value) {
+  return value.replace(/(\?=)\s+(?==\?)/g, "$1").replace(/=\?([^?]+)\?([bq])\?([^?]*)\?=/gi, function(word, charset, encoding, text) {
+    try {
+      var bytes = encoding.toLowerCase() === "b" ? Utilities.base64Decode(text) :
+        text.replace(/_/g, " ").replace(/=([\da-f]{2})/gi, function(_, hex) { return String.fromCharCode(parseInt(hex, 16)); })
+          .split("").map(function(character) {
+            var byte = character.charCodeAt(0);
+            return byte < 128 ? byte : byte - 256;
+          });
+      return Utilities.newBlob(bytes).getDataAsString(charset);
+    } catch (error) {
+      return word;
+    }
+  });
+}
+
+function gmailPartBytes_(messageId, part) {
+  var body = part.body || {};
+  if (body.attachmentId) {
+    try {
+      body = Gmail.Users.Messages.Attachments.get("me", messageId, body.attachmentId);
+    } catch (error) {
+      throw new Error("メール本文または添付を取得できませんでした。もう一度検索してください。");
+    }
+  }
+  if (!body.data) {
+    if (body.size > 0) throw new Error("メール本文または添付を読み取れませんでした。");
+    return [];
+  }
+  return Utilities.base64DecodeWebSafe(body.data.padEnd(Math.ceil(body.data.length / 4) * 4, "="));
+}
+
+function gmailBodyParts_(part, attachments) {
+  var type = String(part.mimeType || "").toLowerCase();
+  var disposition = gmailHeader_(part, "content-disposition").split(";")[0].trim().toLowerCase();
+  if (disposition === "attachment" || part.filename || type === "message/rfc822") {
+    if (disposition === "attachment" || !type.startsWith("image/") || !(disposition === "inline" || gmailHeader_(part, "content-id"))) {
+      attachments.push({ mimeType: type, filename: part.filename, body: part.body });
+    }
+    return [];
+  }
+  if (part.parts && part.parts.length) {
+    var children = part.parts.map(function(child) { return gmailBodyParts_(child, attachments); });
+    if (type === "multipart/alternative") {
+      var plain = children.find(function(parts) {
+        return parts.some(function(body) { return body.mimeType.toLowerCase() === "text/plain"; });
+      });
+      return plain || children.find(function(parts) { return parts.length; }) || [];
+    }
+    return children.flat();
+  }
+  var body = part.body || {};
+  return (type === "text/plain" || type === "text/html") && (body.data || body.attachmentId || body.size > 0) ? [part] : [];
+}
+
+function gmailHtmlText_(html) {
+  var entities = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", ensp: " ", emsp: " ", thinsp: " ", yen: "¥" };
+  return html.replace(/<!--[\s\S]*?-->|<(head|style|script)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
+    .replace(/<br\b[^>]*>|<\/(?:div|p|li|tr|h[1-6])\s*>/gi, "\n")
+    .replace(/<\/(?:td|th)\s*>/gi, "\t")
+    .replace(/<\/?[a-z](?:[^<>"']|"[^"]*"|'[^']*')*>|<!doctype[^>]*>/gi, "")
+    .replace(/&(#[0-9]+|#x[\da-f]+|[a-z]+);/gi, function(entity, name) {
+      if (name.charAt(0) !== "#") return Object.prototype.hasOwnProperty.call(entities, name) ? entities[name] : entity;
+      var hex = name.charAt(1).toLowerCase() === "x";
+      var code = parseInt(name.slice(hex ? 2 : 1), hex ? 16 : 10);
+      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : entity;
+    });
+}
+
+function readOrderEmail_(messageId) {
+  var message;
+  try {
+    message = Gmail.Users.Messages.get("me", messageId, { format: "full", fields: "id,internalDate,payload" });
+  } catch (error) {
+    throw new Error("検索に一致したメールを取得できませんでした。もう一度検索してください。");
+  }
+  if (!message || message.id !== messageId || !message.payload) throw new Error("検索に一致したメールを確認できませんでした。");
+  var payload = message.payload, attachments = [];
+  var text = gmailBodyParts_(payload, attachments).map(function(part) {
+    var charset = /(?:^|;)\s*charset\s*=\s*(?:"([^"]+)"|([^;\s]+))/i.exec(gmailHeader_(part, "content-type"));
+    var body = Utilities.newBlob(gmailPartBytes_(messageId, part)).getDataAsString(charset ? charset[1] || charset[2] : "UTF-8");
+    return part.mimeType.toLowerCase() === "text/html" ? gmailHtmlText_(body) : body;
+  }).join("\n");
+  return {
+    receivedAt: new Date(Number(message.internalDate)).toISOString(),
+    sender: gmailHeaderText_(gmailHeader_(payload, "from")),
+    subject: gmailHeaderText_(gmailHeader_(payload, "subject")),
+    text: text,
+    attachments: attachments
+  };
+}
+
 function scanOrderEmails(input) {
   requireOwnerAccess_();
   ensureSystem_();
   input = input || {};
-  if (input.engine === "ai") return scanOrderEmailsWithAi_(input);
+  if (input.engine === "ai" || input.engine === "auto") return scanOrderEmailsWithAi_(input);
   var settings = readSettings_();
-  var query = sanitizeText_(input.query || settings.gmailQuery || APP.DEFAULTS.gmailQuery, 1000);
+  var query = input.query || settings.gmailQuery || APP.DEFAULTS.gmailQuery;
   var requestedThreads = Number(input.maxThreads || settings.maxEmailThreads || 20);
   var maxThreads = isFinite(requestedThreads) ? Math.min(50, Math.max(1, Math.floor(requestedThreads))) : 20;
   var existingRefs = {};
   readIntake_().forEach(function(item) { if (item.status === "pending") existingRefs[item.sourceRef] = true; });
   readJobs_().forEach(function(job) { if (!job.archived) existingRefs[job.sourceRef] = true; });
 
-  var threads = GmailApp.search(query, 0, maxThreads);
+  var search = listOrderEmailMessages_(query, maxThreads);
   var added = 0;
   var skipped = 0;
   var warnings = [];
   var stop = false;
 
-  threads.forEach(function(thread) {
+  search.messageIds.forEach(function(messageId) {
     if (stop) return;
-    thread.getMessages().forEach(function(message) {
+    var baseSourceRef = "gmail:" + messageId;
+    if (existingRefs[baseSourceRef]) { skipped += 1; return; }
+
+    var message = readOrderEmail_(messageId), parts = [message.text];
+    var attachments = message.attachments
+      .filter(function(attachment) { return /^(image\/(?:jpeg|png|gif|bmp|webp)|application\/pdf)$/i.test(attachment.mimeType); })
+      .slice(0, 3);
+    attachments.forEach(function(attachment) {
+      var name = attachment.filename || "order-attachment";
+      try {
+        var blob = Utilities.newBlob(gmailPartBytes_(messageId, attachment), attachment.mimeType, name);
+        parts.push("\n添付「" + name + "」の読取結果:\n" + ocrBlob_(blob));
+      } catch (error) {
+        warnings.push(name + "を読み取れませんでした: " + error.message);
+      }
+    });
+
+    var text = parts.join("\n").slice(0, 45000);
+    var results = parseOrderItems_(text, { sender: message.sender, subject: message.subject });
+    results.forEach(function(result, index) {
       if (stop) return;
-      var baseSourceRef = "gmail:" + message.getId();
-      if (existingRefs[baseSourceRef]) { skipped += 1; return; }
-
-      var parts = [message.getPlainBody() || ""];
-      var attachments = message.getAttachments({ includeInlineImages: false, includeAttachments: true })
-        .filter(function(attachment) { return /^(image\/(?:jpeg|png|gif|bmp|webp)|application\/pdf)$/i.test(attachment.getContentType()); })
-        .slice(0, 3);
-      attachments.forEach(function(attachment) {
-        try {
-          parts.push("\n添付「" + attachment.getName() + "」の読取結果:\n" + ocrBlob_(attachment.copyBlob()));
-        } catch (error) {
-          warnings.push(attachment.getName() + "を読み取れませんでした: " + error.message);
-        }
+      var itemNumber = result.itemNumber || index + 1;
+      var sourceRef = results.length > 1 ? baseSourceRef + ":item:" + itemNumber : baseSourceRef;
+      if (existingRefs[sourceRef]) { skipped += 1; return; }
+      var appended = appendIntakeIfNew_({
+        sourceType: "email", sourceRef: sourceRef, receivedAt: message.receivedAt,
+        sender: message.sender, subject: intakeSubject_(message.subject, result, index, results.length),
+        originalText: intakePreviewText_(text, result, index, results.length),
+        parsed: result.parsed, confidence: result.confidence, status: "pending"
       });
-
-      var text = parts.join("\n").slice(0, 45000);
-      var results = parseOrderItems_(text, { sender: message.getFrom(), subject: message.getSubject() });
-      results.forEach(function(result, index) {
-        if (stop) return;
-        var itemNumber = result.itemNumber || index + 1;
-        var sourceRef = results.length > 1 ? baseSourceRef + ":item:" + itemNumber : baseSourceRef;
-        if (existingRefs[sourceRef]) { skipped += 1; return; }
-        var appended = appendIntakeIfNew_({
-          sourceType: "email", sourceRef: sourceRef, receivedAt: message.getDate().toISOString(),
-          sender: message.getFrom(), subject: intakeSubject_(message.getSubject(), result, index, results.length),
-          originalText: intakePreviewText_(text, result, index, results.length),
-          parsed: result.parsed, confidence: result.confidence, status: "pending"
-        });
-        if (!appended) { skipped += 1; return; }
-        existingRefs[sourceRef] = true;
-        added += 1;
-        if (added >= 50) stop = true;
-      });
+      if (!appended) { skipped += 1; return; }
+      existingRefs[sourceRef] = true;
+      added += 1;
+      if (added >= 50) stop = true;
     });
   });
 
   withDocumentLock_(function() {
     requireOwnerAccess_();
-    appendLog_("intake.email.scan", "intake", "batch", { query: query, added: added, skipped: skipped, warnings: warnings.length });
+    appendLog_("intake.email.scan", "intake", "batch", { query: search.query, added: added, skipped: skipped, warnings: warnings.length });
   });
-  return { added: added, skipped: skipped, warnings: warnings.slice(0, 10), scannedThreads: threads.length };
+  return { added: added, skipped: skipped, warnings: warnings.slice(0, 10), scannedThreads: search.scannedThreads };
 }
 
 function ocrBlob_(blob) {

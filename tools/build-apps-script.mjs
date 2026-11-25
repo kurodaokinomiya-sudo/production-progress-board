@@ -8,18 +8,21 @@ const read = (relative) => readFile(path.join(root, relative), "utf8");
 
 await mkdir(dist, { recursive: true });
 
-const [htmlSource, tokens, stylesSource, script, intakeDuplicates, intakeLearning, finishedStock, finishedStockOrders, finishedStockUi, materials, materialsUi, accessSession, accessBootstrap, pdfJsSource, pdfWorkerSource] = await Promise.all([
+const [htmlSource, tokens, stylesSource, script, intakeDuplicates, intakeLearning, pdfIntakeText, finishedStock, finishedStockOrders, finishedStockUi, materials, materialsUi, castingStock, castingStockUi, accessSession, accessBootstrap, pdfJsSource, pdfWorkerSource] = await Promise.all([
   read("src/index.html"),
   read("tokens.css"),
   read("src/styles.css"),
   read("src/app.js"),
   read("src/intake-duplicates.js"),
   read("src/intake-learning.js"),
+  read("src/pdf-intake-text.js"),
   read("src/finished-stock.js"),
   read("src/finished-stock-orders.js"),
   read("src/finished-stock-ui.js"),
   read("src/materials.js"),
   read("src/materials-ui.js"),
+  read("src/casting-stock.js"),
+  read("src/casting-stock-ui.js"),
   read("src/access-session.js"),
   read("src/access-bootstrap.js"),
   read("node_modules/pdfjs-dist/build/pdf.min.mjs"),
@@ -40,11 +43,14 @@ const html = htmlSource
   .replace('<link rel="stylesheet" href="styles.css" data-inline="styles">', `<style data-bundle="styles">\n${styles}\n</style>`)
   .replace('<script src="intake-duplicates.js" defer data-inline="intake-duplicates"></script>', () => `<script data-bundle="intake-duplicates">\n${intakeDuplicates}\n</script>`)
   .replace('<script src="intake-learning.js" defer data-inline="intake-learning"></script>', () => `<script data-bundle="intake-learning">\n${intakeLearning}\n</script>`)
+  .replace('<script src="pdf-intake-text.js" defer data-inline="pdf-intake-text"></script>', () => `<script data-bundle="pdf-intake-text">\n${pdfIntakeText}\n</script>`)
   .replace('<script src="materials.js" defer data-inline="materials"></script>', () => `<script data-bundle="materials">\n${materials}\n</script>`)
   .replace('<script src="finished-stock.js" defer data-inline="finished-stock"></script>', () => `<script data-bundle="finished-stock">\n${finishedStock}\n</script>`)
   .replace('<script src="finished-stock-orders.js" defer data-inline="finished-stock-orders"></script>', () => `<script data-bundle="finished-stock-orders">\n${finishedStockOrders}\n</script>`)
   .replace('<script src="finished-stock-ui.js" defer data-inline="finished-stock-ui"></script>', () => `<script data-bundle="finished-stock-ui">\n${finishedStockUi}\n</script>`)
   .replace('<script src="materials-ui.js" defer data-inline="materials-ui"></script>', () => `<script data-bundle="materials-ui">\n${materialsUi}\n</script>`)
+  .replace('<script src="casting-stock.js" defer data-inline="casting-stock"></script>', () => `<script data-bundle="casting-stock">\n${castingStock}\n</script>`)
+  .replace('<script src="casting-stock-ui.js" defer data-inline="casting-stock-ui"></script>', () => `<script data-bundle="casting-stock-ui">\n${castingStockUi}\n</script>`)
   .replace('<script src="access-session.js" defer data-inline="access-session"></script>', () => `<script data-bundle="access-session">\n${accessSession}\n</script>`)
   .replace(
     '<script src="app.js" defer data-inline="script"></script>',
@@ -73,5 +79,6 @@ await writeFile(path.join(dist, "IntakeDuplicates.gs"), intakeDuplicates, "utf8"
 await writeFile(path.join(dist, "IntakeLearningLogic.gs"), intakeLearning, "utf8");
 await writeFile(path.join(dist, "MaterialLogic.gs"), materials, "utf8");
 await writeFile(path.join(dist, "FinishedStockLogic.gs"), `${finishedStockOrders}\n${finishedStock}`, "utf8");
+await writeFile(path.join(dist, "CastingStockLogic.gs"), castingStock, "utf8");
 
-console.log(`Apps Script bundle: dist/Index.html + dist/Access.html + ${backendFiles.length + 4} backend files`);
+console.log(`Apps Script bundle: dist/Index.html + dist/Access.html + ${backendFiles.length + 5} backend files`);

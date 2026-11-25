@@ -72,17 +72,31 @@ test("category subtotals and final total sum only the supplied visible jobs in b
 test("final finish alone enables shipment and shipping filter, while polishing returns still block it", () => {
   const { ui, form, button, note } = harness();
   const job = { quantity: 5, stages: stages(), polishing: { sentQuantity: 5, returnedQuantity: 5 } };
-  form._jobBase = job;
+  form._jobBase = { ...job, stages: stages("working") };
   form.rows = Object.entries(job.stages).map(([key, value]) => {
     const row = { dataset: { stageKey: key }, selected: { dataset: { status: value.status } } };
     row.querySelector = (selector) => selector === ".stage-control.is-selected" ? row.selected : null;
     return row;
   });
   ui.renderProcessLifecycleAction();
+  assert.equal(button.hidden, true);
+  assert.equal(button.disabled, true);
+  assert.match(note.textContent, /保存すると.*出荷待ち/);
+  ui.state.activeView = "completed";
+  ui.renderProcessLifecycleAction();
+  assert.equal(button.disabled, true, "the finish selected in the form must be saved first");
+  form._jobBase = job;
+  ui.renderProcessLifecycleAction();
+  assert.equal(button.hidden, false);
   assert.equal(button.disabled, false);
   assert.equal(ui.isDone(job), true);
   assert.equal(ui.currentStage(job).key, "shipping");
   assert.equal(job.stages.welding.status, "not_started");
+  ui.state.activeView = "dashboard";
+  ui.renderProcessLifecycleAction();
+  assert.equal(button.hidden, true);
+  assert.match(note.textContent, /完成品リストの出荷待ちから/);
+  ui.state.activeView = "completed";
   form._jobBase = { ...job, polishing: { sentQuantity: 5, returnedQuantity: 4 } };
   ui.renderProcessLifecycleAction();
   assert.equal(button.disabled, true);

@@ -8,7 +8,7 @@ function doGet(request) {
     output = template.evaluate();
   }
   output
-    .setTitle("生産工程管理")
+    .setTitle("HAKOBI｜生産工程管理")
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.DEFAULT);
   // 通常URLは専用画面、launch=browserは通常のChromeショートカットとして追加する。
   // 本人確認の前後で同じ起動方式を保ち、端末側の追加制限は回避しない。
@@ -22,43 +22,51 @@ function doGet(request) {
 
 function getSnapshot(request) {
   var access = requireAppAccess_();
-  var settings = ensureSystem_() || readSettings_();
+  var scope = request && request.scope;
+  var ordersOnly = scope === "orders";
+  var legacy = !ordersOnly && scope !== "jobs";
+  var settings = ensureSystem_(false, legacy ? undefined : scope) || readSettings_();
   access = requireAppAccess_();
   var canReadImports = access.canEdit === true;
+  // Keep the full response for older clients. The initial ledger avoids the
+  // inventory lock, while later job syncs can opt in on the inventory tab.
+  var includeMaterials = legacy ? !request || request.includeMaterials !== false : !ordersOnly && request.includeMaterials === true;
   var jobs;
   var materialInventory = null;
-  if (canReadImports && typeof materialInventorySnapshotUnlocked_ === "function" && typeof MaterialInventory !== "undefined") {
+  if (includeMaterials && canReadImports && typeof materialInventorySnapshotUnlocked_ === "function" && typeof MaterialInventory !== "undefined") {
     materialInventory = withDocumentLock_(function() {
       access = requireAppAccess_();
       canReadImports = access.canEdit === true;
       jobs = readJobs_();
       return canReadImports ? materialInventorySnapshotUnlocked_(access, jobs) : null;
     });
-  } else jobs = readJobs_();
-  if (!access.isOwner) {
-    delete settings.gmailQuery;
-    delete settings.maxEmailThreads;
-  }
-  if (!canReadImports) {
-    delete settings.customerRules;
-    delete settings.importSettings;
-  }
-  if (typeof materialJobForAccess_ === "function") jobs = jobs.map(function(job) { return materialJobForAccess_(job, access); });
-  return {
-    jobs: typeof decorateProductJobs_ === "function" ? decorateProductJobs_(jobs, settings) : jobs,
+  } else jobs = readJobs_(ordersOnly ? { unshippedOnly: true } : undefined);
+  if (typeof decorateProductJobs_ === "function") jobs = decorateProductJobs_(jobs, settings);
+  var snapshot = {
+    jobs: jobs.map(function(job) { return jobForAccess_(job, access); }),
     materialInventory: materialInventory,
     productMasterStatus: typeof getProductMasterStatus_ === "function" ? getProductMasterStatus_() : null,
-    intake: canReadImports ? readIntake_() : [],
-    settings: settings,
+    settings: settingsForAccess_(settings, access),
     access: access,
-    accessSettings: access.isAdmin ? getAccessSettings() : null,
     mode: "live",
-    aiImport: canReadImports ? getAiImportStatus() : { configured: false, ready: false, model: "" },
     scriptEditorUrl: access.isOwner ? "https://script.google.com/home/projects/" + encodeURIComponent(ScriptApp.getScriptId()) + "/edit" : "",
-    serverTime: new Date().toISOString(),
     setupRequired: false,
     requestedSince: request && request.since ? request.since : null
   };
+  if (legacy) {
+    snapshot.intake = canReadImports ? readIntake_({ pendingOnly: true }) : [];
+    snapshot.accessSettings = access.isAdmin ? getAccessSettings() : null;
+    snapshot.aiImport = canReadImports ? getAiImportStatus() : { configured: false, ready: false, model: "" };
+  }
+  snapshot.serverTime = new Date().toISOString();
+  return snapshot;
+}
+
+function getIntakeSnapshot() {
+  requireEditorAccess_();
+  ensureSheet_(getSpreadsheet_(), APP.SHEETS.INTAKE, APP.INTAKE_HEADERS);
+  requireEditorAccess_();
+  return { intake: readIntake_({ pendingOnly: true }), aiImport: getAiImportStatus() };
 }
 
 function saveSettings(input) {
@@ -72,6 +80,7 @@ function saveSettings(input) {
     if (input[key] === undefined) return;
     var value = String(input[key]).trim();
     if (key === "gmailQuery" && !value) throw new Error("Gmail検索式を入力してください。");
+    if (key === "gmailQuery" && value.length > 1000) throw new Error("Gmail検索式は1000文字以内で入力してください。");
     if (key === "maxEmailThreads" && (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 50)) {
       throw new Error("メール検索件数は1〜50で入力してください。");
     }
@@ -96,12 +105,7 @@ function saveSettings(input) {
       else sheet.appendRow(sheetValues_([[key, updates[key], ""]])[0]);
     });
     appendLog_("settings.update", "settings", "global", input);
-    var settings = readSettings_();
-    if (!access.isOwner) {
-      delete settings.gmailQuery;
-      delete settings.maxEmailThreads;
-    }
-    return settings;
+    return settingsForAccess_(readSettings_(), access);
   });
 }
 

@@ -55,10 +55,13 @@ var FinishedStockOrders = (function () {
     if (value && typeof value === "object") return text(value.id || value.productId || value.code);
     return text(value);
   }
-  function newestSchedules(history) {
+  function isShipmentSchedule(event) {
+    return !!event && event.action === "schedule" && event.completionOnly !== true;
+  }
+  function newestSchedules(history, includeCompletionUpdates) {
     var schedules = Object.create(null);
     (history || []).forEach(function (event, index) {
-      if (!event || event.action !== "schedule" || !text(event.jobId)) return;
+      if (!event || event.action !== "schedule" || !text(event.jobId) || (!includeCompletionUpdates && !isShipmentSchedule(event))) return;
       var prior = schedules[event.jobId];
       var stamp = text(event.at || event.date);
       var sequence = event.sequence === undefined || event.sequence === null || event.sequence === "" ? null : Number(event.sequence);
@@ -99,7 +102,12 @@ var FinishedStockOrders = (function () {
     options = options || {};
     var identify = typeof options.productFor === "function" ? options.productFor : function () { return null; };
     var history = Array.isArray(baseSnapshot.history) ? baseSnapshot.history : [];
-    var schedules = newestSchedules(history), movement = historyState(history), issues = [];
+    var schedules = newestSchedules(history), completionUpdates = newestSchedules(history, true);
+    var movement = historyState(history), issues = [], planIssues = options.planIssues || {};
+    function completionOverride(job) {
+      var entry = completionUpdates[text(job.id)];
+      return date(entry && entry.completionDate);
+    }
     var productRows = (baseSnapshot.products || []).map(function (product) {
       return Object.assign({}, product, { reservedQuantity: 0, availableQuantity: quantity(product.stockQuantity), orderQuantity: 0, shortageQuantity: 0 });
     });
@@ -108,8 +116,12 @@ var FinishedStockOrders = (function () {
     var eligibleJobs = [];
 
     jobs.forEach(function (job) {
-      if (!job) return;
-      var stockOnly = isStockOnly(job), active = !job.archived && job.shippingStatus !== "shipped";
+      if (!job || job.archived) return;
+      if (Object.prototype.hasOwnProperty.call(planIssues, job.id)) {
+        issues.push(issueRow(job, undefined, undefined, planIssues[job.id]));
+        return;
+      }
+      var stockOnly = isStockOnly(job), active = job.shippingStatus !== "shipped";
       var existingPlan = (baseSnapshot.plans || []).find(function (plan) { return text(plan.jobId) === text(job.id); });
       var existingReceived = quantity(existingPlan && existingPlan.receivedQuantity);
       if (stockOnly && !active && plannedQuantity(job) <= existingReceived) return;
@@ -119,7 +131,7 @@ var FinishedStockOrders = (function () {
       catch (error) { identificationError = text(error && error.message || error); }
       var code = text(job.productCode || job.code);
       var productName = text(job.product || job.name);
-      var looksTezoe = /tezoe/i.test(productName) || /^(?:260\d{2}|35002)$/.test(code) || quantity(job.stockPlannedQuantity) > 0;
+      var looksTezoe = /tezoe|テゾエ|テッツェ/i.test(normalizedText(productName)) || /^(?:260\d{2}|35002)$/.test(normalizedText(code)) || quantity(job.stockPlannedQuantity) > 0;
       if (!identity) {
         if (looksTezoe) issues.push(issueRow(job, code, productName, identificationError || "Tezoe在庫品を特定できません。"));
         return;
@@ -155,7 +167,8 @@ var FinishedStockOrders = (function () {
         finishReady: finishReady(job),
         shipDate: schedule ? date(schedule.shipDate) : "",
         shipmentMode: schedule ? text(schedule.shipmentMode) : "",
-        completionDate: schedule && date(schedule.completionDate) || date(job.dueDate),
+        completionDateOverride: completionOverride(job),
+        completionDate: completionOverride(job) || date(job.dueDate),
         hasSchedule: !!schedule,
         createdAt: text(job.createdAt),
         dueDate: date(job.dueDate),
@@ -192,7 +205,7 @@ var FinishedStockOrders = (function () {
         remainingQuantity: entry.remainingQuantity, shippedQuantity: entry.shippedQuantity,
         stockTargetQuantity: entry.stockTargetQuantity, orderProductionQuantity: entry.orderProductionQuantity,
         allocatedQuantity: allocated, shortageQuantity: Math.max(0, entry.remainingQuantity - allocated),
-        shipDate: entry.shipDate, shipmentMode: entry.shipmentMode, completionDate: entry.completionDate,
+        shipDate: entry.shipDate, shipmentMode: entry.shipmentMode, completionDate: entry.completionDate, completionDateOverride: entry.completionDateOverride,
         finishReady: entry.finishReady, hasSchedule: entry.hasSchedule, allocations: allocations,
       });
       var product = productsById[entry.productId];
@@ -211,7 +224,7 @@ var FinishedStockOrders = (function () {
     (baseSnapshot.plans || []).forEach(function (plan) { planByJob[text(plan.jobId)] = plan; });
     var productions = [];
     jobs.forEach(function (job) {
-      if (!job || job.archived) return;
+      if (!job || job.archived || Object.prototype.hasOwnProperty.call(planIssues, job.id)) return;
       var stockOnly = isStockOnly(job), active = !job.archived && job.shippingStatus !== "shipped";
       var plan = planByJob[text(job.id)] || {};
       var receivedFromLots = (baseSnapshot.lots || []).filter(function (lot) { return text(lot.jobId) === text(job.id); }).reduce(function (sum, lot) { return sum + quantity(lot.quantity); }, 0);
@@ -224,7 +237,7 @@ var FinishedStockOrders = (function () {
       if (!identity) return;
       if (!isValidQuantity(job.quantity, false) || !isValidQuantity(job.stockPlannedQuantity, true) ||
           quantity(job.stockPlannedQuantity) > quantity(job.quantity)) return;
-      var pid = productId(identity), schedule = schedules[text(job.id)] || null;
+      var pid = productId(identity), completionDateOverride = completionOverride(job);
       var plannedTotal = stockPlanTotal;
       if (stockOnly) stockRemaining = Math.max(0, plannedTotal - received);
       var orderProduction = stockOnly || job.shippingStatus === "shipped" ? 0 : Math.max(0, number(job.quantity) - number(job.stockPlannedQuantity));
@@ -237,7 +250,7 @@ var FinishedStockOrders = (function () {
         stockQuantity: stockRemaining, orderProductionQuantity: orderProduction,
         totalQuantity: number(job.quantity), orderQuantity: orderProduction,
         plannedQuantity: plannedTotal, receivedQuantity: received,
-        customer: text(job.customer), serialNo: text(job.serialNo), dueDate: schedule && date(schedule.completionDate) || date(job.dueDate),
+        customer: text(job.customer), serialNo: text(job.serialNo), dueDate: completionDateOverride || date(job.dueDate), completionDateOverride: completionDateOverride,
         shippingStatus: text(job.shippingStatus),
         finishReady: finishReady(job), jobVersion: number(job.version), producers: Array.from(new Set(producers)), stageAssignees: stageAssignees,
       });
@@ -283,5 +296,5 @@ var FinishedStockOrders = (function () {
     return { incomingQuantity: incoming, outgoingQuantity: outgoing, quantity: projected, undatedOrderQuantity: undated, futureReservedQuantity: futureReserved, availableQuantity: projected - futureReserved };
   }
 
-  return { project: project, forecast: forecast, isStockOnly: isStockOnly, plannedQuantity: plannedQuantity };
+  return { project: project, forecast: forecast, isStockOnly: isStockOnly, isShipmentSchedule: isShipmentSchedule, plannedQuantity: plannedQuantity };
 }());

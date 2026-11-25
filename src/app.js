@@ -24,7 +24,10 @@ const THEME_OPTIONS = ["auto", "light", "dark"];
 const BUSINESS_TIME_ZONE = "Asia/Tokyo";
 const LABEL_PRINT_LIMIT = 9;
 const LABEL_PRINT_STATUSES = ["waiting", "reprint", "printed", "not_required"];
+const PRODUCT_LABEL_KEYWORDS = ["ｱﾘｼﾞ", "白銅", "ｳｽｲ", "ズレピン"];
+const PRODUCT_LABEL_KEYWORD_PATTERN = new RegExp(PRODUCT_LABEL_KEYWORDS.join("|").normalize("NFKC"), "g");
 const LOCAL_PDF_ENGINE_VERSION = 2;
+const DEFERRED_DATA_ORDER = ["jobs", "materials", "finishedStock", "intake", "accessSettings"];
 
 const STATUS_OPTIONS = [
   { value: "not_started", label: "未着手" },
@@ -35,6 +38,7 @@ const STATUS_OPTIONS = [
 
 const state = {
   jobs: [],
+  jobHistoryReady: true,
   intake: [],
   settings: {},
   stageAssigneeSettingsDirty: false,
@@ -51,8 +55,7 @@ const state = {
   accessRevoked: false,
   lastSync: null,
   selectedFile: null,
-  aiDiagnosticRunning: false,
-  textImportRunning: false,
+  importRunning: false,
   legacyImportPreview: null,
   legacyImportBusy: false,
   labelPrintSelection: new Set(),
@@ -142,6 +145,7 @@ function canWorkOnJob(job) {
 }
 
 function canAccessView(view, access = state.access) {
+  if (view === "castingStock") return canWork(access);
   if (["materials", "finishedStock"].includes(view)) return canEdit(access);
   if (isWorkerUser(access)) return ["orders", "shipping", "distribution", "completed", "settings"].includes(view);
   return ["dashboard", "orders", "shipping", "distribution", "polishing", "completed", "settings"].includes(view) || (view === "intake" && canEdit(access));
@@ -155,8 +159,13 @@ const pendingJobMutations = new Map();
 const failedOrderDrafts = new Map();
 const failedPolishingAttempts = new Map();
 let mutationRevision = 0;
-let snapshotLoading = false;
+let snapshotPromise = null;
+const deferredReads = new Map();
+let prefetchEnabled = false;
+let prefetchScheduled = false;
+let intakeReadRevision = 0;
 let appliedSnapshotRevision = 0;
+let dialogOpenRevision = 0;
 let autoSyncTimer = null;
 let autoSyncDelay = 0;
 let autoSyncStarted = false;
@@ -181,27 +190,35 @@ function trackApiMutations(target) {
     saveCustomerRules: "読取ルールを保存中…", saveAccessSettings: "利用者設定を保存中…",
     receiveFinishedStock: "Tezoe製品を在庫へ受入中…", shipFinishedStock: "Tezoe製品の出庫を反映中…",
     saveFinishedStockSchedule: "Tezoe製品の出荷予定を保存中…",
+    saveFinishedStockNote: "Tezoe製品の備考を保存中…",
     openFinishedStock: "Tezoe製品の開始在庫を保存中…", reverseFinishedStock: "Tezoe製品の在庫履歴を訂正中…",
-    saveMaterialOrder: "材料の発注を保存中…", receiveMaterialOrder: "材料の入庫を反映中…",
+    saveMaterialOrder: "材料の発注を保存中…", updateMaterialOrder: "発注の変更を保存中…", receiveMaterialOrder: "材料の入庫を反映中…",
+    saveMaterialStockNote: "材料の備考を保存中…",
     adjustMaterialStock: "材料の在庫調整を反映中…", cancelMaterialOrder: "材料の発注残を取り消し中…",
+    saveMaterialExclusion: "材料を使わない製品の登録を反映中…",
+    startCastingInventory: "鋳物の開始在庫を保存中…", saveCastingInventoryChange: "鋳物在庫を更新中…",
   };
   Object.entries(labels).forEach(([method, label]) => {
     const original = target[method];
     if (typeof original !== "function") return;
+    const changesIntake = ["approveIntake", "approveIntakes", "rejectIntake", "rejectIntakes"].includes(method);
     target[method] = function(...args) {
       const token = {};
       backgroundOperations.set(token, label);
       mutationRevision += 1;
+      if (changesIntake) intakeReadRevision += 1;
       renderBackgroundActivity();
       const finish = () => {
         backgroundOperations.delete(token);
         mutationRevision += 1;
+        if (changesIntake) intakeReadRevision += 1;
         renderBackgroundActivity();
+        scheduleDeferredData();
       };
       try {
         return Promise.resolve(original.apply(this, args)).then((result) => {
           if (["saveJob", "approveIntake", "approveIntakes"].includes(method)) invalidateMaterialInventory();
-          if (["saveJob", "saveJobProcess", "setJobArchived", "approveIntake", "approveIntakes", "receiveFinishedStock", "shipFinishedStock", "openFinishedStock", "reverseFinishedStock", "saveFinishedStockSchedule"].includes(method)) invalidateFinishedStock();
+          if (["saveJob", "saveJobProcess", "setJobArchived", "approveIntake", "approveIntakes"].includes(method)) invalidateFinishedStock();
           return result;
         }).finally(finish);
       }
@@ -258,6 +275,7 @@ class AppsScriptApi {
   }
 
   getSnapshot(payload) { return this.call("getSnapshot", payload); }
+  getIntakeSnapshot() { return this.call("getIntakeSnapshot"); }
   saveJob(payload) { return this.call("saveJob", payload); }
   saveJobProcess(payload) { return this.call("saveJobProcess", payload); }
   setDistributionAssignee(payload) { return this.call("setDistributionAssignee", payload); }
@@ -267,20 +285,28 @@ class AppsScriptApi {
   savePolishingRates(payload) { return this.call("savePolishingRates", payload); }
   refreshProductMaster() { return this.call("refreshProductMaster"); }
   getMaterialInventory() { return this.call("getMaterialInventory"); }
+  getCastingInventory() { return this.call("getCastingInventory"); }
+  startCastingInventory(payload) { return this.call("startCastingInventory", payload); }
+  saveCastingInventoryChange(payload) { return this.call("saveCastingInventoryChange", payload); }
   getFinishedStock() { return this.call("getFinishedStock"); }
   receiveFinishedStock(payload) { return this.call("receiveFinishedStock", payload); }
   shipFinishedStock(payload) { return this.call("shipFinishedStock", payload); }
   openFinishedStock(payload) { return this.call("openFinishedStock", payload); }
   reverseFinishedStock(payload) { return this.call("reverseFinishedStock", payload); }
   saveFinishedStockSchedule(payload) { return this.call("saveFinishedStockSchedule", payload); }
+  saveFinishedStockNote(payload) { return this.call("saveFinishedStockNote", payload); }
   saveMaterialOrder(payload) { return this.call("saveMaterialOrder", payload); }
+  updateMaterialOrder(payload) { return this.call("updateMaterialOrder", payload); }
+  saveMaterialStockNote(payload) { return this.call("saveMaterialStockNote", payload); }
   receiveMaterialOrder(payload) { return this.call("receiveMaterialOrder", payload); }
   adjustMaterialStock(payload) { return this.call("adjustMaterialStock", payload); }
   cancelMaterialOrder(payload) { return this.call("cancelMaterialOrder", payload); }
+  saveMaterialExclusion(payload) { return this.call("saveMaterialExclusion", payload); }
   setJobArchived(payload) { return this.call("setJobArchived", payload); }
   createIntakeFromImage(payload) { return this.call("createIntakeFromImage", payload); }
   createIntakeFromPdfText(payload) { return this.call("createIntakeFromPdfText", payload); }
   createIntakeFromText(payload) { return this.call("createIntakeFromText", payload); }
+  createIntakeAutomatically(payload) { return this.call("createIntakeAutomatically", payload); }
   createIntakeWithAi(payload) { return this.call("createIntakeWithAi", payload); }
   getIntakeLearningRules() { return this.call("getIntakeLearningRules"); }
   forgetIntakeLearningRule(payload) { return this.call("forgetIntakeLearningRule", payload); }
@@ -294,6 +320,7 @@ class AppsScriptApi {
   saveSettings(payload) { return this.call("saveSettings", payload); }
   getAccessSettings() { return this.call("getAccessSettings"); }
   saveAccessSettings(payload) { return this.call("saveAccessSettings", payload); }
+  revokeRememberedAccess(payload) { return this.call("revokeRememberedAccess", payload); }
   getCustomerRules() { return this.call("getCustomerRules"); }
   saveCustomerRules(payload) { return this.call("saveCustomerRules", payload); }
   migrateLegacySheet(payload) { return this.call("migrateLegacySheet", payload); }
@@ -385,7 +412,80 @@ class MockApi {
 
   localMaterialSnapshot(data) {
     return globalThis.MaterialInventory
-      ? MaterialInventory.snapshot({ jobs: data.jobs, events: data.materialEvents || [] }) : null;
+      ? MaterialInventory.snapshot({ jobs: data.jobs, events: data.materialEvents || [], exclusions: MaterialInventory.exclusions(data.materialExclusionRecords || []) }) : null;
+  }
+
+  castingSource() {
+    const variants = [
+      { id: "raw", label: "未加工", threshold: 20 },
+      { id: "processed", label: "加工済", threshold: 5 },
+      { id: "unclassified", label: "区分未確認", threshold: null },
+    ];
+    return {
+      sourceUrl: "",
+      sourceRevision: "demo-casting-stock-1",
+      items: [
+        { id: "demo-frame", name: "サンプル鋳物", variants },
+        { id: "demo-lever", name: "サンプルレバー", variants: [{ id: "single", label: "未加工のまま使用", threshold: 10 }] },
+        { id: "demo-unconfirmed", name: "サンプル台座", openingUnconfirmed: true, variants: [{ id: "single", label: "未加工のまま使用", threshold: 5 }] },
+      ],
+      stock: [
+        { partId: "demo-frame", variant: "raw", location: "1F", quantity: 24 },
+        { partId: "demo-frame", variant: "processed", location: "2F", quantity: 3 },
+        { partId: "demo-frame", variant: "unclassified", location: "保土田", quantity: 4 },
+        { partId: "demo-lever", variant: "single", location: "1F", quantity: 5 },
+      ],
+    };
+  }
+
+  async getCastingInventory() {
+    if (!canWork() || state.accessRevoked) throw new Error("作業権限が必要です。");
+    const saved = this.read().castingInventory;
+    if (saved) return CastingStock.project(this.castingLedgerSeed(saved), saved.events);
+    const source = this.castingSource();
+    const preview = CastingStock.project({ ...source, initializedAt: new Date().toISOString(), fixedStorageFrom: 0 }, []);
+    return { ...preview, initialized: false, initializedAt: "", sourceRevision: source.sourceRevision,
+      openingOrders: preview.orders, orders: [], revision: 0 };
+  }
+
+  castingLedgerSeed({ seed, events }) {
+    return seed.fixedStorageFrom === undefined ? { ...seed, fixedStorageFrom: events.length } : seed;
+  }
+
+  async startCastingInventory({ sourceRevision }) {
+    const commit = () => {
+      if (!isOwnerUser() || state.accessRevoked) throw new Error("管理を開始できるのは所有者です。");
+      const data = this.read();
+      const saved = data.castingInventory;
+      if (saved) return CastingStock.project(this.castingLedgerSeed(saved), saved.events);
+      const source = this.castingSource();
+      if (source.sourceRevision !== sourceRevision) throw new Error("開始在庫を更新してから確認してください。");
+      const seed = { ...source, initializedAt: new Date().toISOString(), fixedStorageFrom: 0 };
+      data.castingInventory = { seed, events: [] };
+      this.write(data);
+      return CastingStock.project(seed, []);
+    };
+    return navigator.locks ? navigator.locks.request(`${this.storageKey}:intake-approval`, commit) : commit();
+  }
+
+  async saveCastingInventoryChange(request) {
+    const commit = () => {
+      if (!canWork() || state.accessRevoked) throw new Error("作業権限が必要です。");
+      const data = this.read();
+      const saved = data.castingInventory;
+      if (!saved) throw new Error("所有者が管理を開始してください。");
+      const seed = this.castingLedgerSeed(saved);
+      const { event, snapshot } = CastingStock.apply(seed, saved.events, request, {
+        createdAt: new Date().toISOString(), actor: state.access.email || "owner@example.com",
+      });
+      if (event) {
+        saved.seed = seed;
+        saved.events.push(event);
+        this.write(data);
+      }
+      return snapshot;
+    };
+    return navigator.locks ? navigator.locks.request(`${this.storageKey}:intake-approval`, commit) : commit();
   }
 
   async getFinishedStock() {
@@ -408,11 +508,11 @@ class MockApi {
       });
       if (prepared.event) {
         data.finishedStockEvents = [...events, prepared.event];
-        data.jobs = data.jobs.map((job) => job.completionKind === "stock_fulfillment" && job.shippingStatus === "shipped" && !FinishedStock.fulfillment(job, data.finishedStockEvents)
+        if (action !== "note") data.jobs = data.jobs.map((job) => job.completionKind === "stock_fulfillment" && job.shippingStatus === "shipped" && !FinishedStock.fulfillment(job, data.finishedStockEvents)
           ? { ...job, shippingStatus: "not_ready", completionKind: "", completedAt: "", version: job.version + 1, updatedAt: new Date().toISOString() } : job);
         this.write(data);
       }
-      return FinishedStock.snapshot({ jobs: data.jobs, events: data.finishedStockEvents || events });
+      return action === "note" ? prepared.snapshot : FinishedStock.snapshot({ jobs: data.jobs, events: data.finishedStockEvents || events });
     };
     if (globalThis.navigator?.locks) return navigator.locks.request(`${this.storageKey}:intake-approval`, commit);
     return commit();
@@ -423,6 +523,7 @@ class MockApi {
   openFinishedStock(payload) { return this.mutateFinishedStock("opening", payload); }
   reverseFinishedStock(payload) { return this.mutateFinishedStock("reverse", payload); }
   saveFinishedStockSchedule(payload) { return this.mutateFinishedStock("schedule", payload); }
+  saveFinishedStockNote(payload) { return this.mutateFinishedStock("note", payload); }
 
   async getMaterialInventory() {
     if (state.access.role && !canEdit()) throw new Error("編集権限が必要です。");
@@ -432,8 +533,9 @@ class MockApi {
   }
 
   async mutateMaterial(action, payload) {
-    if (state.access.role && !canEdit()) throw new Error("編集権限が必要です。");
+    if (state.accessRevoked || (state.access.role && !canEdit())) throw new Error("編集権限が必要です。");
     const commit = () => {
+      if (state.accessRevoked || (state.access.role && !canEdit())) throw new Error("編集権限が必要です。");
       if (!globalThis.MaterialInventory) throw new Error("材料管理を読み込み直してください。");
       const data = this.read();
       this.ensureMaterialEvents(data);
@@ -442,28 +544,61 @@ class MockApi {
         actor: state.access.email || "owner@example.com", id: `MAT-${crypto.randomUUID()}`,
       });
       if (prepared.event) data.materialEvents.push(prepared.event);
+      const snapshot = this.localMaterialSnapshot(data);
       this.write(data);
-      return this.localMaterialSnapshot(data);
+      return snapshot;
     };
     if (globalThis.navigator?.locks) return navigator.locks.request(`${this.storageKey}:intake-approval`, commit);
     return commit();
   }
 
   saveMaterialOrder(payload) { return this.mutateMaterial("order", payload); }
+  updateMaterialOrder(payload) { return this.mutateMaterial("editOrder", payload); }
+  saveMaterialStockNote(payload) { return this.mutateMaterial("stockNote", payload); }
   receiveMaterialOrder(payload) { return this.mutateMaterial("receive", payload); }
   adjustMaterialStock(payload) { return this.mutateMaterial("adjust", payload); }
   cancelMaterialOrder(payload) { return this.mutateMaterial("cancel", payload); }
 
-  async getSnapshot() {
+  async saveMaterialExclusion(payload) {
+    if (!canEdit() || state.accessRevoked) throw new Error("編集権限が必要です。");
+    const commit = () => {
+      if (!canEdit() || state.accessRevoked) throw new Error("編集権限が必要です。");
+      const data = this.read();
+      data.materialExclusionRecords ||= [];
+      const prepared = MaterialInventory.prepareExclusion(payload, {
+        jobs: data.jobs, records: data.materialExclusionRecords, at: new Date().toISOString(),
+        actor: state.access.email || "owner@example.com", id: `MAT-EXCLUSION-${crypto.randomUUID()}`,
+      });
+      if (prepared.record) { data.materialExclusionRecords.push(prepared.record); this.write(data); }
+      return this.localMaterialSnapshot(data);
+    };
+    if (globalThis.navigator?.locks) return navigator.locks.request(`${this.storageKey}:intake-approval`, commit);
+    return commit();
+  }
+
+  async getSnapshot({ includeMaterials = true, scope } = {}) {
     await delay(120);
     const data = this.read();
+    const ordersOnly = scope === "orders";
+    const jobs = ordersOnly ? data.jobs.filter((job) => !job.archived && job.shippingStatus !== "shipped") : data.jobs;
+    const [metadata, projectInfo] = await Promise.all([
+      this.productMetadata({ ...data, jobs }),
+      fetch("/api/local/project-info").then((response) => response.ok ? response.json() : {}).catch(() => ({})),
+    ]);
+    const snapshot = {
+      jobs: metadata.jobs, settings: data.settings, productMasterStatus: metadata.productMasterStatus,
+      materialInventory: !ordersOnly && includeMaterials ? this.localMaterialSnapshot(data) : null,
+      access: { email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true },
+      scriptEditorUrl: projectInfo.scriptEditorUrl || "", mode: "demo", serverTime: new Date().toISOString(), setupRequired: false,
+    };
+    if (ordersOnly || scope === "jobs") return snapshot;
+    return { ...snapshot, ...await this.getIntakeSnapshot(), accessSettings: await this.getAccessSettings() };
+  }
+
+  async getIntakeSnapshot() {
     const aiImport = await fetch("/api/local/ai-status").then((response) => response.ok ? response.json() : { ready: false }).catch(() => ({ ready: false }));
-    const metadata = await this.productMetadata(data);
-    data.jobs = metadata.jobs;
-    data.productMasterStatus = metadata.productMasterStatus;
-    const projectInfo = await fetch("/api/local/project-info").then((response) => response.ok ? response.json() : {}).catch(() => ({}));
-    delete data.finishedStockEvents;
-    return { ...data, materialInventory: this.localMaterialSnapshot(data), aiImport, access: { email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true }, accessSettings: await this.getAccessSettings(), scriptEditorUrl: projectInfo.scriptEditorUrl || "", mode: "demo", serverTime: new Date().toISOString(), setupRequired: false };
+    const intake = (this.read().intake || []).filter((item) => (item.status || "pending") === "pending");
+    return { intake, aiImport };
   }
 
   async productMetadata(data) {
@@ -523,6 +658,12 @@ class MockApi {
     data.accessSettings = settings;
     this.write(data);
     return settings;
+  }
+
+  async revokeRememberedAccess({ email }) {
+    const current = await this.getAccessSettings();
+    if (!current.users.some((user) => user.email === email)) throw new Error("保存済みの利用アカウントを指定してください。");
+    return { ok: true };
   }
 
   async saveJob(payload) {
@@ -598,8 +739,10 @@ class MockApi {
     delete saved.requestId;
     delete saved.materialsJson;
     delete saved.finishedStockEvents;
+    delete saved.castingInventory;
     if (globalThis.MaterialInventory) saved.materials = MaterialInventory.transitionJob(previous, saved, {
       at: now, actor: state.access.email || "owner@example.com", requestId: payload.requestId, requestHash: materialRequestHash,
+      exclusions: MaterialInventory.exclusions(data.materialExclusionRecords || []),
     });
     if (index >= 0) data.jobs[index] = saved;
     else data.jobs.unshift(saved);
@@ -738,14 +881,15 @@ class MockApi {
     await delay(360);
     const data = this.read();
     const useAi = payload.engine === "ai";
+    const useAuto = payload.engine === "auto";
     const isText = payload.sourceType === "text";
-    if (!isText && !useAi && payload.mimeType !== "application/pdf") {
+    if (!isText && !useAi && !useAuto && payload.mimeType !== "application/pdf") {
       throw new Error("ローカル版の文字読取は文字入りPDFに対応しています。写真はApps Script版で読み取ってください。");
     }
-    const response = await fetch(isText ? "/api/local/parse-order-text" : useAi ? "/api/local/parse-order-ai" : "/api/local/parse-order-pdf", {
+    const response = await fetch(isText ? "/api/local/parse-order-text" : useAuto ? "/api/local/parse-order-auto" : useAi ? "/api/local/parse-order-ai" : "/api/local/parse-order-pdf", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(useAi ? { ...payload, customerRules: await this.getCustomerRules(), learningRules: await this.getIntakeLearningRules().then((result) => result.rules || []) } : payload),
+      body: JSON.stringify(useAi || useAuto ? { ...payload, customerRules: await this.getCustomerRules(), learningRules: await this.getIntakeLearningRules().then((result) => result.rules || []) } : payload),
     });
     const parsedResponse = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(parsedResponse.error || "ローカルPDF解析に失敗しました。npm run devで開き直してください。");
@@ -758,7 +902,7 @@ class MockApi {
       const quantity = result?.parsed?.quantity;
       return quantity === "" || quantity === null || quantity === undefined;
     });
-    if (incomplete.length && !useAi && !isText) {
+    if (incomplete.length && !useAi && !useAuto && !isText) {
       throw new Error(`数量を読み取れない品目が${incomplete.length}件あります。不完全な候補は保存していません。`);
     }
     const now = new Date().toISOString();
@@ -777,7 +921,8 @@ class MockApi {
         receivedAt: now,
         sender: "",
         subject: results.length > 1 ? `${intakeTitle} · 品目${itemNumber}（${index + 1}/${results.length}）` : intakeTitle,
-        originalText: result.parsed?._ai ? `AI読取・要確認\n文書 ${result.parsed._ai.document ?? 1} / ページ ${result.parsed._ai.page} / 明細 ${result.parsed._ai.row}\n根拠: ${result.parsed._ai.evidence}\n確認事項: ${result.parsed._ai.warnings.join(" / ")}\n${parsedResponse.text}` : results.length > 1
+        originalText: result.parsed?._ai ? `AI読取・要確認\n文書 ${result.parsed._ai.document ?? 1} / ページ ${result.parsed._ai.page} / 明細 ${result.parsed._ai.row}\n根拠: ${result.parsed._ai.evidence}\n確認事項: ${result.parsed._ai.warnings.join(" / ")}\n${parsedResponse.text}` : result.parsed?._memory
+          ? `製品記録で読取（AIなし）・要確認\n\n${parsedResponse.text || ""}` : results.length > 1
           ? `この確認候補: 品目${itemNumber} ${product}\n\n--- 発注書の読取全文 ---\n${parsedResponse.text || ""}`
           : (parsedResponse.text || ""),
         parsed: { ...parsed, ...(result.purchaseNo ? { externalOrderNo: result.purchaseNo, externalLineNo: String(result.itemNumber || "") } : {}) },
@@ -798,6 +943,7 @@ class MockApi {
   }
 
   createIntakeWithAi(payload) { return this.createIntakeFromImage({ ...payload, engine: "ai" }); }
+  createIntakeAutomatically(payload) { return this.createIntakeFromImage({ ...payload, engine: "auto" }); }
   createIntakeFromText(payload) { return this.createIntakeFromImage({ ...payload, sourceType: "text" }); }
 
   async getIntakeLearningRules() {
@@ -882,7 +1028,7 @@ class MockApi {
         stages: Object.fromEntries(STAGES.map((stage) => [stage.key, { status: "not_started", assignee: "" }])),
       };
       if (!existing) {
-        if (globalThis.MaterialInventory) job.materials = MaterialInventory.transitionJob(null, job, { at: now, actor: state.access.email || "owner@example.com", eventId: `intake:${intakeId}` });
+        if (globalThis.MaterialInventory) job.materials = MaterialInventory.transitionJob(null, job, { at: now, actor: state.access.email || "owner@example.com", eventId: `intake:${intakeId}`, exclusions: MaterialInventory.exclusions(data.materialExclusionRecords || []) });
         data.jobs.unshift(job);
       }
       if (candidate.status !== "approved") {
@@ -891,8 +1037,8 @@ class MockApi {
         if (!existing && duplicate.matches.length) data.logs.push({ action: "intake.add_separate", entityId: intakeId, timestamp: now, detail: { jobId: job.id, decision: "add_separate", matches: duplicate.matches, duplicateSignature: duplicate.duplicateSignature } });
       }
       let learningNotice = "";
-      if (candidate.status !== "approved" && learnProduct && globalThis.IntakeLearning?.learn) {
-        const learned = globalThis.IntakeLearning.learn({ rules: learningRules, parsed: candidate.parsed || {}, order: job, intakeId, includeNote: learnNote, updatedAt: now });
+      if (candidate.status !== "approved" && learnProduct && globalThis.IntakeLearning?.remember) {
+        const learned = globalThis.IntakeLearning.remember({ rules: learningRules, parsed: candidate.parsed || {}, order: job, intakeId, includeNote: learnNote, updatedAt: now });
         learningRules = learned.rules || learningRules;
         if (learned.changed) learningNotice = learned.message || "製品共通の補完内容を覚えました。";
       }
@@ -998,19 +1144,28 @@ const api = trackApiMutations(isAppsScript ? new AppsScriptApi() : new MockApi()
 let materialUi = null;
 let materialRefreshPromise = null;
 let finishedStockUi = null;
+let castingStockUi = null;
 const stockFulfillmentAttempts = new Map();
+
+function renderCastingStockWorkspace() {
+  if (!canWork() || state.accessRevoked || !globalThis.CastingStockUI) return;
+  if (!castingStockUi) {
+    castingStockUi = CastingStockUI.create({
+      api, today: todayIso, canEdit: () => canWork() && !state.accessRevoked,
+      canStart: () => isOwnerUser() && !state.accessRevoked, openDialog, closeDialog,
+    });
+  }
+  castingStockUi.render();
+}
 
 function getFinishedStockUi() {
   if (!finishedStockUi && canEdit() && !state.accessRevoked && globalThis.FinishedStockUI && qs("[data-view-panel='finishedStock']")) {
     finishedStockUi = globalThis.FinishedStockUI.create({
       api, canEdit: () => canEdit() && !state.accessRevoked, today: todayIso,
       openDialog(dialog) { openDialog(dialog); },
+      setReturnFocus(dialog, target) { dialog._returnFocus = target; },
       onError(message) { showToast(message, { tone: "error" }); },
-      onJob(id) {
-        if (!canEdit() || state.accessRevoked) return;
-        const job = state.jobs.find((entry) => entry.id === id);
-        if (job) openOrderDialog(job);
-      },
+      onJob(id) { void openStockOrder(id); },
       async onFulfill(id) {
         if (!canEdit() || state.accessRevoked) throw new Error("受注履行完了には編集権限が必要です。");
         const job = state.jobs.find((entry) => entry.id === id && !entry.archived);
@@ -1025,7 +1180,8 @@ function getFinishedStockUi() {
           throw error;
         } finally { await refreshData({ quiet: true }); }
       },
-      onMutation() { void refreshData({ quiet: true }); },
+      // The inventory dialog has already applied the saved stock snapshot.
+      onMutation() { void refreshData({ quiet: true, refreshFinishedStock: false }); },
     });
   }
   return finishedStockUi;
@@ -1038,7 +1194,14 @@ function invalidateFinishedStock({ passive = false } = {}) {
 
 function renderFinishedStockWorkspace() {
   if (!canEdit() || state.accessRevoked) { finishedStockUi?.clear(); return; }
-  getFinishedStockUi()?.render();
+  return getFinishedStockUi()?.render();
+}
+
+async function openStockOrder(id) {
+  const revision = ++dialogOpenRevision;
+  const job = await findJobWithHistory(id);
+  if (revision !== dialogOpenRevision || !job || !canEdit() || state.accessRevoked || qs("dialog[open]")) return;
+  openOrderDialog(job);
 }
 
 function validateFinishedStockPlan(job, previous = null, events = []) {
@@ -1070,7 +1233,7 @@ function updateFinishedStockOrderSummary(form = qs("#order-form")) {
 function getMaterialUi() {
   if (!materialUi && globalThis.MaterialInventoryUI && qs("[data-view-panel='materials']")) {
     materialUi = globalThis.MaterialInventoryUI.create({
-      api, canEdit, today: todayIso,
+      api, canEdit: () => canEdit() && !state.accessRevoked, today: todayIso,
       onRefreshStart() { state.materialInventoryRevision += 1; },
       onSnapshot(snapshot) {
         if (canEdit() && !state.accessRevoked) {
@@ -1078,12 +1241,11 @@ function getMaterialUi() {
           state.materialInventory = snapshot;
         }
       },
-      onError(message) { showToast(message, { tone: "error" }); },
-      onJob(id) {
-        if (!canEdit()) return;
-        const job = state.jobs.find((entry) => entry.id === id);
-        if (job) openOrderDialog(job);
+      onError(message) {
+        if (state.activeView === "materials" || qs("#material-dialog")?.open) showToast(message, { tone: "error" });
       },
+      onDialogOpen() { dialogOpenRevision += 1; },
+      onJob(id) { void openStockOrder(id); },
     });
   }
   return materialUi;
@@ -1093,7 +1255,7 @@ function refreshMaterialInventory() {
   const controller = getMaterialUi();
   if (!canEdit() || !controller || materialRefreshPromise) return materialRefreshPromise;
   materialRefreshPromise = Promise.resolve(controller.refresh()).catch((error) => {
-    if (!state.accessRevoked) showToast(`碓井材料在庫を読み込めませんでした。${error.message}`, { tone: "error" });
+    if (!state.accessRevoked && state.activeView === "materials") showToast(`碓井材料在庫を読み込めませんでした。${error.message}`, { tone: "error" });
   }).finally(() => { materialRefreshPromise = null; });
   return materialRefreshPromise;
 }
@@ -1480,6 +1642,7 @@ function handleLedgerTouchEnd(event) {
     ledgerPinch = null;
     ledgerSuppressClickUntil = Date.now() + 800;
     persistLedgerDisplay();
+    scheduleDeferredData();
   }
 }
 
@@ -2007,24 +2170,64 @@ function announce(message) {
   requestAnimationFrame(() => { qs("#live-region").textContent = message; });
 }
 
+function currentToastStack() {
+  const pageStack = qs("#toast-stack");
+  const dialog = document.activeElement?.closest("dialog[open]") || qsa("dialog[open]").at(-1);
+  if (!dialog) return pageStack;
+  let stack = qs(".dialog-toast-stack", dialog);
+  if (!stack) {
+    stack = document.createElement("div");
+    stack.className = "dialog-toast-stack";
+    stack.setAttribute("aria-live", "polite");
+    qs(".dialog-header", dialog).after(stack);
+    dialog.addEventListener("close", () => {
+      pageStack.append(...stack.children);
+      stack.remove();
+    }, { once: true });
+  }
+  return stack;
+}
+
 function showToast(message, options = {}) {
   const toast = document.createElement("div");
   toast.className = "toast";
   toast.dataset.tone = options.tone || "info";
-  toast.innerHTML = `${icon(options.tone === "error" ? "alert" : "check")}<span>${escapeHtml(message)}</span>`;
+  toast.innerHTML = `${icon(options.tone === "error" || options.tone === "warning" ? "alert" : "check")}<span>${escapeHtml(message)}</span>`;
   if (options.action) {
     const button = document.createElement("button");
     button.type = "button";
     button.textContent = options.action.label;
     button.addEventListener("click", () => {
-      options.action.run();
-      toast.remove();
+      if (options.action.run() !== false) toast.remove();
     });
     toast.append(button);
+  } else if (options.sticky) {
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "toast-dismiss";
+    dismiss.setAttribute("aria-label", "通知を閉じる");
+    dismiss.innerHTML = icon("close");
+    dismiss.addEventListener("click", () => toast.remove());
+    toast.append(dismiss);
   }
-  qs("#toast-stack").append(toast);
-  const timeout = options.sticky ? null : setTimeout(() => toast.remove(), 6000);
-  toast.addEventListener("mouseenter", () => timeout && clearTimeout(timeout), { once: true });
+  const stack = currentToastStack();
+  stack.append(toast);
+  if (stack.classList.contains("dialog-toast-stack")) stack.scrollTop = stack.scrollHeight;
+  if (!options.sticky) {
+    let timeout;
+    const pause = () => clearTimeout(timeout);
+    const resume = () => {
+      pause();
+      timeout = setTimeout(() => {
+        if (!toast.matches(":focus-within, :hover")) toast.remove();
+      }, 6000);
+    };
+    toast.addEventListener("mouseenter", pause);
+    toast.addEventListener("mouseleave", resume);
+    toast.addEventListener("focusin", pause);
+    toast.addEventListener("focusout", resume);
+    resume();
+  }
 }
 
 function renderSkeletons() {
@@ -2052,11 +2255,124 @@ function startAutoSync() {
   updateAutoSyncTimer();
 }
 
-async function refreshData({ quiet = false } = {}) {
-  if (state.accessRevoked) return;
-  if (snapshotLoading || (quiet && backgroundOperations.size)) return;
-  if (quiet && ledgerPinch) return;
-  snapshotLoading = true;
+function deferredSectionForView(view) {
+  if (["dashboard", "completed", "shipping", "distribution", "polishing"].includes(view)) return "jobs";
+  if (view === "settings") return isAdminUser() ? "accessSettings" : null;
+  return ["intake", "materials", "finishedStock"].includes(view) ? view : null;
+}
+
+function canReadDeferredData(section) {
+  if (state.mode === "loading" || state.accessRevoked) return false;
+  if (section === "jobs") return true;
+  if (section === "accessSettings") return isAdminUser();
+  return canEdit();
+}
+
+function deferredDataReady(section) {
+  if (section === "jobs") return state.jobHistoryReady;
+  if (section === "accessSettings") return Boolean(state.accessSettings);
+  return Boolean(deferredReads.get(section)?.ready);
+}
+
+function scheduleDeferredData() {
+  if (!prefetchEnabled || prefetchScheduled || state.mode === "loading" || state.accessRevoked || document.visibilityState === "hidden") return;
+  prefetchScheduled = true;
+  const next = () => {
+    prefetchScheduled = false;
+    if (state.accessRevoked || document.visibilityState === "hidden" || snapshotPromise || backgroundOperations.size || ledgerPinch) return;
+    if ([...deferredReads.values()].some((read) => read.promise)) return;
+    const active = deferredSectionForView(state.activeView);
+    const section = [active, ...DEFERRED_DATA_ORDER].find((key) =>
+      key && canReadDeferredData(key) && !deferredDataReady(key) && !deferredReads.get(key)?.error);
+    if (section) void loadDeferredData(section);
+  };
+  // Let the browser display the first ledger before prefetch starts.
+  if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(() => setTimeout(next, 0));
+  else setTimeout(next, 0);
+}
+
+function loadDeferredData(section, { refresh = false } = {}) {
+  if (!canReadDeferredData(section)) return Promise.resolve(false);
+  const previous = deferredReads.get(section);
+  if (previous?.promise) return previous.promise;
+  if (!refresh && deferredDataReady(section)) return Promise.resolve(true);
+  if (section === "jobs" && !snapshotPromise && (backgroundOperations.size || ledgerPinch)) return Promise.resolve(false);
+
+  const read = { ready: previous?.ready || false, promise: null, error: false };
+  deferredReads.set(section, read);
+  read.promise = readDeferredData(section, read).then((ready) => {
+    read.ready ||= Boolean(ready);
+    return ready;
+  }).catch(() => {
+    read.error = true;
+    return false;
+  }).finally(() => {
+    read.promise = null;
+    if (deferredReads.get(section) !== read) return;
+    if (section === "intake") {
+      renderIntakeBadge();
+      renderAiImportStatus();
+    }
+    if (deferredSectionForView(state.activeView) === section
+      && (section === "intake" || section === "accessSettings" || (section === "jobs" && read.error))) renderActiveView();
+    scheduleDeferredData();
+  });
+  return read.promise;
+}
+
+async function readDeferredData(section, read) {
+  if (section === "jobs") {
+    await (snapshotPromise || refreshData({ quiet: true, historyOnly: true }));
+    return state.jobHistoryReady;
+  }
+  if (section === "materials") {
+    if (!state.materialInventory) await refreshMaterialInventory();
+    return true;
+  }
+  if (section === "finishedStock") {
+    await renderFinishedStockWorkspace();
+    return true;
+  }
+  const revision = section === "intake" ? intakeReadRevision : state.accessSettingsRevision;
+  const response = await (section === "intake" ? api.getIntakeSnapshot() : api.getAccessSettings());
+  if (!canReadDeferredData(section) || deferredReads.get(section) !== read) return false;
+  if (section === "intake") {
+    if (intakeReadRevision !== revision || intakeDeleteBusy || intakeApproveBusy || bulkIntakeBusy) return false;
+    state.intake = (response.intake || []).filter((item) => item.status === "pending");
+    state.aiImport = response.aiImport || { ready: false, configured: false };
+  } else {
+    if (state.accessSettingsDirty || state.accessSettingsSaving || state.accessSettingsRevision !== revision) return false;
+    state.accessSettings = response;
+  }
+  return true;
+}
+
+async function refreshIntakeAfterImport() {
+  intakeReadRevision += 1;
+  await deferredReads.get("intake")?.promise;
+  await loadDeferredData("intake", { refresh: true });
+}
+
+async function findJobWithHistory(id) {
+  const job = state.jobs.find((entry) => entry.id === id);
+  if (job || state.jobHistoryReady) return job;
+  if (await loadDeferredData("jobs")) return state.jobs.find((entry) => entry.id === id);
+  if (!state.accessRevoked) showToast("案件の読み込みを確認して、もう一度お試しください。", { tone: "error" });
+}
+
+function refreshData({ quiet = false, historyOnly = false, refreshFinishedStock = true } = {}) {
+  if (state.accessRevoked || snapshotPromise || (quiet && (backgroundOperations.size || ledgerPinch))) return Promise.resolve(false);
+  snapshotPromise = syncSnapshot({ quiet, historyOnly, refreshFinishedStock }).finally(() => {
+    snapshotPromise = null;
+    updateAutoSyncTimer();
+    scheduleDeferredData();
+  });
+  return snapshotPromise;
+}
+
+async function syncSnapshot({ quiet, historyOnly, refreshFinishedStock = true }) {
+  const starting = state.mode === "loading";
+  const includeMaterials = !starting && !historyOnly && state.activeView === "materials" && !materialRefreshPromise;
   const writeRevision = mutationRevision;
   const processRevision = processSaveRevision;
   const accessRevision = state.accessSettingsRevision;
@@ -2067,12 +2383,12 @@ async function refreshData({ quiet = false } = {}) {
   const metadataRevision = state.productMetadataRevision;
   const materialRevision = state.materialInventoryRevision;
   if (!quiet) setConnection("loading", "データを読み込んでいます");
-  if (state.mode === "loading") setStartupState();
-  const slowTimer = state.mode === "loading" ? setTimeout(() => {
-    if (snapshotLoading && state.mode === "loading" && !state.accessRevoked) qs("#startup-message").textContent = "接続に時間がかかっています。読み込みを続けています…";
+  if (starting) setStartupState();
+  const slowTimer = starting ? setTimeout(() => {
+    if (snapshotPromise && state.mode === "loading" && !state.accessRevoked) qs("#startup-message").textContent = "接続に時間がかかっています。読み込みを続けています…";
   }, 8000) : null;
   try {
-    const snapshot = await api.getSnapshot({ since: state.lastSync });
+    const snapshot = await api.getSnapshot({ scope: starting ? "orders" : "jobs", since: state.lastSync, includeMaterials });
     if (state.accessRevoked) return;
     if (quiet && ledgerPinch) return;
     const unchanged = !backgroundOperations.size && writeRevision === mutationRevision;
@@ -2082,55 +2398,106 @@ async function refreshData({ quiet = false } = {}) {
       && !state.polishingSaving.size && polishingRevision === state.polishingSaveRevision
       && !state.polishingRulesSaving.size && metadataRevision === state.productMetadataRevision) {
       state.jobs = snapshot.jobs || [];
+      // Compatibility with snapshots that return the legacy, complete payload.
+      state.jobHistoryReady = !starting || Array.isArray(snapshot.intake);
       appliedSnapshotRevision += 1;
       reconcilePolishingRetry();
     }
-    if (unchanged && !intakeDeleteBusy && !intakeApproveBusy && !bulkIntakeBusy) state.intake = (snapshot.intake || []).filter((item) => item.status === "pending");
     if (unchanged && !state.stageAssigneeSettingsSaving && !state.orderSaving && !state.distributionAssigneeSettingsSaving && distributionSettingsRevision === state.distributionSettingsSaveRevision && !state.polishingRatesSaving && !state.polishingRulesSaving.size && metadataRevision === state.productMetadataRevision) state.settings = snapshot.settings || {};
     if (metadataRevision === state.productMetadataRevision) state.productMasterStatus = snapshot.productMasterStatus || null;
     state.mode = snapshot.mode || (isAppsScript ? "live" : "demo");
-    state.aiImport = snapshot.aiImport || { ready: false, configured: false };
     state.scriptEditorUrl = snapshot.scriptEditorUrl || "";
     const previousAccess = state.access;
     state.access = snapshot.access || { email: "", isAdmin: false };
-    if (!canEdit()) state.materialInventory = null;
-    else if (unchanged && materialRevision === state.materialInventoryRevision) state.materialInventory = snapshot.materialInventory || null;
+    if (!canEdit()) {
+      state.materialInventory = null;
+      state.intake = [];
+      state.aiImport = { ready: false, configured: false };
+      ["materials", "finishedStock", "intake"].forEach((section) => deferredReads.delete(section));
+    } else {
+      if (includeMaterials && unchanged && materialRevision === state.materialInventoryRevision) state.materialInventory = snapshot.materialInventory || null;
+      if (Array.isArray(snapshot.intake) && unchanged && !intakeDeleteBusy && !intakeApproveBusy && !bulkIntakeBusy && !deferredReads.get("intake")?.promise) {
+        state.intake = snapshot.intake.filter((item) => item.status === "pending");
+        state.aiImport = snapshot.aiImport || { ready: false, configured: false };
+        deferredReads.set("intake", { ready: true });
+      }
+    }
     const roleRank = { viewer: 0, worker: 1, editor: 2, admin: 3, owner: 4 };
     if ((roleRank[accessRole(state.access)] ?? 0) < (roleRank[accessRole(previousAccess)] ?? 0)) closeMutationDialogs();
     if (isOwnerUser(previousAccess) && !isOwnerUser(state.access) && qs("#import-dialog")?.open) closeDialog(qs("#import-dialog"));
-    if (!state.accessSettingsDirty && !state.accessSettingsSaving && accessRevision === state.accessSettingsRevision) state.accessSettings = snapshot.accessSettings || null;
+    if (!isAdminUser()) {
+      deferredReads.delete("accessSettings");
+      state.accessSettings = null;
+      state.accessSettingsDraft = null;
+      state.accessSettingsDirty = false;
+    } else if (snapshot.accessSettings && !state.accessSettingsDirty && !state.accessSettingsSaving && accessRevision === state.accessSettingsRevision) {
+      state.accessSettings = snapshot.accessSettings;
+    }
     if (!canEdit()) finishedStockUi?.clear();
-    else if (unchanged && state.activeView === "finishedStock") invalidateFinishedStock({ passive: true });
+    else if (refreshFinishedStock && !historyOnly && unchanged && state.activeView === "finishedStock") invalidateFinishedStock({ passive: true });
+    if (!historyOnly && unchanged && canWork() && state.activeView === "castingStock") void castingStockUi?.refresh({ passive: quiet });
     state.lastSync = snapshot.serverTime || new Date().toISOString();
     setStartupState();
     renderAll();
     setConnection("online", state.mode === "demo" ? "ローカル確認用データ" : "スプレッドシートと同期中");
+    if (!starting && !historyOnly && unchanged) {
+      if (deferredReads.has("intake") || state.activeView === "intake") void loadDeferredData("intake", { refresh: true });
+      if (state.activeView === "settings") void loadDeferredData("accessSettings", { refresh: true });
+    }
+    return true;
   } catch (error) {
+    if (historyOnly) throw error;
     setConnection("error", "同期できませんでした");
     if (state.mode === "loading") setStartupState(`通信状態を確認して、もう一度お試しください。${error.message}`);
     if (!quiet) showToast(`データを読み込めませんでした。${error.message}`, { tone: "error" });
   } finally {
     if (slowTimer) clearTimeout(slowTimer);
-    snapshotLoading = false;
-    updateAutoSyncTimer();
   }
 }
 
 function renderAll() {
   renderHeader();
   renderActiveView();
-  const engine = qs("#import-engine");
-  if (!engine.dataset.chosen) engine.value = state.aiImport.ready ? "ai" : "legacy";
-  qs("#ai-import-status").textContent = state.aiImport.ready
-    ? "AI設定済み。Googleの設定に従って利用します。上限時は停止し、自動再試行しません。"
-    : "AIは未設定です。APIキーをサーバーに設定すると使えます。現在は従来の読取を利用できます。";
+  renderAiImportStatus();
   if (qs("#label-dialog")?.open) renderLabelPrintDialog();
   qs("#last-sync").textContent = `最終同期 ${formatDateTime(state.lastSync)}`;
   applyAccessVisibility();
 }
 
+function renderAiImportStatus() {
+  const engine = qs("#import-engine");
+  if (!engine) return;
+  if (!engine.dataset.chosen) engine.value = "auto";
+  qs("#ai-import-status").textContent = !deferredDataReady("intake")
+    ? deferredReads.get("intake")?.error ? "読取設定を確認できませんでした。取り込み時に接続を確認します。" : "読取設定を確認中…"
+    : state.aiImport.ready
+    ? "AI設定済み。Googleの設定に従って利用します。上限時は停止し、自動再試行しません。"
+    : "AIは未設定です。自動では記録済みの製品を読み取れます。未登録・不明な書式は従来の読取を選んで確認してください。";
+}
+
+function renderViewDataNotice() {
+  const notice = qs("#view-data-notice");
+  const panel = qs(`[data-view-panel='${state.activeView}']`);
+  if (!notice || !panel) return false;
+  const section = deferredSectionForView(state.activeView);
+  const waiting = ["jobs", "intake", "accessSettings"].includes(section) && !deferredDataReady(section);
+  panel.classList?.toggle("is-awaiting-data", waiting);
+  if (!waiting) {
+    if (notice.parentElement === panel) notice.hidden = true;
+    return false;
+  }
+  if (notice.parentElement !== panel) panel.firstElementChild?.after(notice);
+  notice.hidden = false;
+  const error = deferredReads.get(section)?.error;
+  qs("#view-data-spinner").hidden = Boolean(error);
+  qs("#view-data-message").textContent = error ? "読み込めませんでした。再試行してください。" : "読み込み中…";
+  qs("#view-data-retry").hidden = !error;
+  return true;
+}
+
 function renderActiveView() {
   if (state.mode === "loading") return;
+  if (renderViewDataNotice()) return;
   const renderers = {
     dashboard() { renderMetrics(); renderDashboardOrders(); },
     orders: renderOrdersWorkspace,
@@ -2139,6 +2506,7 @@ function renderActiveView() {
     distribution: renderDistributionWorkspace,
     polishing: renderPolishingWorkspace,
     materials: renderMaterialWorkspace,
+    castingStock: renderCastingStockWorkspace,
     finishedStock: renderFinishedStockWorkspace,
     intake: renderIntake,
     settings: renderSettings,
@@ -2149,6 +2517,7 @@ function renderActiveView() {
 function closeMutationDialogs() {
   pendingDiscardDialog = null;
   if (qs("#discard-dialog")?.open) qs("#discard-dialog").close();
+  castingStockUi?.clear();
   ["#order-dialog", "#process-dialog", "#polishing-dialog", "#material-dialog", "#import-dialog", "#intake-dialog", "#bulk-intake-dialog", "#customer-rules-dialog", "#intake-learning-dialog"].forEach((selector) => {
     const dialog = qs(selector);
     if (dialog?.open) dialog.close();
@@ -2185,6 +2554,7 @@ function applyAccessVisibility() {
     finishedStockUi?.clear();
     if (qs("#material-dialog")?.open) qs("#material-dialog").close();
   }
+  if (!worker) castingStockUi?.clear();
   const intakeView = qs("[data-view-panel='intake']");
   if (intakeView) intakeView.hidden = !editor || state.activeView !== "intake";
   const intakeBulkEntry = qs("#intake-bulk-entry");
@@ -2887,6 +3257,7 @@ function distributionJobs({ month = state.distributionMonth, endMonth = month ==
     && (assignee === "all" || (job.distributionAssignee || "") === assignee))
     .sort((a, b) => String(a.dueDate).slice(0, 7).localeCompare(String(b.dueDate).slice(0, 7))
       || (sort === "customer" ? compareDistributionCustomer(a, b) : 0)
+      || (sort === "serial" ? compareTextBlankLast(a.serialNo, b.serialNo) : 0)
       || String(a.dueDate).localeCompare(String(b.dueDate))
       || NATURAL_COLLATOR.compare(a.product || "", b.product || "")
       || NATURAL_COLLATOR.compare(a.serialNo || "", b.serialNo || "")
@@ -2898,6 +3269,7 @@ function compareDistributionCustomer(a, b) {
 }
 
 function distributionSortLabel(sort = state.distributionSort) {
+  if (sort === "serial") return "月→連番順";
   return sort === "customer" ? "月→得意先→納期順" : "月→納期順";
 }
 
@@ -2954,7 +3326,8 @@ function renderDistributionWorkspace() {
   if (!state.distributionMonth) state.distributionMonth = todayIso().slice(0, 7);
   if (!state.distributionEndMonth) state.distributionEndMonth = state.distributionMonth;
   const active = document.activeElement;
-  const focusId = active?.dataset.distributionId;
+  const activeRow = active?.closest?.("[data-distribution-row]");
+  const rowIndex = activeRow?.sectionRowIndex;
   const focusAssignee = active?.dataset.distributionAssignee;
   const focusFilter = active?.dataset.distributionFilter;
   qs("#distribution-month").value = state.distributionMonth;
@@ -2974,12 +3347,13 @@ function renderDistributionWorkspace() {
   qs("#distribution-save-status").textContent = !canWork() ? "閲覧のみ：担当者の変更はできません。" : state.distributionSaving.size ? `担当者を保存中（${state.distributionSaving.size}件）…` : state.distributionSaveMessage;
   qs("#distribution-print-button").disabled = !distributionPrintJobs(jobs).length || state.distributionSaving.size > 0;
   qs("#distribution-workload-summary").textContent = `${state.distributionMonth === state.distributionEndMonth ? "月" : "表示期間"}全体の担当別合計（${state.distributionIncludeShipped ? "出荷完了を含む" : "未出荷"}）：${distributionWorkloadText(workloads)}`;
-  qs("#distribution-workspace").innerHTML = jobs.length ? `<table class="distribution-table" aria-label="${distributionSortLabel()}の鋭匙鉗子と配布担当">
+  const workspace = qs("#distribution-workspace");
+  workspace.innerHTML = jobs.length ? `<table class="distribution-table" aria-label="${distributionSortLabel()}の鋭匙鉗子と配布担当">
     <thead><tr><th scope="col">得意先</th><th scope="col">製品名</th><th scope="col">連番</th><th scope="col">納期</th><th scope="col">数量</th><th scope="col">型</th><th scope="col">幅</th><th scope="col">現在の工程</th><th scope="col">配布担当</th></tr></thead>
     <tbody>${jobs.map((job) => {
       const saving = state.distributionSaving.has(job.id);
       const current = job.distributionAssignee || "";
-      return `<tr data-distribution-row="${escapeHtml(job.id)}" aria-busy="${saving}">
+      return `<tr data-distribution-row="${escapeHtml(job.id)}" aria-busy="${saving}" tabindex="-1">
         <td class="distribution-customer" data-column="得意先">${escapeHtml(job.customer || "—")}</td>
         <td class="distribution-product" data-column="製品名"><strong>${escapeHtml(productDisplayName(job))}</strong>${job.shippingStatus === "shipped" ? "<small>出荷完了</small>" : ""}</td>
         <td class="distribution-serial" data-column="連番">${escapeHtml(job.serialNo || "—")}</td>
@@ -2991,8 +3365,19 @@ function renderDistributionWorkspace() {
         <td class="distribution-assignment" data-column="配布担当">${canWorkOnJob(job) ? `<div class="distribution-assignees" role="group" aria-label="${escapeHtml(productDisplayName(job))}の配布担当">${distributionAssigneeOptions([job]).map((assignee) => `<button class="distribution-assignee-button" type="button" data-distribution-id="${escapeHtml(job.id)}" data-distribution-assignee="${escapeHtml(assignee)}" aria-pressed="${current === assignee}" ${saving ? "disabled" : ""}>${escapeHtml(assignee || "未定")}</button>`).join("")}</div>` : `<span>${escapeHtml(current || "未定")}</span>`}</td>
       </tr>`;
     }).join("")}</tbody></table>` : `<div class="empty-state"><h3>${state.mode === "loading" ? "データを読み込んでいます" : "条件に合う鋭匙鉗子がありません"}</h3><p>納期の期間・配布担当・出荷完了の表示を確認してください。納期が未設定の案件は月別の表に表示されません。</p></div>`;
-  if (focusId) qs(`[data-distribution-id="${CSS.escape(focusId)}"][data-distribution-assignee="${CSS.escape(focusAssignee)}"]`)?.focus({ preventScroll: true });
-  if (focusFilter !== undefined) qs(`[data-distribution-filter="${CSS.escape(focusFilter)}"]`)?.focus({ preventScroll: true });
+  if (activeRow) {
+    const rows = qsa("[data-distribution-row]", workspace);
+    const sameRow = rows.find((row) => row.dataset.distributionRow === activeRow.dataset.distributionRow);
+    const row = sameRow || rows[Math.min(rowIndex, rows.length - 1)];
+    const sameButton = sameRow && focusAssignee !== undefined
+      && qs(`[data-distribution-assignee="${CSS.escape(focusAssignee)}"]:not(:disabled)`, sameRow);
+    const target = sameButton || (row && (qs('[data-distribution-assignee][aria-pressed="true"]:not(:disabled)', row) || row))
+      || qs('[data-distribution-filter][aria-pressed="true"]');
+    target?.focus({ preventScroll: true });
+  } else if (focusFilter !== undefined) {
+    const target = qs(`[data-distribution-filter="${CSS.escape(focusFilter)}"]`) || qs('[data-distribution-filter][aria-pressed="true"]');
+    target?.focus({ preventScroll: true });
+  }
 }
 
 function setDistributionMonth(boundary, month) {
@@ -3108,20 +3493,17 @@ function finishDistributionPrint() {
 }
 
 function renderHeader() {
-  const pending = state.intake.length;
-  const count = qs("#intake-nav-count");
-  count.textContent = String(pending);
-  count.hidden = pending === 0;
+  renderIntakeBadge();
   const shipping = state.jobs.filter((job) => matchesJobScope(job, "shipping")).length;
   const completed = state.jobs.filter((job) => matchesJobScope(job, "completed")).length;
   const completedCount = qs("#completed-nav-count");
   completedCount.textContent = String(shipping + completed);
-  completedCount.hidden = shipping + completed === 0;
+  completedCount.hidden = !state.jobHistoryReady || shipping + completed === 0;
   completedCount.setAttribute?.("aria-label", `出荷待ち${shipping}件・出荷済み${completed}件`);
   const polishingCount = state.jobs.filter((job) => !job.archived && polishingCounts(job).outstanding > 0).length;
   const polishingBadge = qs("#polishing-nav-count");
   polishingBadge.textContent = String(polishingCount);
-  polishingBadge.hidden = polishingCount === 0;
+  polishingBadge.hidden = !state.jobHistoryReady || polishingCount === 0;
   const labelWaiting = labelQueueJobs().length;
   qsa("[data-label-queue-count]").forEach((badge) => {
     badge.textContent = String(labelWaiting);
@@ -3135,6 +3517,14 @@ function renderHeader() {
     weekday: "short",
     timeZone: BUSINESS_TIME_ZONE,
   }).format(new Date());
+}
+
+function renderIntakeBadge() {
+  const pending = state.intake.length;
+  const count = qs("#intake-nav-count");
+  if (!count) return;
+  count.textContent = String(pending);
+  count.hidden = pending === 0;
 }
 
 function renderMetrics() {
@@ -3155,11 +3545,14 @@ function renderMetrics() {
 
 function stageCellButton(job, baseStage) {
   const stage = stageForJob(baseStage, job);
-  const status = stageStatus(job, stage.key);
+  const polishing = stage.key === "finish" ? polishingCounts(job) : null;
+  const isPolishing = polishing?.outstanding > 0 && job.shippingStatus !== "shipped";
+  const status = isPolishing ? "working" : stageStatus(job, stage.key);
   const assignee = stageAssignee(job, stage.key);
-  const label = stage.key === "finish" && polishingCounts(job).returned > 0
-    ? { not_started: "最終待ち", working: "最終中", done: "最終完了", hold: "最終保留" }[status] || statusLabel(status)
-    : statusLabel(status);
+  const label = isPolishing ? "研磨中"
+    : polishing?.returned > 0
+      ? { not_started: "取り付け", working: "取付中", done: "最終完了", hold: "取付保留" }[status] || statusLabel(status)
+      : statusLabel(status);
   if (!canWorkOnJob(job)) return `<span class="stage-cell-button" data-status="${status}" data-tone="${statusTone({ status })}"><b>${escapeHtml(assignee || "—")}</b><small>${label}</small></span>`;
   return `<button class="stage-open-button stage-cell-button" type="button" data-action="open-process" data-order-id="${escapeHtml(job.id)}" data-stage-key="${stage.key}" data-status="${status}" data-tone="${statusTone({ status })}" aria-label="${escapeHtml(job.product || "案件")}の${stage.label}：${escapeHtml(assignee || "担当未定")}・${label}を更新"><b>${escapeHtml(assignee || "—")}</b><small>${label}</small></button>`;
 }
@@ -3179,7 +3572,13 @@ function ledgerLengthValue(job) {
   return ["ユフ", "松井", "tmマツイ", "tsメディカル"].includes(customer) ? displayedProductCode(job) || "—" : String(job.specLength || "—");
 }
 
-function orderTableRows(jobs, { completed = false, shipping = false, compact = false, ledger = false, progressOnly = false } = {}) {
+function orderTableHasShipping({ completed, shipping, compact, ledger, progressOnly }) {
+  return shipping || (!compact && !progressOnly && (completed || !ledger));
+}
+
+function orderTableRows(jobs, options = {}) {
+  const { completed = false, compact = false, ledger = false, progressOnly = false } = options;
+  const showShipping = orderTableHasShipping(options);
   return jobs.map((job) => {
     const due = dueInfo(job);
     const length = ledgerLengthValue(job);
@@ -3189,8 +3588,8 @@ function orderTableRows(jobs, { completed = false, shipping = false, compact = f
     const shippedDate = completed ? `<td class="cell-completed-date" title="${escapeHtml(shipmentDateLabel(job, true))}">${shipmentDateKey(job) ? `<time datetime="${escapeHtml(job.completedAt)}">${escapeHtml(shipmentDateLabel(job))}</time>` : "未記録"}</td>` : "";
     const scrollSpace = ledger ? '<td class="ledger-scroll-space" aria-hidden="true"></td>' : "";
     const stages = STAGES.map((stage) => `<td class="cell-stage">${stageCellButton(job, stage)}</td>`).join("");
-    const shippingAction = `<td class="cell-shipping">${shippingCell(job, completed)}</td>`;
-    if (progressOnly) return `<tr data-order-id="${escapeHtml(job.id)}">${product}${serial}${stages}${shipping ? shippingAction : ""}${scrollSpace}</tr>`;
+    const shippingAction = showShipping ? `<td class="cell-shipping">${shippingCell(job, completed)}</td>` : "";
+    if (progressOnly) return `<tr data-order-id="${escapeHtml(job.id)}">${product}${serial}${stages}${shippingAction}${scrollSpace}</tr>`;
     return `<tr data-order-id="${escapeHtml(job.id)}">
       ${ledger ? `${product}${serial}${shippedDate}` : shippedDate}
       <td class="cell-customer" title="${escapeHtml(job.customer || "—")}">${escapeHtml(job.customer || "—")}</td>
@@ -3203,10 +3602,10 @@ function orderTableRows(jobs, { completed = false, shipping = false, compact = f
       ${ledger ? "" : serial}
       ${stages}
       <td class="cell-polishing">${polishingCell(job, completed)}</td>
-      ${compact ? "" : `<td class="cell-note" title="${escapeHtml(job.note || "—")}"><button class="ledger-note" type="button" data-action="view-order" data-order-id="${escapeHtml(job.id)}" aria-label="${escapeHtml(productDisplayName(job))}の備考と詳細を表示">${escapeHtml(job.note || "—")}</button></td>
-      <td class="cell-shipping">${shippingCell(job, completed)}</td>
-      <td>${canEdit() ? `<button class="row-action" type="button" data-action="edit-order" data-order-id="${escapeHtml(job.id)}" aria-label="${escapeHtml(job.product || "案件")}の注文情報を編集">${icon("edit")}</button>` : ""}</td>`}
-      ${compact && shipping ? shippingAction : ""}${scrollSpace}
+      ${shippingAction}
+      ${compact ? "" : `<td class="cell-edit">${canEdit() ? `<button class="row-action" type="button" data-action="edit-order" data-order-id="${escapeHtml(job.id)}" aria-label="${escapeHtml(job.product || "案件")}の注文情報を編集">${icon("edit")}</button>` : ""}</td>
+      <td class="cell-note" title="${escapeHtml(job.note || "—")}"><button class="ledger-note" type="button" data-action="view-order" data-order-id="${escapeHtml(job.id)}" aria-label="${escapeHtml(productDisplayName(job))}の備考と詳細を表示">${escapeHtml(job.note || "—")}</button></td>`}
+      ${scrollSpace}
     </tr>`;
   }).join("");
 }
@@ -3227,11 +3626,13 @@ function orderCards(jobs, { completed = false } = {}) {
   }).join("");
 }
 
-function orderTableHeader({ completed = false, shipping = false, category = "", compact = false, ledger = false, progressOnly = false } = {}) {
-  let columns = [["customer", "得意先", "customer"], ["product", "品名", "product"], ["due", "納期", "due"], ["quantity", "数量", "quantity"], ["length", "全長／製品番号"], ["shape", "型"], ["blade", "刃幅"], ["serial", "連番", "serial"], ...STAGES.map((stage) => ["stage", stageForJob(stage, category).label]), ["polishing", "研磨"], ["note", "備考"], ["shipping", completed ? "出荷完了" : "出荷"], ["edit", "編集"]];
+function orderTableHeader(options = {}) {
+  const { completed = false, shipping = false, category = "", compact = false, ledger = false, progressOnly = false } = options;
+  const shippingColumn = orderTableHasShipping(options) ? [["shipping", completed ? "出荷完了" : "出荷"]] : [];
+  let columns = [["customer", "得意先", "customer"], ["product", "品名", "product"], ["due", "納期", "due"], ["quantity", "数量", "quantity"], ["length", "全長／製品番号"], ["shape", "型"], ["blade", "刃幅"], ["serial", "連番", "serial"], ...STAGES.map((stage) => ["stage", stageForJob(stage, category).label]), ["polishing", "研磨"], ...shippingColumn, ["edit", "編集"], ["note", "備考"]];
   if (ledger || progressOnly) columns = [columns.find(([key]) => key === "product"), columns.find(([key]) => key === "serial"), ...columns.filter(([key]) => !["product", "serial"].includes(key))];
-  if (progressOnly) columns = columns.filter(([key]) => ["product", "serial", "stage", ...(shipping ? ["shipping"] : [])].includes(key));
-  else if (compact) columns = columns.filter(([key]) => !["note", "edit", ...(shipping ? [] : ["shipping"])].includes(key));
+  if (progressOnly) columns = columns.filter(([key]) => ["product", "serial", "stage", "shipping"].includes(key));
+  else if (compact) columns = columns.filter(([key]) => !["note", "edit"].includes(key));
   if (completed && !progressOnly) columns.splice(ledger ? 2 : 0, 0, ["completed-date", "出荷日", "updated"]);
   const scrollSpace = ledger ? '<th class="ledger-scroll-space" aria-hidden="true"></th>' : "";
   const stageHint = canWork() && (canEdit() || (!completed && !shipping)) ? "工程の担当・状態を押すと更新できます。" : "工程の担当・状態を確認できます。";
@@ -3428,14 +3829,14 @@ function selectedLabelJobs() {
 
 function productDisplayName(job) {
   let product = normalizeProductText(job.productMaster?.displayProduct ?? job.product) || "品名未設定";
-  if (job.productMaster?.labelKeywordSource === "manual") product = product.replace(/アリジ|白銅|ウスイ/g, "").replace(/\s*[・/]\s*$/g, "").replace(/\s+/g, " ").trim() || "品名未設定";
+  if (job.productMaster?.labelKeywordSource === "manual") product = product.replace(PRODUCT_LABEL_KEYWORD_PATTERN, "").replace(/\s*[・/]\s*$/g, "").replace(/\s+/g, " ").trim() || "品名未設定";
   const keywords = (job.productMaster?.labelKeywords || []).filter((keyword) => !product.normalize("NFKC").toLowerCase().includes(String(keyword).normalize("NFKC").toLowerCase()));
   return keywords.length ? `${product} ${keywords.join("・")}` : product;
 }
 
 function productLabelKeywords(value) {
   const text = normalizeProductText(value);
-  return [["ｱﾘｼﾞ", "アリジ"], ["白銅", "白銅"], ["ｳｽｲ", "ウスイ"]].filter(([, term]) => text.includes(term)).map(([keyword]) => keyword);
+  return PRODUCT_LABEL_KEYWORDS.filter((keyword) => text.includes(keyword.normalize("NFKC")));
 }
 
 function labelTitle(job) {
@@ -3469,6 +3870,7 @@ function labelDueMonth(value) {
 
 function productLabelMarkup(job) {
   const title = labelTitle(job);
+  const titleLength = Array.from(title).length;
   const customer = normalizeProductText(job.customer) || "得意先未設定";
   const dueMonth = labelDueMonth(job.dueDate);
   const quantity = Number(job.quantity);
@@ -3481,7 +3883,7 @@ function productLabelMarkup(job) {
     ["納期", formatLabelDate(job.dueDate), "is-due"],
   ];
   return `<article class="product-label" data-label-month="${dueMonth}" aria-label="${escapeHtml(`${customer} ${title}の製品ラベル`)}">
-    <div class="label-primary-row"><strong class="label-customer ${labelTextSizeClass(customer)}">${escapeHtml(customer)}</strong><strong class="label-product-name ${labelTextSizeClass(title)}"><span>${escapeHtml(title)}</span></strong></div>
+    <div class="label-primary-row"><strong class="label-customer ${labelTextSizeClass(customer)}">${escapeHtml(customer)}</strong><strong class="label-product-name" style="--label-text-width-em: ${titleLength}"><span>${escapeHtml(title)}</span></strong></div>
     <div class="label-spec-grid">${specs.map(([name, value, tone = ""]) => `<div class="label-spec-cell ${tone}"><span class="label-spec-name">${name}</span><strong class="label-spec-value">${escapeHtml(value)}</strong></div>`).join("")}</div>
   </article>`;
 }
@@ -3512,14 +3914,36 @@ function renderLabelJobList() {
   }).join("");
 }
 
+function fitLabelText() {
+  const selector = ".label-product-name, .label-spec-value";
+  const preview = qsa(selector, qs("#label-preview-list"));
+  if (!preview.length) return;
+  const print = qsa(selector, qs("#label-print-sheet"));
+  const range = document.createRange();
+  // Measure the same typeface used in print. Container units adapt the result to each cell width.
+  const widths = preview.map((text) => {
+    range.selectNodeContents(text);
+    return range.getBoundingClientRect().width / parseFloat(getComputedStyle(text).fontSize);
+  });
+  widths.forEach((width, index) => {
+    if (!(width > 0 && Number.isFinite(width))) return;
+    const widthEm = String(width);
+    preview[index].style.setProperty("--label-text-width-em", widthEm);
+    print[index]?.style.setProperty("--label-text-width-em", widthEm);
+  });
+}
+
 function renderLabelSelectionState() {
   const selected = selectedLabelJobs();
   const count = selected.length;
+  const labels = selected.map(productLabelMarkup).join("");
   qs("#label-selection-count").textContent = `${count} / ${LABEL_PRINT_LIMIT}枚`;
-  qs("#label-preview-list").innerHTML = count
-    ? selected.map(productLabelMarkup).join("")
-    : `<div class="label-preview-empty"><strong>印刷する案件を選んでください</strong><span>選択したラベルをここで確認できます。</span></div>`;
-  qs("#label-print-sheet").innerHTML = selected.map(productLabelMarkup).join("");
+  qs("#label-preview-list").innerHTML = labels || `<div class="label-preview-empty"><strong>印刷する案件を選んでください</strong><span>選択したラベルをここで確認できます。</span></div>`;
+  qs("#label-print-sheet").innerHTML = labels;
+  if (count && typeof requestAnimationFrame === "function") requestAnimationFrame(() => {
+    fitLabelText();
+    if (document.fonts?.status === "loading") document.fonts.ready.then(fitLabelText);
+  });
   const printButton = qs("#print-labels-button");
   const pending = state.labelPrintPendingConfirmation.length > 0;
   printButton.hidden = pending;
@@ -3686,7 +4110,7 @@ function renderIntake() {
     const parsed = item.parsed || {};
     const confidence = Math.round(Number(item.confidence || 0) * 100);
     return `<article class="intake-card">
-      <div class="intake-card-head"><div><strong>${escapeHtml(item.subject || item.sourceRef || "注文情報")}</strong><p>${escapeHtml(item.sender || (item.sourceType === "text" ? "本文の貼り付けから取込" : "画像からの取込"))} · ${formatDateTime(item.receivedAt)}</p></div><div><span class="source-chip">${item.sourceType === "text" ? "貼り付け" : item.sourceType === "email" ? "メール" : "画像"}</span> <span class="confidence-chip" data-tone="${item.parsed?._ai ? "warning" : confidence >= 75 ? "success" : "warning"}">${item.parsed?._ai ? "AI・要確認" : `読取 ${confidence}%`}</span></div></div>
+      <div class="intake-card-head"><div><strong>${escapeHtml(item.subject || item.sourceRef || "注文情報")}</strong><p>${escapeHtml(item.sender || (item.sourceType === "text" ? "本文の貼り付けから取込" : "画像からの取込"))} · ${formatDateTime(item.receivedAt)}</p></div><div><span class="source-chip">${item.sourceType === "text" ? "貼り付け" : item.sourceType === "email" ? "メール" : "画像"}</span> <span class="confidence-chip" data-tone="${item.parsed?._ai || item.parsed?._memory ? "warning" : confidence >= 75 ? "success" : "warning"}">${item.parsed?._memory ? "AIなし・要確認" : item.parsed?._ai ? "AI・要確認" : `読取 ${confidence}%`}</span></div></div>
       <dl class="parsed-preview"><div><dt>得意先</dt><dd>${escapeHtml(parsed.customer || "未読取")}</dd></div><div><dt>品名</dt><dd>${escapeHtml(parsed.product || "未読取")}</dd></div><div><dt>大分類</dt><dd>${escapeHtml(parsed.category || classifyProductCategory(parsed.product) || "要確認")}</dd></div><div><dt>納期</dt><dd>${escapeHtml(parsed.dueDate || "未読取")}</dd></div><div><dt>数量</dt><dd>${escapeHtml(parsed.quantity || "未読取")}</dd></div></dl>
       <button class="button button-secondary" type="button" data-intake-id="${escapeHtml(item.id)}">内容を確認する</button>
     </article>`;
@@ -3699,7 +4123,12 @@ function renderSettings() {
   qs("#settings-context").textContent = isWorkerUser() ? "この端末の表示" : "接続と移行";
   qs("#settings-title").textContent = isWorkerUser() ? "表示設定" : "運用設定";
   renderAccessSettings();
-  if (state.settings.gmailQuery) qs("#gmail-query").value = state.settings.gmailQuery;
+  const query = qs("#gmail-query");
+  const savedQuery = state.settings.gmailQuery;
+  if (isOwnerUser() && typeof savedQuery === "string" && query.defaultValue !== savedQuery) {
+    if (query.value === query.defaultValue) query.value = savedQuery;
+    query.defaultValue = savedQuery;
+  }
   renderStageAssigneeSettings();
   const editorLink = qs("#script-editor-link");
   const validEditorUrl = /^https:\/\/script\.google\.com\/home\/projects\/[A-Za-z0-9_-]+\/edit$/.test(state.scriptEditorUrl);
@@ -3713,15 +4142,19 @@ function renderSettings() {
 function handleAccessRequired() {
   state.accessRevoked = true;
   updateAutoSyncTimer();
+  deferredReads.clear();
+  state.jobHistoryReady = true;
   state.jobs = [];
   state.intake = [];
+  state.aiImport = { ready: false, configured: false };
   state.settings = {};
   state.accessSettings = null;
   state.accessSettingsDraft = null;
   state.access = { email: "", isAdmin: false };
   state.materialInventory = null;
-  materialUi?.setSnapshot(null);
+  materialUi?.invalidate();
   finishedStockUi?.clear();
+  castingStockUi?.clear();
   failedOrderDrafts.clear();
   stockFulfillmentAttempts.clear();
   failedProcessDrafts.clear();
@@ -3756,11 +4189,45 @@ function accessSettingsError(error) {
 function renderAccessSettingsRows() {
   const currentEmail = String(state.access.email || "").toLowerCase();
   const protectedSelf = !isOwnerUser() && accessRole() === "admin" ? currentEmail : "";
+  const savedEmails = new Set(usersFromAccessSettings(state.accessSettings || {}).map((user) => user.email));
   qs("#access-users").innerHTML = (state.accessSettingsDraft || []).map((user, index) => {
     const protectedRow = Boolean(protectedSelf && user.email === protectedSelf);
     const options = ROLE_OPTIONS.map(({ value, label }) => `<option value="${value}" ${user.role === value ? "selected" : ""}>${label}</option>`).join("");
-    return `<div class="access-user-row" data-access-user-row="${index}"><label class="field"><span>Googleアカウントのメールアドレス</span><input type="email" data-access-email value="${escapeHtml(user.email)}" maxlength="254" autocomplete="off" required ${protectedRow ? "readonly" : ""}></label><label class="field"><span>権限</span><select data-access-role ${protectedRow ? "disabled" : ""}>${options}</select></label><button class="button button-quiet access-user-remove" type="button" data-action="remove-access-user" aria-label="${escapeHtml(user.email || `アカウント${index + 1}`)}を削除" ${protectedRow ? "disabled title='自分の管理者権限は変更できません'" : ""}>削除</button></div>`;
+    const revoke = savedEmails.has(user.email) ? `<button class="button button-quiet" type="button" data-action="open-revoke-access" data-email="${escapeHtml(user.email)}" aria-label="${escapeHtml(user.email)}の端末認証を解除">端末認証を解除</button>` : "";
+    return `<div class="access-user-row" data-access-user-row="${index}"><label class="field"><span>Googleアカウントのメールアドレス</span><input type="email" data-access-email value="${escapeHtml(user.email)}" maxlength="254" autocomplete="off" required ${protectedRow ? "readonly" : ""}></label><label class="field"><span>権限</span><select data-access-role ${protectedRow ? "disabled" : ""}>${options}</select></label><div class="access-user-actions">${revoke}<button class="button button-quiet" type="button" data-action="remove-access-user" aria-label="${escapeHtml(user.email || `アカウント${index + 1}`)}を削除" ${protectedRow ? "disabled title='自分の管理者権限は変更できません'" : ""}>削除</button></div></div>`;
   }).join("") || `<p class="access-user-empty">許可されたアカウントはありません。</p>`;
+}
+
+function openRevokeAccess(button) {
+  if (!isAdminUser() || state.accessSettingsSaving) return;
+  const email = button.dataset.email;
+  const row = button.closest("[data-access-user-row]");
+  if (!row || qs("[data-access-email]", row).value.trim().toLowerCase() !== email) {
+    showToast("アカウントの変更を保存してから端末認証を解除してください。", { tone: "error" });
+    return;
+  }
+  const dialog = qs("#revoke-access-dialog");
+  dialog.dataset.email = email;
+  qs("#revoke-access-email").textContent = email;
+  openDialog(dialog, "[data-action='close-revoke-access']");
+}
+
+async function confirmRevokeAccess(button) {
+  const dialog = qs("#revoke-access-dialog");
+  if (!dialog.open || !isAdminUser() || button.disabled) return;
+  const email = dialog.dataset.email;
+  button.disabled = true;
+  button.textContent = "解除しています…";
+  try {
+    await api.revokeRememberedAccess({ email });
+    if (dialog.open) closeDialog(dialog);
+    showToast("端末認証を解除しました。", { tone: "success" });
+  } catch (error) {
+    showToast(accessSettingsError(error), { tone: "error" });
+  } finally {
+    button.disabled = false;
+    button.textContent = "端末認証を解除";
+  }
 }
 
 function renderAccessSettings() {
@@ -3817,8 +4284,11 @@ async function saveAccessSettings(event) {
 
 async function reloadAccessSettings() {
   if (state.accessSettingsSaving) return;
+  const revision = ++state.accessSettingsRevision;
   try {
-    state.accessSettings = await api.getAccessSettings();
+    const response = await api.getAccessSettings();
+    if (state.accessRevoked || !isAdminUser() || revision !== state.accessSettingsRevision) return;
+    state.accessSettings = response;
     state.accessSettingsDraft = usersFromAccessSettings(state.accessSettings);
     state.accessSettingsDirty = false;
     qs("#access-settings-status").textContent = "保存済みの設定を読み込みました。";
@@ -3939,6 +4409,7 @@ function placeLedgerNavigation(view) {
 function switchView(view) {
   if (view === "shipping") view = "completed";
   if (!canAccessView(view)) view = isWorkerUser() ? "orders" : "dashboard";
+  if (view !== state.activeView) dialogOpenRevision += 1;
   state.activeView = view;
   placeLedgerNavigation(view);
   document.body.classList.toggle("is-ledger-view", ["orders", "shipping", "completed"].includes(view));
@@ -3962,6 +4433,8 @@ function switchView(view) {
   qs("[data-action='toggle-nav']").setAttribute("aria-expanded", "false");
   qs("#main-content").focus({ preventScroll: true });
   window.scrollTo({ top: 0, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  const section = deferredSectionForView(view);
+  if (section) void loadDeferredData(section);
   renderActiveView();
   if (["orders", "shipping", "completed"].includes(view)) applyLedgerScale(state.ledgerDisplay.scale, { mode: state.ledgerDisplay.mode, persist: false });
   scheduleLedgerLayout();
@@ -3992,6 +4465,7 @@ function showShipping() {
 }
 
 function openDialog(dialog, initialFocusSelector = "") {
+  dialogOpenRevision += 1;
   dialog._returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   qsa("body > header, body > main, body > footer").forEach((element) => { element.inert = true; });
   dialog.showModal();
@@ -4004,6 +4478,7 @@ function openDialog(dialog, initialFocusSelector = "") {
 let pendingDiscardDialog = null;
 
 function dialogEditSnapshot(dialog) {
+  if (dialog.id === "casting-stock-dialog") return castingStockUi?.editSnapshot();
   if (dialog.id === "process-dialog") {
     const value = processFromForm(qs("#process-form"));
     return processEditSnapshot(value);
@@ -4023,6 +4498,12 @@ function processEditSnapshot(job) {
 
 function dialogHasUnsavedEdits(dialog) {
   return dialog._editBaseline != null && dialogEditSnapshot(dialog) !== dialog._editBaseline;
+}
+
+function confirmPageUnload(event) {
+  if (!backgroundOperations.size && !materialUi?.hasUnsavedNotes() && !qsa("dialog[open]").some(dialogHasUnsavedEdits)) return;
+  event.preventDefault();
+  event.returnValue = "";
 }
 
 function confirmDiscardEdits() {
@@ -4045,6 +4526,9 @@ function savePendingDialogEdits() {
   } else if (target.id === "order-dialog") {
     form = qs("#order-form");
     if (!canEdit() || jobMutationPending(form.elements.id.value)) return;
+  } else if (target.id === "casting-stock-dialog") {
+    form = qs("#casting-stock-form");
+    if (!canWork() || castingStockUi?.isSaving()) return;
   } else return;
   const warning = qs("#discard-dialog");
   warning._returnFocus = null;
@@ -4058,6 +4542,7 @@ function closeDialog(dialog, { force = false } = {}) {
     else finishedStockUi?.close();
     return;
   }
+  if (!force && dialog.id === "casting-stock-dialog" && castingStockUi?.isSaving()) return;
   if (!force && dialog.id === "order-dialog" && pendingJobMutations.has(qs("#order-form").elements.id.value)) return;
   if (dialog.id === "bulk-intake-dialog" && bulkIntakeBusy) return;
   if (dialog.id === "intake-dialog" && (intakeDeleteBusy || intakeApproveBusy)) return;
@@ -4329,24 +4814,31 @@ function processFormFinishDone() {
   return Boolean(finish && qs(".stage-control.is-selected", finish)?.dataset.status === "done");
 }
 
+function processInShippingQueue(form) {
+  return ["completed", "shipping"].includes(state.activeView) && matchesJobScope(form._editJob || form._jobBase || {}, "shipping");
+}
+
 function renderProcessLifecycleAction() {
   const form = qs("#process-form");
   const button = qs("#process-lifecycle-action");
   const note = qs("#process-lifecycle-note");
   const shipped = form.dataset.shippingStatus === "shipped";
   const ready = processFormFinishDone() && polishingFinishReady(form._jobBase || {});
+  const inQueue = processInShippingQueue(form);
   const doneCount = qsa(".stage-control[data-status='done'].is-selected", form).length;
   qs("#process-progress").textContent = `${doneCount} / ${STAGES.length}工程 完了`;
-  button.hidden = !canEdit();
-  button.disabled = !canEdit() || (!shipped && !ready);
-  button.setAttribute("aria-disabled", String(!shipped && !ready));
+  button.hidden = !canEdit() || (!shipped && !inQueue);
+  button.disabled = button.hidden || (!shipped && !ready);
+  button.setAttribute("aria-disabled", String(button.disabled));
   button.dataset.action = shipped ? "reopen-order" : "complete-order";
   button.dataset.tone = shipped ? "reopen" : "complete";
   qs("span", button).textContent = shipped ? "出荷待ちへ戻す" : "出荷完了・終了へ";
-  note.textContent = shipped
-    ? "完成品リストの出荷済みに保存済みです。戻すと上の出荷待ちへ移動します。"
-    : ready ? canEdit() ? "出荷完了にすると完成品リストの出荷済みへ移動します。" : "保存すると完成品リストの出荷待ちへ移動します。出荷は編集者以上が行います。"
-      : !polishingFinishReady(form._jobBase || {}) ? "最終仕上げの完了は、研磨から全数戻った後に操作できます。" : "最終仕上げを完了して保存すると、出荷待ちへ移動します。";
+  if (shipped) note.textContent = "完成品リストの出荷済みに保存済みです。戻すと上の出荷待ちへ移動します。";
+  else if (!polishingFinishReady(form._jobBase || {})) note.textContent = "最終仕上げの完了は、研磨から全数戻った後に操作できます。";
+  else if (!ready) note.textContent = "最終仕上げを完了して保存すると、出荷待ちへ移動します。";
+  else if (inQueue) note.textContent = "出荷完了にすると完成品リストの出荷済みへ移動します。";
+  else if (isDone(form._editJob || form._jobBase || {})) note.textContent = "完成品リストの出荷待ちから出荷を記録できます。";
+  else note.textContent = "最終仕上げを保存すると、完成品リストの出荷待ちへ移動します。";
 }
 
 function saveFailureKind(error) {
@@ -4422,9 +4914,10 @@ async function refreshFailedDraft(kind, id) {
   if (qs("dialog[open]") || state.accessRevoked) return;
   const draft = drafts.get(id);
   if (!draft || (kind === "order" ? !canEdit() : !canWork())) return;
+  const revision = ++dialogOpenRevision;
   const before = appliedSnapshotRevision;
   await refreshData();
-  if (state.accessRevoked || qs("dialog[open]") || !drafts.has(id)) return;
+  if (revision !== dialogOpenRevision || state.accessRevoked || qs("dialog[open]") || !drafts.has(id)) return;
   if (appliedSnapshotRevision === before) { showToast("最新情報を取得できませんでした。「今すぐ更新」後に入力内容を開いてください。", { tone: "error" }); return; }
   const latest = state.jobs.find(job => job.id === id);
   if (!latest || latest.archived || (kind === "process" && !canWorkOnJob(latest))) {
@@ -4434,6 +4927,13 @@ async function refreshFailedDraft(kind, id) {
   if (draft.failureKind === "blocked") { draft.failureKind = "conflict"; draft.failedAtRevision = before; }
   if (kind === "order") openOrderDialog(latest);
   else openProcessDialog(latest);
+}
+
+function resizeOrderNote(form) {
+  const field = form.elements.note;
+  if (window.CSS?.supports("field-sizing", "content") || !field?.offsetWidth) return;
+  field.style.height = "auto";
+  field.style.height = `${field.scrollHeight + field.offsetHeight - field.clientHeight}px`;
 }
 
 function openOrderDialog(job = null) {
@@ -4485,7 +4985,11 @@ function openOrderDialog(job = null) {
   if (draft?.failureKind === "conflict") {
     const mine = Object.fromEntries(Object.keys(form._baseFields).map(key => [key, draft.values[key] ?? ""]));
     const analysis = rebaseEditFields(draft.baseFields || Object.fromEntries(JSON.parse(draft.baseline)), mine, form._baseFields);
-    const apply = (key, value) => { if (form.elements[key]) form.elements[key].value = value; updateFinishedStockOrderSummary(form); };
+    const apply = (key, value) => {
+      if (form.elements[key]) form.elements[key].value = value;
+      if (key === "note") resizeOrderNote(form);
+      updateFinishedStockOrderSummary(form);
+    };
     Object.entries(analysis.values).forEach(([key, value]) => apply(key, value));
     form._saveAttempt = null;
     showEditRecovery(form, analysis, apply);
@@ -4503,6 +5007,7 @@ function openOrderDialog(job = null) {
   }
   updateFinishedStockOrderSummary(form);
   openDialog(qs("#order-dialog"), form._unresolvedRecovery?.size ? "[data-recovery-field]" : "[name='customer']");
+  resizeOrderNote(form);
   if (draft?.failureKind === "conflict") qs("[data-edit-recovery]", form)?.scrollIntoView({ block: "start" });
 }
 
@@ -4615,7 +5120,7 @@ function orderFromForm(form) {
   let productLabelRule;
   if (labelValue !== (form._labelKeywordsBase || "") || productKeywordsChanged) {
     productLabelRule = {mode:labelValue !== (form._labelKeywordsBase || "") ? labelValue ? "manual" : "auto" : "manual",keywords:labelValue !== (form._labelKeywordsBase || "") ? inputKeywords : productKeywords,expectedRules:form._labelRulesBase || {}};
-    values.product = normalizeProductText(values.product).replace(/アリジ|白銅|ウスイ/g, "").replace(/\s*[・/]\s*$/g, "").replace(/\s+/g, " ").trim();
+    values.product = normalizeProductText(values.product).replace(PRODUCT_LABEL_KEYWORD_PATTERN, "").replace(/\s*[・/]\s*$/g, "").replace(/\s+/g, " ").trim();
   }
   return {
     ...values,
@@ -4646,8 +5151,8 @@ async function saveOrder(event) {
   try { order.stockPlannedQuantity = validateFinishedStockPlan(order, state.jobs.find((job) => job.id === order.id)); }
   catch (error) { showToast(error.message, { tone: "error" }); form.elements.stockPlannedQuantity?.focus(); return; }
   const labelValue = form.elements.labelKeywords.value;
-  if (normalizeProductText(labelValue).replace(/アリジ|白銅|ウスイ|[・,、/\s]/g, "")) {
-    showToast("材料表示はｱﾘｼﾞ・白銅・ｳｽｲで入力してください。", {tone:"error"});
+  if (normalizeProductText(labelValue).replace(PRODUCT_LABEL_KEYWORD_PATTERN, "").replace(/[・,、/\s]/g, "")) {
+    showToast(`材料表示は${PRODUCT_LABEL_KEYWORDS.join("・")}で入力してください。`, {tone:"error"});
     form.elements.labelKeywords.focus(); return;
   }
   const previous = state.jobs.find((job) => job.id === order.id);
@@ -4695,7 +5200,7 @@ async function saveOrder(event) {
     renderAll();
     showToast(`案件を保存できませんでした。入力内容は残しています。${error.message}`, {
       tone: "error", sticky: true, action: { label: "入力内容を開く", run: () => {
-        if (qs("dialog[open]")) { showToast("編集中の画面を閉じてから入力内容を開いてください。"); return; }
+        if (qs("dialog[open]")) { showToast("編集中の画面を閉じてから入力内容を開いてください。"); return false; }
         if (failedOrderDrafts.has(order.id)) openOrderDialog(state.jobs.find((job) => job.id === order.id) || previous || order);
       } },
     });
@@ -4788,7 +5293,7 @@ async function saveProcess(event) {
       action: { label: "入力内容を開く", run: () => {
         if (qs("dialog[open]")) {
           showToast("編集中の画面を閉じてから、保存できなかった案件を開いてください。入力内容を復元できます。");
-          return;
+          return false;
         }
         if (failedProcessDrafts.has(order.id)) openProcessDialog(state.jobs.find((job) => job.id === order.id) || previous);
       } },
@@ -4864,7 +5369,10 @@ function handleSelectedFile(file) {
   state.selectedFile = file || null;
   const preview = qs("#file-preview");
   const upload = qs("[data-action='upload-image']");
+  const previousUrl = qs("img", preview)?.getAttribute("src");
+  if (previousUrl) URL.revokeObjectURL(previousUrl);
   if (!file) {
+    qs("#image-input").value = "";
     preview.hidden = true;
     preview.innerHTML = "";
     upload.disabled = true;
@@ -4878,7 +5386,7 @@ function handleSelectedFile(file) {
   } else {
     preview.innerHTML = `<p>${escapeHtml(file.name)} · ${size}</p>`;
   }
-  upload.disabled = false;
+  upload.disabled = state.importRunning;
 }
 
 async function fileToPayload(file) {
@@ -4939,8 +5447,20 @@ async function extractPdfTextInBrowser(file) {
 }
 
 async function createIntakeFromSelectedFile(file) {
-  if (qs("#import-engine").value === "ai") {
+  const engine = qs("#import-engine").value;
+  if (engine === "ai") {
     return api.createIntakeWithAi(await fileToPayload(file));
+  }
+  if (engine === "auto") {
+    const payload = await fileToPayload(file);
+    if (isAppsScript && file.type === "application/pdf") {
+      try {
+        const pdfjs = await waitForPdfJs();
+        const pdfText = await PdfIntakeText.extractComplete(pdfjs, new Uint8Array(await file.arrayBuffer()));
+        if (pdfText) payload.pdfText = pdfText;
+      } catch { /* The server reads the original PDF when extraction is uncertain. */ }
+    }
+    return api.createIntakeAutomatically(payload);
   }
   if (isAppsScript && file.type === "application/pdf") {
     try {
@@ -4955,10 +5475,33 @@ async function createIntakeFromSelectedFile(file) {
   return api.createIntakeFromImage(await fileToPayload(file));
 }
 
+function setImportRunning(running) {
+  state.importRunning = running;
+  qsa("#text-import-form button[type='submit'], [data-action='scan-email'], [data-action='diagnose-ai']").forEach((button) => {
+    button.disabled = running;
+  });
+  qs("[data-action='upload-image']").disabled = running || !state.selectedFile;
+}
+
+async function finishOrderImport(panel, revision, message, file = null) {
+  await refreshIntakeAfterImport();
+  if (!canEdit() || state.accessRevoked) return;
+  const dialog = qs("#import-dialog");
+  const sameSelection = !file || state.selectedFile === file;
+  if (file && sameSelection) handleSelectedFile(null);
+  if (sameSelection && dialog.open && revision === dialogOpenRevision && !qs(`#import-${panel}-panel`).hidden) {
+    closeDialog(dialog);
+    switchView("intake");
+    announce(message);
+  } else {
+    showToast(message, { tone: "success" });
+  }
+}
+
 async function importPastedText(event) {
   event.preventDefault();
   if (!canEdit()) return;
-  if (state.textImportRunning || state.aiDiagnosticRunning) return;
+  if (state.importRunning) return;
   const form = event.currentTarget;
   const errorBox = qs("#text-import-error");
   errorBox.hidden = true;
@@ -4971,10 +5514,11 @@ async function importPastedText(event) {
   if (!form.reportValidity()) return;
   const name = qs("#text-import-subject").value.trim();
   const engine = qs("#text-import-engine").value;
-  state.textImportRunning = true;
+  const revision = dialogOpenRevision;
   const controls = [...form.elements];
   const disabledStates = controls.map((control) => control.disabled);
   const button = qs("button[type='submit']", form);
+  setImportRunning(true);
   controls.forEach((control) => { control.disabled = true; });
   setButtonState(button, "loading", "本文を読取中");
   try {
@@ -4982,25 +5526,22 @@ async function importPastedText(event) {
     // Clear only after successful registration; preserve pasted text on any failure.
     qs("#text-import-body").value = "";
     qs("#text-import-subject").value = "";
-    closeDialog(qs("#import-dialog"));
-    await refreshData({ quiet: true });
-    switchView("intake");
-    announce(`${result.added}件を確認待ちへ追加しました。全品目・数量・納期を確認してください。`);
+    await finishOrderImport("text", revision, `${result.added}件を確認待ちへ追加しました。全品目・数量・納期を確認してください。`);
   } catch (error) {
     errorBox.textContent = String(error.message || error).replace(/^Error:\s*/, "");
     errorBox.hidden = false;
     if (qs("#import-dialog").open) errorBox.scrollIntoView({ block: "nearest" });
   } finally {
-    state.textImportRunning = false;
     setButtonState(button, null, "本文を読み取る");
     controls.forEach((control, index) => { control.disabled = disabledStates[index]; });
+    setImportRunning(false);
   }
 }
 
 async function diagnoseAi(button) {
   if (!isOwnerUser()) return;
-  if (state.aiDiagnosticRunning || state.textImportRunning) return;
-  state.aiDiagnosticRunning = true;
+  if (state.importRunning) return;
+  setImportRunning(true);
   const output = qs("#ai-diagnostic-result");
   output.hidden = false;
   const lines = [];
@@ -5027,50 +5568,55 @@ async function diagnoseAi(button) {
   } catch (error) {
     output.textContent = lines.concat(`${current}: 停止`, String(error.message || error).replace(/^Error:\s*/, ""), "後続テスト・自動再試行は行っていません。この診断結果を管理者へお知らせください。").join("\n");
   } finally {
-    state.aiDiagnosticRunning = false;
     setButtonState(button, null, "注文書を送らず接続診断");
+    setImportRunning(false);
     if (qs("#import-dialog").open) output.scrollIntoView({ block: "nearest" });
   }
 }
 
 async function uploadImage(button) {
   if (!canEdit()) return;
-  if (state.aiDiagnosticRunning || state.textImportRunning) return;
-  if (!state.selectedFile) return;
+  const file = state.selectedFile;
+  if (state.importRunning || !file) return;
+  const revision = dialogOpenRevision;
+  setImportRunning(true);
   qs("#file-import-error").hidden = true;
   setButtonState(button, "loading", "PDF・画像を読取中");
   try {
-    const result = await createIntakeFromSelectedFile(state.selectedFile);
-    closeDialog(qs("#import-dialog"));
-    handleSelectedFile(null);
-    await refreshData({ quiet: true });
-    switchView("intake");
-    announce(`${result?.added || 1}件を取込キューへ追加しました`);
+    const result = await createIntakeFromSelectedFile(file);
+    await finishOrderImport("image", revision, `「${file.name}」から${result?.added ?? 1}件を取込キューへ追加しました。`, file);
   } catch (error) {
-    const errorMessage = `PDF・画像を読み取れませんでした。${String(error.message || error).replace(/^Error:\s*/, "")}`;
-    qs("#file-import-error").textContent = errorMessage;
-    qs("#file-import-error").hidden = false;
-    qs("#file-import-error").scrollIntoView({ block: "nearest" });
+    if (!canEdit() || state.accessRevoked) return;
+    const errorMessage = `「${file.name}」を読み取れませんでした。${String(error.message || error).replace(/^Error:\s*/, "")}`;
+    const current = state.selectedFile === file;
+    if (current) {
+      qs("#file-import-error").textContent = errorMessage;
+      qs("#file-import-error").hidden = false;
+    }
+    if (current && qs("#import-dialog").open && revision === dialogOpenRevision && !qs("#import-image-panel").hidden) {
+      qs("#file-import-error").scrollIntoView({ block: "nearest" });
+    } else showToast(errorMessage, { tone: "error" });
   } finally {
     setButtonState(button, null, "PDF・画像を読み取る");
+    setImportRunning(false);
   }
 }
 
 async function scanEmails(button) {
   if (!isOwnerUser()) return;
-  if (state.aiDiagnosticRunning || state.textImportRunning) return;
+  if (state.importRunning) return;
+  const revision = dialogOpenRevision;
+  setImportRunning(true);
   setButtonState(button, "loading", "受注メールを検索中");
   try {
-    const result = await api.scanOrderEmails({ query: qs("#gmail-query").value, maxThreads: 20, engine: qs("#import-engine").value });
-    closeDialog(qs("#import-dialog"));
-    await refreshData({ quiet: true });
-    switchView("intake");
-    announce(`${result.added || 0}件を取込キューへ追加しました`);
+    const result = await api.scanOrderEmails({ engine: qs("#import-engine").value });
+    await finishOrderImport("email", revision, `${result.added || 0}件を取込キューへ追加しました`);
     if (result.warnings?.length) showToast(result.warnings.join(" / "), { tone: "warning" });
   } catch (error) {
     showToast(error.message, { tone: "error" });
   } finally {
     setButtonState(button, null, "受注メールを検索");
+    setImportRunning(false);
   }
 }
 
@@ -5095,10 +5641,11 @@ let intakeLearningBusy = false;
 function intakeLearningFeedback(item) {
   const learning = item?.parsed?._learning;
   const warnings = Array.isArray(item?.parsed?._parseWarnings) ? item.parsed._parseWarnings : [];
-  if (!learning?.message && !warnings.length) return "";
+  const memoryMessage = item?.parsed?._memory ? "覚えた製品情報を使い、AIなしで読み取りました。数量・納期は今回の原文と確認してください。" : "";
+  if (!learning?.message && !warnings.length && !memoryMessage) return "";
   const tone = warnings.length || ["conflict", "ambiguous"].includes(learning?.status) ? "warning" : "";
   const fields = (learning?.fields || []).map((field) => INTAKE_LEARNING_FIELD_LABELS[field] || (field === "note" ? "備考" : field));
-  return `<div class="intake-learning-feedback" data-tone="${tone}">${warnings.length ? `<strong>読取結果を確認してください</strong><ul>${warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>` : ""}${learning?.message ? `<p>${escapeHtml(learning.message)}${fields.length ? ` 補完した項目：${escapeHtml(fields.join("・"))}` : ""}</p>` : ""}</div>`;
+  return `<div class="intake-learning-feedback" data-tone="${tone}">${memoryMessage ? `<p>${memoryMessage}</p>` : ""}${warnings.length ? `<strong>読取結果を確認してください</strong><ul>${warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>` : ""}${learning?.message ? `<p>${escapeHtml(learning.message)}${fields.length ? ` 補完した項目：${escapeHtml(fields.join("・"))}` : ""}</p>` : ""}</div>`;
 }
 
 const INTAKE_LEARNING_FIELD_LABELS = {
@@ -5116,7 +5663,7 @@ function renderIntakeLearningRules(rules = []) {
   status.textContent = `覚えた補完 ${rules.length}件。解除しても案件や取込候補は変わりません。`;
   list.innerHTML = rules.map((rule) => {
     const target = rule.target || {};
-    const fields = (rule.fields || []).map((key) => [INTAKE_LEARNING_FIELD_LABELS[key] || key, target[key]]).filter(([, value]) => value !== undefined && value !== "");
+    const fields = (rule.confirmed ? Object.keys(INTAKE_LEARNING_FIELD_LABELS) : rule.fields || []).map((key) => [INTAKE_LEARNING_FIELD_LABELS[key] || key, target[key]]).filter(([, value]) => value !== undefined && value !== "");
     if (rule.note) fields.push(["共通の備考", rule.note]);
     const evidenceId = rule.intakeId || "";
     const details = fields.length
@@ -5357,6 +5904,25 @@ function bulkOrderError(order) {
   return "";
 }
 
+function createBulkIntakeDraft(item) {
+  const parsed = item.parsed || {};
+  const inferred = inferOrderMetadata(parsed.product);
+  const autoFields = Object.keys(inferred).filter((key) =>
+    (!parsed[key] || parsed[key] === inferred[key]) && !parsed._learning?.fields?.includes(key));
+  const order = { ...parsed, ...inferOrderMetadata(parsed.product, parsed), stockPlannedQuantity: 0 };
+  return { item, order, autoFields: new Set(autoFields), selected: true, error: "" };
+}
+
+function editBulkIntakeField(draft, key, value) {
+  draft.order[key] = value;
+  if (key === "product") {
+    const inferred = inferOrderMetadata(value);
+    for (const field of draft.autoFields) draft.order[field] = inferred[field];
+  } else {
+    draft.autoFields.delete(key);
+  }
+}
+
 function openBulkIntake() {
   if (!canEdit()) return;
   if (bulkIntakeBusy || intakeDeleteBusy) { showToast("取込候補を反映中です。他の画面は操作できます。"); return; }
@@ -5364,15 +5930,15 @@ function openBulkIntake() {
   cancelCustomerCommand();
   const pending = new Set(state.intake.map((item) => item.id));
   for (const id of bulkIntakeDrafts.keys()) if (!pending.has(id)) bulkIntakeDrafts.delete(id);
+  if (!bulkIntakeDrafts.size) {
+    qs("#bulk-intake-learn-product").checked = true;
+    qs("#bulk-intake-learn-note").checked = false;
+  }
   state.intake.forEach((item) => {
     if (bulkIntakeDrafts.has(item.id)) return;
-    const parsed = item.parsed || {};
-    const order = { ...parsed, ...inferOrderMetadata(parsed.product, parsed), stockPlannedQuantity: 0 };
-    bulkIntakeDrafts.set(item.id, { item, order, selected: true, error: "" });
+    bulkIntakeDrafts.set(item.id, createBulkIntakeDraft(item));
   });
   qs("#bulk-intake-result").textContent = "";
-  qs("#bulk-intake-learn-product").checked = true;
-  qs("#bulk-intake-learn-note").checked = false;
   updateIntakeLearningOptions();
   renderBulkIntake();
   openDialog(qs("#bulk-intake-dialog"), "#bulk-intake-all");
@@ -5393,7 +5959,7 @@ function intakeDuplicateMarkup(duplicate, intakeId, bulk, decision = null) {
           <dt>得意先</dt><dd>${escapeHtml(match.customer)}</dd><dt>連番</dt><dd>${escapeHtml(match.serialNo || "空欄")}</dd>
           <dt>品名</dt><dd>${escapeHtml(match.product || "未設定")}</dd><dt>数量</dt><dd>${escapeHtml(match.quantity ?? "未設定")}</dd><dt>納期</dt><dd>${escapeHtml(match.dueDate || "未設定")}</dd>
           ${match.externalOrderNo ? `<dt>外部注文番号 / 明細番号</dt><dd>${escapeHtml(match.externalOrderNo)} / ${escapeHtml(match.externalLineNo || "空欄")}</dd>` : ""}</dl>
-          ${match.kind === "job" && state.jobs.some((job) => job.id === match.id) ? `<button class="button button-secondary" type="button" data-action="review-duplicate-job" data-order-id="${escapeHtml(match.id)}">案件の工程・履歴を開く</button>` : ""}
+          ${match.kind === "job" && (!state.jobHistoryReady || state.jobs.some((job) => job.id === match.id)) ? `<button class="button button-secondary" type="button" data-action="review-duplicate-job" data-order-id="${escapeHtml(match.id)}">案件の工程・履歴を開く</button>` : ""}
         </details></li>`;
     }).join("")}</ul>
     <div class="dialog-actions"><button class="button button-quiet" type="button" data-action="skip-duplicate-intake" ${attrs}>今回の候補を反映しない</button>
@@ -5769,16 +6335,32 @@ async function confirmIntakeDeletion() {
   }
 }
 
-async function saveSettings(button) {
-  if (!isOwnerUser()) return;
+async function saveGmailQuery(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = qs('[type="submit"]', form);
+  if (!isOwnerUser() || button.disabled) return;
+  const input = form.elements.gmailQuery;
+  const submitted = input.value;
+  const status = qs("#gmail-query-status");
+  if (!submitted.trim()) {
+    input.setCustomValidity("Gmail検索式を入力してください。");
+    input.reportValidity();
+    return;
+  }
+  status.textContent = "";
   setButtonState(button, "loading", "保存中");
   try {
-    state.settings = await api.saveSettings({ gmailQuery: qs("#gmail-query").value.trim() });
-    setButtonState(button, "success", "保存済み");
-    setTimeout(() => setButtonState(button, null, "検索条件を保存"), 1800);
+    const saved = await api.saveSettings({ gmailQuery: submitted.trim() });
+    if (state.accessRevoked || !isOwnerUser()) return;
+    state.settings.gmailQuery = saved.gmailQuery;
+    if (input.value === submitted) input.value = saved.gmailQuery;
+    input.defaultValue = saved.gmailQuery;
+    status.textContent = input.value === input.defaultValue ? "検索条件を保存しました。" : "検索条件を保存しました。続けて入力した変更は未保存です。";
   } catch (error) {
-    setButtonState(button, "error", "保存できません");
-    showToast(error.message, { tone: "error" });
+    if (!state.accessRevoked && isOwnerUser()) status.textContent = `検索条件を保存できませんでした。入力を確認して再試行してください。${error.message}`;
+  } finally {
+    setButtonState(button, null, "検索条件を保存");
   }
 }
 
@@ -5937,7 +6519,10 @@ function bindEvents() {
         nav.classList.toggle("is-open");
         button.setAttribute("aria-expanded", String(nav.classList.contains("is-open")));
       },
-      "open-import": () => openDialog(qs("#import-dialog")),
+      "open-import": () => {
+        void loadDeferredData("intake");
+        openDialog(qs("#import-dialog"));
+      },
       "close-import-dialog": () => closeDialog(qs("#import-dialog")),
       "open-intake-learning": () => openIntakeLearning(),
       "close-intake-learning": () => closeDialog(qs("#intake-learning-dialog")),
@@ -5950,6 +6535,9 @@ function bindEvents() {
       "confirm-label-printed": () => confirmLabelsPrinted(button),
       "confirm-selected-labels": () => confirmLabelsPrinted(button, { selected: true }),
       "new-order": () => openOrderDialog(),
+      "open-revoke-access": () => openRevokeAccess(button),
+      "close-revoke-access": () => closeDialog(qs("#revoke-access-dialog")),
+      "confirm-revoke-access": () => confirmRevokeAccess(button),
       "remove-access-user": () => {
         const row = button.closest("[data-access-user-row]");
         if (!row || !isAdminUser() || !state.accessSettingsDraft) return;
@@ -5965,7 +6553,10 @@ function bindEvents() {
       "close-process-dialog": () => closeDialog(qs("#process-dialog")),
       "delete-order": () => deleteOrder(button),
       "close-intake-dialog": () => closeDialog(qs("#intake-dialog")),
-      "review-duplicate-job": () => openLedgerDetails(state.jobs.find((job) => job.id === button.dataset.orderId)),
+      "review-duplicate-job": async () => {
+        const job = await findJobWithHistory(button.dataset.orderId);
+        if (button.isConnected && button.closest("dialog")?.open) openLedgerDetails(job);
+      },
       "confirm-separate-intake": () => setSeparateIntakeDecision(button),
       "cancel-separate-intake": () => setSeparateIntakeDecision(button, true),
       "skip-duplicate-intake": () => skipDuplicateIntake(button),
@@ -5984,6 +6575,13 @@ function bindEvents() {
       "add-customer-rule": () => { if (!customerRulesBusy) appendCustomerRuleRow(); },
       "remove-customer-rule": () => { if (!customerRulesBusy) button.closest(".customer-rule-row").remove(); },
       "refresh": () => refreshData(),
+      "retry-view-data": () => {
+        const section = deferredSectionForView(state.activeView);
+        if (!section) return;
+        qs("#main-content").focus({ preventScroll: true });
+        void loadDeferredData(section);
+        renderActiveView();
+      },
       "show-all-orders": () => showOrders(),
       "show-production-orders": () => showOrders({ attention: "production" }),
       "show-due-orders": () => showOrders({ attention: "due" }),
@@ -5997,6 +6595,7 @@ function bindEvents() {
       "clear-filters": () => clearWorkspaceFilters("dashboard"),
       "complete-order": () => {
         const form = qs("#process-form");
+        if (!processInShippingQueue(form)) return;
         if (!processFormFinishDone() || !polishingFinishReady(form._jobBase || {})) {
           announce("研磨の全数戻りを確認し、最終仕上げを完了にしてください");
           return;
@@ -6016,7 +6615,6 @@ function bindEvents() {
       "scan-email": () => scanEmails(button),
       "diagnose-ai": () => diagnoseAi(button),
       "reject-intake": () => requestIntakeDeletion([qs("#intake-form").elements.intakeId.value], false, button),
-      "save-settings": () => saveSettings(button),
       "refresh-product-master": () => refreshProductMaster(button),
       "copy-polishing-rates": () => copyPreviousPolishingRates(),
       "discard-polishing-rates": () => { if (!state.polishingRatesSaving) { state.polishingRatesDirty = false; state.polishingRatesMessage = ""; renderPolishingBilling(); } },
@@ -6030,8 +6628,18 @@ function bindEvents() {
     actions[action]?.();
   });
 
-  qs("#order-form").addEventListener("submit", saveOrder);
-  qs("#order-form").addEventListener("input", () => updateFinishedStockOrderSummary());
+  const orderForm = qs("#order-form");
+  orderForm.addEventListener("submit", saveOrder);
+  orderForm.addEventListener("input", (event) => {
+    if (event.target === orderForm.elements.note) resizeOrderNote(orderForm);
+    updateFinishedStockOrderSummary(orderForm);
+  });
+  window.addEventListener("resize", () => resizeOrderNote(orderForm));
+  qs("#gmail-settings-form").addEventListener("submit", saveGmailQuery);
+  qs("#gmail-query").addEventListener("input", ({ target }) => {
+    target.setCustomValidity("");
+    qs("#gmail-query-status").textContent = target.value === target.defaultValue ? "" : "未保存の変更があります。";
+  });
   qs("#access-settings-form").addEventListener("submit", saveAccessSettings);
   qs("#access-users").addEventListener("input", (event) => {
     const row = event.target.closest("[data-access-user-row]");
@@ -6103,13 +6711,15 @@ function bindEvents() {
       draft.selected = event.target.checked;
       updateBulkIntakeSelection();
     } else if (event.target.dataset.bulkField) {
-      draft.order[event.target.dataset.bulkField] = event.target.value;
+      const key = event.target.dataset.bulkField;
+      editBulkIntakeField(draft, key, event.target.value);
       const stockSummary = qs("[data-bulk-stock-summary]", row);
       if (stockSummary) stockSummary.textContent = finishedStockQuantitySummary(draft.order.quantity, draft.order.stockPlannedQuantity, draft.order.customer);
       draft.duplicate = null;
       draft.duplicateDecision = null;
       qs(".intake-duplicate-warning", row)?.remove();
-      if (event.target.dataset.bulkField === "product") {
+      if (key === "product") {
+        for (const field of draft.autoFields) qs(`[data-bulk-field="${field}"]`, row).value = draft.order[field];
         const preview = qs("[data-bulk-product-preview]", row);
         preview.textContent = event.target.value;
         preview.hidden = !event.target.value;
@@ -6325,7 +6935,7 @@ function bindEvents() {
     renderDistributionWorkspace();
   });
   qs("#distribution-sort").addEventListener("change", (event) => {
-    state.distributionSort = event.target.value === "customer" ? "customer" : "due";
+    state.distributionSort = event.target.value;
     renderDistributionWorkspace();
   });
 
@@ -6358,13 +6968,10 @@ async function init() {
   applyTheme(state.theme, { persist: false });
   renderSkeletons();
   bindEvents();
-  window.addEventListener("beforeunload", (event) => {
-    if (!backgroundOperations.size) return;
-    event.preventDefault();
-    event.returnValue = "";
-  });
+  window.addEventListener("beforeunload", confirmPageUnload);
   bindLedgerDisplay();
   switchView(state.activeView);
+  prefetchEnabled = true;
   await refreshData();
   if (isAppsScript && !state.accessRevoked && state.mode === "live" && window.AppAccessSession) {
     void window.AppAccessSession.remember().then((result) => {

@@ -52,7 +52,7 @@ test("request response is generic and the resend button unlocks after 60 seconds
   assert.equal(gate.elements["verify-code"].disabled, true);
   gate.calls[0].success({ ok: true });
   await pending;
-  assert.equal(gate.elements["access-status"].textContent, "入力したアドレスが対象の場合、確認コードを送信しました。");
+  assert.equal(gate.elements["access-status"].textContent, "送信のリクエストを受け付けました。受信箱にある最新の確認コードをお使いください。");
   assert.equal(gate.elements["request-code"].disabled, true);
   assert.match(gate.elements["request-code"].textContent, /60 秒/);
   gate.advance(60_001);
@@ -80,7 +80,8 @@ test("request and verification RPCs cannot overlap and payloads capture submitte
   gate.elements.email.value = "first@example.com";
   const request = gate.submit("request-form");
   gate.elements.email.value = "changed@example.com";
-  gate.elements.code.value = "01234567";
+  const code = "AbCd0123".repeat(4);
+  gate.elements.code.value = ` ${code} `;
   await gate.submit("verify-form");
   assert.equal(gate.calls.length, 1);
   assert.deepEqual(JSON.parse(JSON.stringify(gate.calls[0].payload)), { email: "first@example.com" });
@@ -93,7 +94,7 @@ test("request and verification RPCs cannot overlap and payloads capture submitte
   gate.elements.code.value = "76543210";
   await gate.submit("request-form");
   assert.equal(gate.calls.length, 2);
-  assert.deepEqual(JSON.parse(JSON.stringify(gate.calls[1].payload)), { email: "verified@example.com", code: "01234567", openApp: true });
+  assert.deepEqual(JSON.parse(JSON.stringify(gate.calls[1].payload)), { email: "verified@example.com", code, openApp: true });
   gate.calls[1].success({ ok: false });
   await verify;
 });

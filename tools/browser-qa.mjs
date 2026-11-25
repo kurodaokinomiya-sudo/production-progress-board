@@ -194,10 +194,11 @@ try {
       ...source,
       id: "LABEL-QA-10",
       customer: "田中",
-      product: "Yカーブドケリソン 上向",
+      product: "クロワード型椎間板鋭匙鉗子 直 4mm",
+      productMaster: null,
       specLength: "21cm",
-      specShape: "上向",
-      bladeWidth: "3mm",
+      specShape: "直",
+      bladeWidth: "4mm",
       serialNo: "26-1561-1",
       quantity: 10,
       dueDate: "2026-09-30",
@@ -222,7 +223,8 @@ try {
   assert.equal(await page.locator("#label-preview-list .product-label").count(), 9);
   assert.equal(await labelDialog.locator("[data-label-job-id]:disabled").count(), 1);
   const referenceLabel = page.locator("#label-preview-list .product-label").filter({ hasText: "26-1561-1" });
-  assert.deepEqual(await referenceLabel.locator(".label-spec-value").allTextContents(), ["210", "上向", "3mm", "26-1561-1", "10", "09/30"]);
+  assert.equal(await referenceLabel.locator(".label-product-name").textContent(), "クロワード型椎間板鋭匙鉗子 直 4mm");
+  assert.deepEqual(await referenceLabel.locator(".label-spec-value").allTextContents(), ["210", "直", "4mm", "26-1561-1", "10", "09/30"]);
   const previewRows = await referenceLabel.evaluate((element) => ({
     labelHeight: element.getBoundingClientRect().height,
     specHeight: element.querySelector(".label-spec-grid").getBoundingClientRect().height,
@@ -239,10 +241,26 @@ try {
   await page.emulateMedia({ media: "print" });
   const labelPhysicalSize = await page.locator("#label-print-sheet .product-label").first().evaluate((element) => {
     const style = getComputedStyle(element);
-    return { width: parseFloat(style.width), height: parseFloat(style.height) };
+    return {
+      width: parseFloat(style.width),
+      height: parseFloat(style.height),
+      primaryHeight: element.querySelector(".label-primary-row").getBoundingClientRect().height,
+      specNameSize: parseFloat(getComputedStyle(element.querySelector(".label-spec-name")).fontSize),
+      specValueSize: parseFloat(getComputedStyle(element.querySelector(".label-spec-value")).fontSize),
+    };
   });
-  assert.ok(Math.abs(labelPhysicalSize.width * 25.4 / 96 - 150) < 0.2, JSON.stringify(labelPhysicalSize));
-  assert.ok(Math.abs(labelPhysicalSize.height * 25.4 / 96 - 30) < 0.2, JSON.stringify(labelPhysicalSize));
+  assert.ok(Math.abs(labelPhysicalSize.width * 25.4 / 96 - 152) < 0.2, JSON.stringify(labelPhysicalSize));
+  assert.ok(Math.abs(labelPhysicalSize.height * 25.4 / 96 - 32) < 0.2, JSON.stringify(labelPhysicalSize));
+  assert.ok(Math.abs(labelPhysicalSize.primaryHeight * 25.4 / 96 - 16) < 0.2, JSON.stringify(labelPhysicalSize));
+  assert.ok(Math.abs(labelPhysicalSize.specNameSize * 0.75 - 12) < 0.05, JSON.stringify(labelPhysicalSize));
+  assert.ok(Math.abs(labelPhysicalSize.specValueSize * 0.75 - 16) < 0.05, JSON.stringify(labelPhysicalSize));
+  const printedTitles = await page.locator("#label-print-sheet .label-product-name > span").evaluateAll((titles) => titles.map((title) => {
+    const frame = title.parentElement.getBoundingClientRect();
+    const text = title.getBoundingClientRect();
+    const style = getComputedStyle(title);
+    return { name: title.textContent, fits: text.left >= frame.left && text.right <= frame.right, oneLine: text.height <= parseFloat(style.lineHeight) + 1 };
+  }));
+  for (const title of printedTitles) assert.ok(title.fits && title.oneLine, JSON.stringify(title));
   await page.pdf({ path: path.join(output, "product-labels-a4.pdf"), printBackground: true, preferCSSPageSize: true });
   await page.emulateMedia({ media: "screen" });
   await page.evaluate(() => window.dispatchEvent(new Event("afterprint")));
@@ -392,7 +410,7 @@ try {
     tableCardOrderMatch: true,
     dialogFocusReturn: true,
     dialogEscapeCleanup: true,
-    labelPrint: { selected: 9, disabledAfterLimit: 1, markedPrinted: 9, reprintAfterEdit: true, intakeAutoQueued: true, physicalSizeMm: { width: 150, height: 30 } },
+    labelPrint: { selected: 9, disabledAfterLimit: 1, markedPrinted: 9, reprintAfterEdit: true, intakeAutoQueued: true, physicalSizeMm: { width: 152, height: 32 } },
     importTabKeyboard: true,
     existingOrderInferenceRefresh: true,
     intakeInferenceRefresh: true,

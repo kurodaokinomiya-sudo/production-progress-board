@@ -78,6 +78,11 @@ function saveFinishedStockSchedule(input) {
   return mutateFinishedStock_("schedule", input);
 }
 
+function saveFinishedStockNote(input) {
+  requireEditorAccess_();
+  return mutateFinishedStock_("note", input);
+}
+
 function mutateFinishedStock_(action, input) {
   ensureSystem_();
   var access = requireEditorAccess_();
@@ -94,9 +99,9 @@ function mutateFinishedStock_(action, input) {
         requestId: result.event.requestId, productId: result.event.productId || "", quantity: result.event.quantity || 0,
         eventId: result.event.eventId || ""
       });
-      var committed = events.concat([result.event]);
-      return FinishedStock.snapshot({ jobs: reconcileStockFulfillments_(jobs, committed), events: committed });
     }
-    return FinishedStock.snapshot({ jobs: reconcileStockFulfillments_(jobs, events), events: events });
+    if (action === "note") return result.snapshot;
+    var committed = result.event ? events.concat([result.event]) : events;
+    return FinishedStock.snapshot({ jobs: reconcileStockFulfillments_(jobs, committed), events: committed });
   });
 }

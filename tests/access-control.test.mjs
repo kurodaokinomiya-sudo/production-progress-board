@@ -62,8 +62,12 @@ function verifyByEmailCode(h, email, session = "remembered-session") {
   h.setActive("");
   h.setSession(session);
   h.call("requestAccessCode", { email });
-  const code = h.sent.at(-1).body.match(/確認コード: (\d{8})/)[1];
+  const code = deliveredCode(h);
   return h.call("verifyAccessCode", { email, code });
+}
+
+function deliveredCode(h) {
+  return h.sent.at(-1).body.match(/^[a-f0-9]{32}$/m)[0];
 }
 
 function saveUsersAsOwner(h, users) {
@@ -108,7 +112,7 @@ test("worker role persists and resolves for direct and OTP identities with work-
   h.setActive("");
   const response = h.call("requestAccessCode", { email: "worker@example.com" });
   assert.deepEqual(JSON.parse(JSON.stringify(response)), { ok: true });
-  const code = h.sent.at(-1).body.match(/確認コード: (\d{8})/)[1];
+  const code = deliveredCode(h);
   h.call("verifyAccessCode", { email: "worker@example.com", code });
   const otp = h.call("requireAppAccess_");
   assert.equal(otp.role, "worker");
@@ -116,7 +120,7 @@ test("worker role persists and resolves for direct and OTP identities with work-
   assert.equal(otp.canEdit, false);
 });
 
-test("unknown email gets generic response without mail; allowlisted code grants only its bound session and email", () => {
+test("the mailbox holder can use a code on another browser, only for the recipient and once", () => {
   const h = harness();
   h.setActive("");
   assert.deepEqual(JSON.parse(JSON.stringify(h.call("requestAccessCode", { email: "nope@example.com" }))), { ok: true });
@@ -124,40 +128,56 @@ test("unknown email gets generic response without mail; allowlisted code grants 
   const response = h.call("requestAccessCode", { email: " MINNANOOKINOMIYAika@gmail.com " });
   assert.deepEqual(JSON.parse(JSON.stringify(response)), { ok: true });
   assert.equal(h.sent.length, 1);
-  const code = h.sent[0].body.match(/確認コード: (\d{8})/)[1];
+  const code = deliveredCode(h);
   h.setSession("session-b");
-  assert.throws(() => h.call("verifyAccessCode", { email: "minnanookinomiyaika@gmail.com", code }), /無効/);
-  h.setSession("session-a");
   assert.throws(() => h.call("verifyAccessCode", { email: "other@example.com", code }), /無効/);
   assert.equal(h.call("verifyAccessCode", { email: "minnanookinomiyaika@gmail.com", code }).ok, true);
   assert.equal(h.call("requireAppAccess_").email, "minnanookinomiyaika@gmail.com");
+  h.setSession("session-a");
+  assert.throws(() => h.call("requireAppAccess_"), /利用権限/);
   assert.throws(() => h.call("verifyAccessCode", { email: "minnanookinomiyaika@gmail.com", code }), /無効/);
 });
 
-test("code expiry and five wrong attempts remove the challenge", () => {
-  const h = harness();
-  h.setActive("");
-  h.call("requestAccessCode", { email: "minnanookinomiyaika@gmail.com" });
-  const code = h.sent[0].body.match(/確認コード: (\d{8})/)[1];
-  h.setNow(1_800_000_000_000 + 10 * 60_000);
-  assert.throws(() => h.call("verifyAccessCode", { email: "minnanookinomiyaika@gmail.com", code }), /無効/);
-  h.setNow(1_800_000_000_000 + 11 * 60_000);
-  h.call("requestAccessCode", { email: "minnanookinomiyaika@gmail.com" });
-  for (let i = 0; i < 5; i += 1) assert.throws(() => h.call("verifyAccessCode", { email: "minnanookinomiyaika@gmail.com", code: "99999999" }), /無効/);
-  const challengeKey = [...h.properties.keys()].find((key) => key.startsWith("APP_ACCESS_CHALLENGE_"));
-  assert.equal(h.properties.has(challengeKey), false);
-});
-
-test("resend cooldown and per-email hourly cap are enforced", () => {
-  const h = harness();
-  h.setActive("");
+test("an expired delivery can be replaced and only hashed code data is stored", () => {
+  const h = harness({ active: "" });
   const email = "minnanookinomiyaika@gmail.com";
   h.call("requestAccessCode", { email });
-  assert.throws(() => h.call("requestAccessCode", { email }), /60秒/);
-  for (let i = 1; i < 5; i += 1) { h.setNow(1_800_000_000_000 + i * 60_000); h.call("requestAccessCode", { email }); }
-  h.setNow(1_800_000_000_000 + 5 * 60_000);
-  assert.throws(() => h.call("requestAccessCode", { email }), /上限/);
-  assert.equal(h.sent.length, 5);
+  const code = deliveredCode(h);
+  assert.equal([...h.properties.values()].some((value) => value.includes(code)), false);
+  h.setNow(1_800_000_000_000 + 86400000);
+  assert.throws(() => h.call("verifyAccessCode", { email, code }), /無効/);
+  h.call("requestAccessCode", { email });
+  assert.equal(h.sent.length, 2);
+  assert.equal(h.call("verifyAccessCode", { email, code: deliveredCode(h) }).ok, true);
+});
+
+test("a pending code from the previous version can finish its existing sign-in", () => {
+  const h = harness({ active: "" });
+  const email = "minnanookinomiyaika@gmail.com";
+  const code = "12345678";
+  const nonce = "legacy-test-nonce";
+  const key = `APP_ACCESS_CHALLENGE_${h.call("accessSessionHash_")}`;
+  h.properties.set(key, JSON.stringify({
+    email, nonce, codeHash: h.call("accessHash_", nonce + ":" + code),
+    expiresAt: 1_800_000_600_000, attempts: 0
+  }));
+  assert.equal(h.call("verifyAccessCode", { email, code }).ok, true);
+  assert.equal(h.properties.has(key), false);
+  assert.equal(h.call("requireAppAccess_").email, email);
+});
+
+test("an outstanding delivery remains usable and all request outcomes are generic", () => {
+  const h = harness({ active: "" });
+  const email = "minnanookinomiyaika@gmail.com";
+  const expected = JSON.stringify({ ok: true });
+  assert.equal(JSON.stringify(h.call("requestAccessCode", { email })), expected);
+  const code = deliveredCode(h);
+  h.setSession("another-browser");
+  for (const address of [email, "unlisted@example.com"]) {
+    assert.equal(JSON.stringify(h.call("requestAccessCode", { email: address })), expected);
+  }
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.call("verifyAccessCode", { email, code }).ok, true);
 });
 
 test("owner and account admins manage role settings; updates normalize, version and revoke grants", () => {
@@ -168,7 +188,7 @@ test("owner and account admins manage role settings; updates normalize, version 
   assert.equal(initial.emailVerificationReady, true);
   h.setActive("");
   h.call("requestAccessCode", { email: "minnanookinomiyaika@gmail.com" });
-  const grantCode = h.sent[0].body.match(/確認コード: (\d{8})/)[1];
+  const grantCode = deliveredCode(h);
   h.call("verifyAccessCode", { email: "minnanookinomiyaika@gmail.com", code: grantCode });
   assert.equal(h.call("requireAppAccess_").email, "minnanookinomiyaika@gmail.com");
   h.setActive("minnanookinomiyaika@gmail.com");
@@ -220,7 +240,7 @@ test("an established email grant cannot override another nonblank Google identit
   const h = harness();
   h.setActive("");
   h.call("requestAccessCode", { email: "minnanookinomiyaika@gmail.com" });
-  const code = h.sent[0].body.match(/確認コード: (\d{8})/)[1];
+  const code = deliveredCode(h);
   h.call("verifyAccessCode", { email: "minnanookinomiyaika@gmail.com", code });
   h.setActive("different@example.com");
   assert.throws(() => h.call("requireAppAccess_"), /利用権限/);
@@ -234,8 +254,7 @@ test("an explicit empty allowlist persists and denies access; expired temporary 
   h.properties.set("APP_ACCESS_GRANT_stale", JSON.stringify({ email: "old@example.com", expiresAt: 1 }));
   h.properties.set("APP_ACCESS_CHALLENGE_stale", JSON.stringify({ expiresAt: 1 }));
   h.properties.set("APP_ACCESS_RATE_2000-01-01", "{}");
-  h.setActive("");
-  h.call("requestAccessCode", { email: "minnanookinomiyaika@gmail.com" });
+  verifyByEmailCode(h, "minnanookinomiyaika@gmail.com");
   assert.equal(h.properties.has("APP_ACCESS_GRANT_stale"), false);
   assert.equal(h.properties.has("APP_ACCESS_CHALLENGE_stale"), false);
   assert.equal(h.properties.has("APP_ACCESS_RATE_2000-01-01"), false);
@@ -279,7 +298,7 @@ test("roles are resolved from live config for direct and OTP identities, with le
   h.setActive("");
   h.setSession("role-session");
   h.call("requestAccessCode", { email: "viewer@example.com" });
-  const code = h.sent.at(-1).body.match(/確認コード: (\d{8})/)[1];
+  const code = deliveredCode(h);
   h.call("verifyAccessCode", { email: "viewer@example.com", code });
   assert.equal(h.call("requireAppAccess_").role, "viewer");
 
@@ -333,24 +352,31 @@ test("only the owner receives the email authorization URL when mail scope is req
   assert.equal(h.call("getAccessSettings").emailAuthorizationUrl, "");
 });
 
-test("the script-wide daily mail cap applies across allowlisted addresses", () => {
+test("each allowed address has its own delivery allowance after its holder redeems a code", () => {
   const h = harness();
-  const initial = h.call("getAccessSettings");
-  const emails = Array.from({ length: 11 }, (_, index) => `person${index}@example.com`);
-  h.call("saveAccessSettings", { version: initial.version, emails });
-  h.setActive("");
-  for (let person = 0; person < 10; person += 1) {
-    for (let send = 0; send < 5; send += 1) {
-      h.setSession(`session-${person}-${send}`);
-      h.setNow(1_800_000_000_000 + h.sent.length * 60_000);
-      h.call("requestAccessCode", { email: emails[person] });
-    }
-  }
-  assert.equal(h.sent.length, 50);
-  h.setSession("global-cap");
-  h.setNow(1_800_000_000_000 + 50 * 60_000);
-  assert.throws(() => h.call("requestAccessCode", { email: emails[10] }), /上限/);
-  assert.equal(h.sent.length, 50);
+  const email = "first@example.com", other = "second@example.com";
+  saveUsersAsOwner(h, [{ email, role: "editor" }, { email: other, role: "worker" }]);
+  verifyByEmailCode(h, email, "first-session");
+  verifyByEmailCode(h, email, "second-session");
+  h.setSession("next-session");
+  assert.equal(JSON.stringify(h.call("requestAccessCode", { email })), '{"ok":true}');
+  assert.equal(h.sent.length, 2);
+  verifyByEmailCode(h, other, "other-recipient");
+  assert.equal(h.sent.at(-1).to, other);
+  assert.equal(h.call("requireAppAccess_").role, "worker");
+});
+
+test("a delivery failure leaves a retryable slot and the same public response", () => {
+  const h = harness({ active: "" });
+  const email = "minnanookinomiyaika@gmail.com";
+  const send = h.context.MailApp.sendEmail;
+  h.context.MailApp.sendEmail = () => { throw new Error("delivery failed"); };
+  assert.equal(JSON.stringify(h.call("requestAccessCode", { email })), '{"ok":true}');
+  h.context.MailApp.sendEmail = send;
+  h.setNow(1_800_000_060_000);
+  const result = verifyByEmailCode(h, email);
+  assert.equal(result.ok, true);
+  assert.equal(h.sent.length, 1);
 });
 
 test("OTP returns a device credential while Script Properties store only its hash", () => {
@@ -374,7 +400,7 @@ test("OTP returns a device credential while Script Properties store only its has
   assert.equal(grant.deviceToken, undefined);
 });
 
-test("remembered credentials restore after seven days and survive temporary-key rotation beyond sixty days", () => {
+test("remembered access survives Google-key rotation until its absolute device expiration", () => {
   const h = harness();
   const result = verifyByEmailCode(h, "minnanookinomiyaika@gmail.com", "first-session");
   const base = 1_800_000_000_000;
@@ -384,10 +410,27 @@ test("remembered credentials restore after seven days and survive temporary-key 
   assert.equal(h.call("restoreAccessSession", { deviceToken: result.deviceToken }).ok, true);
   assert.equal(h.call("requireAppAccess_").email, "minnanookinomiyaika@gmail.com");
 
-  h.setNow(base + 61 * 86400000);
+  h.setNow(base + 90 * 86400000 - 1);
   h.setSession("second-rotation");
   assert.equal(h.call("restoreAccessSession", { deviceToken: result.deviceToken }).ok, true);
   assert.equal(h.call("requireAppAccess_").email, "minnanookinomiyaika@gmail.com");
+  h.setNow(base + 90 * 86400000);
+  assert.equal(h.call("restoreAccessSession", { deviceToken: result.deviceToken }).ok, false);
+  assert.throws(() => h.call("requireAppAccess_"), /利用権限/);
+});
+
+test("an administrator can revoke one account's remembered access while its allowlist entry remains", () => {
+  const h = harness();
+  const email = "minnanookinomiyaika@gmail.com";
+  const enrolled = verifyByEmailCode(h, email);
+  assert.throws(() => h.call("revokeRememberedAccess", { email }), /ADMIN_REQUIRED/);
+  h.setActive("owner@example.com");
+  assert.equal(h.call("revokeRememberedAccess", { email }).ok, true);
+  assert.equal(h.call("getAccessSettings").users[0].email, email);
+  h.setActive("");
+  assert.throws(() => h.call("requireAppAccess_"), /利用権限/);
+  assert.equal(h.call("restoreAccessSession", { deviceToken: enrolled.deviceToken }).ok, false);
+  assert.equal(verifyByEmailCode(h, email).ok, true);
 });
 
 test("an existing valid legacy grant can mint a remembered credential without another email", () => {

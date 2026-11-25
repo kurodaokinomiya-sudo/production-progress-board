@@ -81,7 +81,7 @@
     showStatus("送信しています…");
     try {
       await serverCall("requestAccessCode", payload);
-      showStatus("入力したアドレスが対象の場合、確認コードを送信しました。", "success");
+      showStatus("送信のリクエストを受け付けました。受信箱にある最新の確認コードをお使いください。", "success");
       startResendWait();
     } catch {
       showStatus("確認コードを送信できませんでした。時間をおいてからもう一度お試しください。", "error");
@@ -93,15 +93,10 @@
 
   verifyForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    codeInput.value = codeInput.value.trim();
     if (!emailInput.reportValidity() || !codeInput.reportValidity()) return;
     if (requestBusy || verifyBusy || restoring || verified) return;
-    if (!/^\d{8}$/.test(codeInput.value.trim())) {
-      codeInput.setCustomValidity("8桁の数字を入力してください。");
-      codeInput.reportValidity();
-      codeInput.setCustomValidity("");
-      return;
-    }
-    const payload = { email: emailInput.value.trim(), code: codeInput.value.trim(), openApp: true };
+    const payload = { email: emailInput.value.trim(), code: codeInput.value, openApp: true };
     verifyBusy = true;
     updateControls();
     showStatus("確認しています…");
@@ -133,7 +128,6 @@
     if (!verified) showStatus("");
   });
   codeInput.addEventListener("input", () => {
-    codeInput.value = codeInput.value.replace(/\D/g, "").slice(0, 8);
     if (!verified) showStatus("");
   });
 

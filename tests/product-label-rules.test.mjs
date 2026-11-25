@@ -94,3 +94,26 @@ test("legacy Tanaka suffixes match the master and share future correction keys w
   assert.equal(before.productMaster.key,after.productMaster.key);
   assert.equal(before.product,"鋭匙鉗子:JS07-040-4S-J TM対象");
 });
+
+test("06-27-20 defaults to ズレピン across product code formats and keeps the default scoped to that model",()=>{
+  const {ctx}=harness();
+  ctx.loadProductMaster_=()=>ctx.PRODUCT_MASTER_SNAPSHOT_;
+  const base={customer:"田中",product:"クロワードパンチ",specLength:"１８㎝",bladeWidth:"２㎜",quantity:1};
+  const matching={...base,productCode:"06-27-20"};
+  const fullName="０６－２７－２０　クロワードパンチ２㎜　１８㎝";
+  const jobs=ctx.decorateProductJobs_([
+    {...matching},
+    {...base,note:"品番: 06-27-20"},
+    {...base,product:fullName},
+    {...base,productCode:"06-31-20"},
+    {...base,productCode:"06-27-25",bladeWidth:"2.5mm"},
+    {...base},
+    {...matching,bladeWidth:"3mm"},
+    {...matching,customer:"他社"},
+  ],{});
+  assert.deepEqual(Array.from(jobs,({productMaster})=>[...productMaster.labelKeywords]),[
+    ["ズレピン"],["ズレピン"],["ズレピン"],[],[],[],[],[],
+  ]);
+  const saved=ctx.saveJob({...matching,productLabelRule:{mode:"manual",keywords:["ズレピン","白銅"],expectedRules:{}}});
+  assert.deepEqual([...saved.productMaster.labelKeywords],["白銅","ズレピン"]);
+});

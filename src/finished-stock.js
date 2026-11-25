@@ -2,6 +2,8 @@
 var FinishedStock = (function () {
   "use strict";
   var MAX_QUANTITY = 1000000;
+  var MAX_NOTE_LENGTH = 1000;
+  var ACTIONS = ["opening", "receive", "ship", "reverse", "schedule", "note"];
   var CATALOG = [
     { id: "26001", code: "26001", name: "Tezoe スタンツェ 直上", family: "スタンツェ", shape: "直・上向", bladeWidth: "赤" },
     { id: "26002", code: "26002", name: "Tezoe スタンツェ 直下", family: "スタンツェ", shape: "直・下向", bladeWidth: "青" },
@@ -29,23 +31,73 @@ var FinishedStock = (function () {
     if (quantity > totalNumber) fail("在庫予定数量は製造総数量以下にしてください。");
     return quantity;
   }
-  function catalog() { return clone(CATALOG); }
-  function isTezoe(job) { return /tezoe/i.test(text(job && job.product).normalize("NFKC")); }
+  function isTezoe(job) { return /tezoe|テゾエ|テッツェ/i.test(text(job && job.product).normalize("NFKC")); }
+  function customProduct(job) {
+    var definition = {};
+    ["productCode", "product", "specLength", "specShape", "bladeWidth"].forEach(function (field) {
+      definition[field] = text(job[field]).normalize("NFKC").replace(/\s+/g, " ");
+      if (definition[field].length > 500) fail("Tezoe製品の仕様は500文字以内で入力してください。");
+    });
+    definition.productCode = definition.productCode.toUpperCase();
+    var identity = Object.keys(definition).map(function (field) { return definition[field].toLowerCase(); });
+    var specifications = [definition.specLength, definition.specShape, definition.bladeWidth].filter(function (value) {
+      return value && definition.product.toLowerCase().indexOf(value.toLowerCase()) < 0;
+    });
+    return {
+      id: "tezoe-" + hash(identity), code: definition.productCode, name: [definition.product].concat(specifications).join(" / "),
+      shape: definition.specShape, bladeWidth: definition.bladeWidth, specLength: definition.specLength,
+      custom: true, definition: definition
+    };
+  }
+  function catalog(jobs, events) {
+    var products = clone(CATALOG), byId = Object.create(null);
+    products.forEach(function (product) { byId[product.id] = product; });
+    (events || []).forEach(function (event) {
+      if (!event || !event.productDefinition) return;
+      var definition = event.productDefinition;
+      if (typeof definition !== "object" || Array.isArray(definition) ||
+          ["productCode", "product", "specLength", "specShape", "bladeWidth"].some(function (field) { return typeof definition[field] !== "string"; })) fail("Tezoe製品の登録履歴が不正です。");
+      // Earlier versions accepted contradictory numbers on custom products.
+      // Keep the recorded identity for display and reversal.
+      var product = productFor(definition, true);
+      if (!product || !product.custom || product.id !== event.productId) fail("在庫履歴の製品と登録仕様が一致しません。");
+      if (!byId[product.id]) { products.push(product); byId[product.id] = product; }
+    });
+    (jobs || []).forEach(function (job) {
+      var product;
+      try { product = productFor(job); } catch (error) { return; }
+      if (product && !byId[product.id]) { products.push(product); byId[product.id] = product; }
+    });
+    return products;
+  }
   // Use the same spelling normalization at the save boundary and product lookup.
   // The previous identity keeps linked history protected during product edits.
   function needsJobValidation(job, previous) {
     return [job, previous].some(function (entry) { return entry && (Number(entry.stockPlannedQuantity || 0) > 0 || isTezoe(entry)); });
   }
-  function productFor(job) {
+  function productNumberIssue(code, product) {
+    if (!code) return "";
+    var embedded = product.match(/(?:^|[^A-Z0-9]|TEZOE)((?:260|350)\d{2})(?=$|[^A-Z0-9])/gi) || [];
+    for (var i = 0; i < embedded.length; i++) {
+      var inName = embedded[i].slice(-5);
+      if (inName !== code) return "Tezoeの製品番号と品名が一致しません。品名の " + inName + " と製品番号欄の " + code + " を確認してください。";
+    }
+    return "";
+  }
+  function productFor(job, historicalDefinition) {
     job = job || {};
     var code = text(job.productCode).normalize("NFKC").toUpperCase();
     var product = text(job.product).normalize("NFKC");
     if (!isTezoe(job)) return null;
-    var matches = CATALOG.filter(function (item) { return item.code === code; });
-    if (matches.length !== 1) fail("Tezoe在庫は登録済みの製品番号を指定してください。");
-    var entry = matches[0];
-    var embedded = product.match(/(?:^|[^A-Z0-9])(260\d{2}|35002)(?=$|[^A-Z0-9])/gi) || [];
-    if (embedded.some(function (raw) { return raw.match(/(260\d{2}|35002)/i)[1].toUpperCase() !== entry.code; })) fail("Tezoeの製品番号と品名が一致しません。");
+    var entry = CATALOG.find(function (item) { return item.code === code; });
+    var custom = !entry || /特注|試作|custom|special/i.test(product);
+    var issue = productNumberIssue(code, product);
+    if (issue && !(historicalDefinition === true && custom)) fail(issue);
+    if (custom) {
+      var identity = customProduct(job);
+      if (issue) identity.identityIssue = issue;
+      return identity;
+    }
     if (entry.family === "ケリソン" && !/ケリソン|kerrison/i.test(product) || entry.family === "スタンツェ" && /ケリソン|kerrison/i.test(product)) fail("製品番号とTezoe製品名の種類が一致しません。");
     var spec = (text(job.specShape) + " " + product).normalize("NFKC").toLowerCase();
     var expected = entry.code === "26011" || entry.code === "26012" ? /弱[弯湾彎曲]/ : entry.code === "26021" || entry.code === "26022" ? /強[弯湾彎曲]/ : /直/;
@@ -116,21 +168,26 @@ var FinishedStock = (function () {
   }
   function normalizeEvents(events) {
     if (!Array.isArray(events)) fail("在庫履歴の形式が不正です。");
-    var byId = Object.create(null), requests = Object.create(null), reversed = Object.create(null), histories = [];
+    var products = catalog([], events);
+    var byId = Object.create(null), requests = Object.create(null), reversed = Object.create(null), productNotes = Object.create(null), histories = [];
     events.forEach(function (source) {
       var event = clone(source);
-      if (!event || !text(event.id) || byId[event.id] || !text(event.requestId) || requests[event.requestId] || !/^[a-f0-9]{64}$/.test(text(event.requestHash)) || !isFinite(Date.parse(event.at)) || ["opening", "receive", "ship", "reverse", "schedule"].indexOf(event.action) < 0) fail("Tezoe在庫履歴が壊れているか重複しています。");
+      if (!event || !text(event.id) || byId[event.id] || !text(event.requestId) || requests[event.requestId] || !/^[a-f0-9]{64}$/.test(text(event.requestHash)) || !isFinite(Date.parse(event.at)) || ACTIONS.indexOf(event.action) < 0) fail("Tezoe在庫履歴が壊れているか重複しています。");
       event.date = isoDate(event.date);
-      if (event.action !== "reverse" && event.action !== "schedule") event.quantity = safeInteger(event.quantity, event.action === "opening" ? 0 : 1, MAX_QUANTITY, "数量");
+      if (["opening", "receive", "ship"].indexOf(event.action) >= 0) event.quantity = safeInteger(event.quantity, event.action === "opening" ? 0 : 1, MAX_QUANTITY, "数量");
       if (event.action === "schedule") {
-        if (!text(event.jobId) || !CATALOG.some(function (product) { return product.id === event.productId; }) || ["split", "together"].indexOf(event.shipmentMode) < 0) fail("出荷予定の履歴が不正です。");
+        if (!text(event.jobId) || !products.some(function (product) { return product.id === event.productId; }) || ["split", "together"].indexOf(event.shipmentMode) < 0) fail("出荷予定の履歴が不正です。");
         event.stockQuantity = safeInteger(event.stockQuantity, 0, MAX_QUANTITY, "在庫出荷予定数");
         if (event.orderQuantity !== undefined) event.orderQuantity = safeInteger(event.orderQuantity, 0, MAX_QUANTITY, "注文数量");
         if (event.shipDate) isoDate(event.shipDate, "出荷予定日");
         if (event.completionDate) isoDate(event.completionDate, "完成予定日");
       }
-      if (event.action === "opening" || event.action === "receive") {
-        if (!CATALOG.some(function (product) { return product.id === event.productId; })) fail("履歴の製品番号が不正です。");
+      if (event.action === "opening" || event.action === "receive" || event.action === "note") {
+        if (!products.some(function (product) { return product.id === event.productId; })) fail("履歴の製品番号が不正です。");
+      }
+      if (event.action === "note") {
+        if (typeof event.note !== "string" || event.note.length > MAX_NOTE_LENGTH) fail("製品の備考履歴が不正です。");
+        productNotes[event.productId] = event;
       }
       if (event.action === "reverse") {
         var target = byId[text(event.eventId)];
@@ -166,7 +223,7 @@ var FinishedStock = (function () {
       });
       if (allocated !== event.quantity) fail("出荷数量とロット割当が一致しません。");
     });
-    return { events: histories, requests: requests, byId: byId, reversed: reversed, lots: lots, lotById: lotById, activeShipments: activeShipments };
+    return { events: histories, requests: requests, byId: byId, reversed: reversed, lots: lots, lotById: lotById, activeShipments: activeShipments, productNotes: productNotes };
   }
   function polishReady(job) {
     var polishing = job.polishing || {};
@@ -190,7 +247,7 @@ var FinishedStock = (function () {
       var state = normalizeEvents(events || []), schedule = null, capturedQuantity = null, jobId = text(job.id);
       // Event append order is the sequence used by snapshot's schedule projection.
       state.events.forEach(function (event, index) {
-        if (event.action === "schedule" && event.jobId === jobId) { schedule = event; capturedQuantity = events[index].orderQuantity; }
+        if (FinishedStockOrders.isShipmentSchedule(event) && event.jobId === jobId) { schedule = event; capturedQuantity = events[index].orderQuantity; }
       });
       if (!schedule || schedule.productId !== product.id || quantity(capturedQuantity) <= 0) return null;
       var shipped = 0, date = "", invalidProduct = false;
@@ -220,35 +277,38 @@ var FinishedStock = (function () {
   }
   function snapshot(options) {
     options = options || {};
-    var jobs = options.jobs || [], state = normalizeEvents(options.events || []), products = catalog(), plans = [];
-    var receiptTotals = Object.create(null);
+    var jobs = options.jobs || [], state = normalizeEvents(options.events || []), products = catalog(jobs, options.events), plans = [];
+    var receiptTotals = Object.create(null), planIssues = Object.create(null);
     state.lots.forEach(function (lot) { if (lot.jobId) receiptTotals[lot.jobId] = (receiptTotals[lot.jobId] || 0) + lot.quantity; });
     jobs.forEach(function (job) {
-      var quantity = planned(job);
-      if (!quantity || job.archived) return;
-      var product = productFor(job);
-      if (!product) fail("在庫製造計画の製品を確認してください。");
+      if (!job || job.archived || !needsJobValidation(job)) return;
+      var quantity, product;
       var received = receiptTotals[job.id] || 0;
-      if (received > quantity) fail("実績数量が在庫製造計画を超えています。");
+      try {
+        quantity = planned(job);
+        if (received > quantity) fail("実績数量が在庫製造計画を超えています。");
+        if (!quantity) return;
+        product = productFor(job);
+        if (!product) fail("在庫製造計画の製品を確認してください。");
+      } catch (error) {
+        if (!text(error.message).startsWith("FINISHED_STOCK_INVALID:")) throw error;
+        planIssues[text(job.id)] = error.message;
+        return;
+      }
       var producers = Object.keys(job.stages || {}).map(function (key) { return text(job.stages[key] && job.stages[key].assignee); }).filter(Boolean);
       plans.push({ jobId: text(job.id), productId: product.id, product: product.name, customer: text(job.customer), serialNo: text(job.serialNo), dueDate: text(job.dueDate), quantity: quantity - received, plannedQuantity: quantity, receivedQuantity: received, totalQuantity: Number(job.quantity || 0), orderQuantity: Math.max(0, Number(job.quantity || 0) - quantity), finishReady: !!(job.stages && job.stages.finish && job.stages.finish.status === "done" && polishReady(job)), jobVersion: Number(job.version || 0), producers: Array.from(new Set(producers)), stageAssignees: Object.keys(job.stages || {}).reduce(function (out, key) { out[key] = text(job.stages[key] && job.stages[key].assignee); return out; }, {}) });
     });
     var productRows = products.map(function (product) {
       var productLots = state.lots.filter(function (lot) { return lot.productId === product.id; });
       var productPlans = plans.filter(function (plan) { return plan.productId === product.id && plan.quantity > 0; });
-      var orderQuantity = jobs.filter(function (job) { return !job.archived && job.shippingStatus !== "shipped"; }).reduce(function (sum, job) {
-        if (!/tezoe/i.test(text(job.product))) return sum;
-        var identity;
-        try { identity = productFor(job); } catch (error) { return sum; }
-        return identity && identity.id === product.id ? sum + Math.max(0, Number(job.quantity || 0) - planned(job)) : sum;
-      }, 0);
       var stockQuantity = productLots.reduce(function (sum, lot) { return sum + lot.remainingQuantity; }, 0);
-      return { id: product.id, code: product.code, name: product.name, stockQuantity: stockQuantity, stockRegistered: state.events.some(function (event) { return event.productId === product.id && (event.action === "opening" || event.action === "receive"); }), orderQuantity: orderQuantity, shortageQuantity: Math.max(0, orderQuantity - stockQuantity), plannedQuantity: productPlans.reduce(function (sum, plan) { return sum + plan.quantity; }, 0), nextDueDate: productPlans.map(function (plan) { return plan.dueDate; }).filter(Boolean).sort()[0] || "" };
+      var noteEvent = state.productNotes[product.id];
+      return { id: product.id, code: product.code, name: product.name, custom: !!product.custom, identityIssue: product.identityIssue || "", stockQuantity: stockQuantity, stockRegistered: state.events.some(function (event) { return event.productId === product.id && (event.action === "opening" || event.action === "receive"); }), plannedQuantity: productPlans.reduce(function (sum, plan) { return sum + plan.quantity; }, 0), nextDueDate: productPlans.map(function (plan) { return plan.dueDate; }).filter(Boolean).sort()[0] || "", note: noteEvent ? noteEvent.note : "", noteRevision: noteEvent ? noteEvent.id : "" };
     });
     var lots = state.lots.map(function (lot) { return clone(lot); }).sort(function (a, b) { return a.date.localeCompare(b.date) || a.at.localeCompare(b.at) || a.id.localeCompare(b.id); });
-    var history = state.events.map(function (event, index) { return Object.assign({}, event, { sequence: index }); }).sort(function (a, b) { return b.sequence - a.sequence; });
+    var history = state.events.map(function (event, index) { return Object.assign({}, event, { sequence: index }); }).filter(function (event) { return event.action !== "note"; }).sort(function (a, b) { return b.sequence - a.sequence; });
     var result = { version: state.events.length, products: productRows, plans: plans, lots: lots, history: history };
-    var projection = FinishedStockOrders.project(result, jobs, { productFor: productFor, today: options.today || japanToday(options.at) });
+    var projection = FinishedStockOrders.project(result, jobs, { productFor: productFor, planIssues: planIssues, today: options.today || japanToday(options.at) });
     Object.keys(projection).forEach(function (key) { result[key] = projection[key]; });
     return result;
   }
@@ -256,16 +316,17 @@ var FinishedStock = (function () {
     job = job || {};
     var quantity = planned(job), received = 0, state = normalizeEvents(events || []), jobId = text(job.id);
     state.lots.forEach(function (lot) { if (jobId && lot.jobId === jobId) received += lot.quantity; });
-    var before = previous ? planned(previous) : 0;
-    var oldProduct = previous && before ? productFor(previous) : null;
     var newProduct = quantity ? productFor(job) : null;
+    if (!quantity && isTezoe(job)) {
+      var issue = productNumberIssue(text(job.productCode).normalize("NFKC").toUpperCase(), text(job.product).normalize("NFKC"));
+      if (issue) fail(issue);
+    }
     if (quantity && !newProduct) fail("在庫製造計画には対応するTezoe製品番号と品名が必要です。");
     if (received > quantity) fail("在庫として受領済みの数量より在庫予定数量を少なくできません。");
-    if (received && (!oldProduct || !newProduct || oldProduct.id !== newProduct.id)) fail("在庫受領済み案件の製品番号は変更できません。");
-    if (previous && before && !quantity && received) fail("在庫受領済み案件の在庫計画は削除できません。");
+    if (received && (!previous || !newProduct || state.lots.some(function (lot) { return lot.jobId === jobId && lot.productId !== newProduct.id; }))) fail("在庫受領済み案件の製品番号は変更できません。訂正する場合は関連する出荷と入庫を先に取り消してください。");
     var shipments = state.activeShipments.filter(function (event) { return jobId && event.orderJobId === jobId; });
     var shipped = shipments.reduce(function (sum, event) { return sum + event.quantity; }, 0);
-    var schedules = state.events.filter(function (event) { return jobId && event.action === "schedule" && event.jobId === jobId; });
+    var schedules = state.events.filter(function (event) { return jobId && FinishedStockOrders.isShipmentSchedule(event) && event.jobId === jobId; });
     var schedule = schedules[schedules.length - 1];
     if (schedule && schedule.orderQuantity > 0) {
       var scheduledIdentity = productFor(job);
@@ -280,17 +341,19 @@ var FinishedStock = (function () {
   }
   function requestContent(action, input) {
     var copy = {};
-    Object.keys(input || {}).forEach(function (key) { if (key !== "requestId" && key !== "expectedVersion") copy[key] = input[key]; });
+    Object.keys(input || {}).forEach(function (key) { if (key !== "requestId" && key !== "expectedVersion" && key !== "expectedRevision") copy[key] = input[key]; });
     return { action: action, input: copy };
   }
   function prepareMutation(action, input, options) {
     input = input || {}; options = options || {};
-    var validActions = ["opening", "receive", "ship", "reverse", "schedule"];
-    if (validActions.indexOf(action) < 0) fail("不明な在庫操作です。");
+    if (ACTIONS.indexOf(action) < 0) fail("不明な在庫操作です。");
     var common = ["expectedVersion", "requestId", "note"];
-    var extras = action === "opening" ? ["productId", "quantity", "date", "productionDate", "producers", "lotNo"]
+    var completionOnly = action === "schedule" && input.completionOnly === true;
+    var extras = action === "note" ? ["productId", "expectedRevision"]
+      : action === "opening" ? ["productId", "quantity", "date", "productionDate", "producers", "lotNo"]
       : action === "receive" ? ["jobId", "jobVersion", "quantity", "date", "productionDate", "producers", "lotNo", "productId"]
       : action === "ship" ? ["productId", "quantity", "date", "customer", "orderRef", "purpose", "lotId", "orderJobId", "jobVersion"]
+      : completionOnly ? ["jobId", "jobVersion", "completionOnly", "completionDate"]
       : action === "schedule" ? ["jobId", "jobVersion", "orderQuantity", "stockQuantity", "shipmentMode", "shipDate", "completionDate"]
       : ["eventId", "date"];
     if (Object.keys(input).some(function (key) { return common.concat(extras).indexOf(key) < 0; })) fail("在庫操作に許可されていない項目があります。");
@@ -301,34 +364,54 @@ var FinishedStock = (function () {
       if (prior.requestHash !== requestHash) fail("同じリクエストIDで異なる内容は保存できません。");
       return { event: null, snapshot: snapshot({ jobs: options.jobs || [], events: options.events || [] }), retry: true };
     }
-    if (!Number.isInteger(input.expectedVersion) || input.expectedVersion !== state.events.length) fail("別の端末で在庫が更新されています。画面を更新してください。");
+    if (action === "note") {
+      var previousNote = state.productNotes[text(input.productId)];
+      if (input.expectedRevision !== (previousNote ? previousNote.id : "")) fail("別の端末で製品の備考が更新されています。画面を更新してください。");
+      if (typeof input.note !== "string") fail("備考の内容を確認してください。");
+    } else if (!Number.isInteger(input.expectedVersion) || input.expectedVersion !== state.events.length) fail("別の端末で在庫が更新されています。画面を更新してください。");
     var note = text(input.note);
-    if (note.length > 1000) fail("備考・理由は1000文字以内にしてください。");
+    if (note.length > MAX_NOTE_LENGTH) fail("備考・理由は1000文字以内にしてください。");
     if (action === "opening" && !note) fail("現在庫を記録する理由を入力してください。");
-    var today = japanToday(options.at), date = action === "schedule" ? today : isoDate(input.date, "記録日");
+    var today = japanToday(options.at), date = action === "schedule" || action === "note" ? today : isoDate(input.date, "記録日");
     if ((action === "opening" || action === "receive") && date > today) fail("実際の入庫日には今日までの日付を入力してください。");
     if ((action === "ship" || action === "reverse") && date > today) fail("実際の出庫・取消日には今日までの日付を入力してください。");
     var event = { id: text(options.id) || requestId, requestId: requestId, requestHash: requestHash, action: action, date: date, at: text(options.at) || new Date().toISOString(), actor: text(options.actor), note: note };
-    if (action === "schedule") {
+    if (action === "note") {
+      event.productId = text(input.productId);
+    } else if (action === "schedule") {
       var scheduledJob = (options.jobs || []).filter(function (item) { return text(item.id) === text(input.jobId); })[0];
       if (!scheduledJob || scheduledJob.archived || scheduledJob.shippingStatus === "shipped") fail("出荷予定を設定できる受注が見つかりません。");
       if (Number(scheduledJob.version || 0) !== Number(input.jobVersion)) fail("案件が別の端末で更新されています。画面を更新してください。");
       var scheduledProduct = productFor(scheduledJob);
       if (!scheduledProduct) fail("Tezoe製品の受注を選択してください。");
-      var ordered = safeInteger(input.orderQuantity, 0, MAX_QUANTITY, "注文数量");
       var shippedAlready = state.activeShipments.filter(function (entry) { return entry.orderJobId === scheduledJob.id; }).reduce(function (sum, entry) { return sum + entry.quantity; }, 0);
-      var stockTarget = safeInteger(input.stockQuantity, shippedAlready, ordered, "在庫出荷予定数");
+      var scheduleValues = input;
+      if (completionOnly) {
+        if (typeof input.completionDate !== "string") fail("製造の完成予定日を確認してください。");
+        // Retain the existing schedule fields on disk so older versions can
+        // replay the ledger. Current readers apply only this event's date.
+        var priorSchedules = state.events.filter(function (entry) {
+          return FinishedStockOrders.isShipmentSchedule(entry) && entry.jobId === scheduledJob.id && entry.productId === scheduledProduct.id;
+        });
+        scheduleValues = priorSchedules[priorSchedules.length - 1] || { stockQuantity: shippedAlready, shipmentMode: "split", shipDate: "" };
+        event.completionOnly = true;
+      }
+      var customerQuantity = completionOnly && scheduleValues.orderQuantity === undefined ? Number(scheduledJob.quantity) - planned(scheduledJob) : scheduleValues.orderQuantity;
+      var ordered = safeInteger(customerQuantity, 0, MAX_QUANTITY, "注文数量");
+      var stockTarget = safeInteger(scheduleValues.stockQuantity, shippedAlready, ordered, "在庫出荷予定数");
       if (FinishedStockOrders.isStockOnly(scheduledJob) && (ordered > 0 || stockTarget > 0)) fail("在庫用の製造案件に顧客向けの注文数・出荷数は設定できません。");
-      if (["split", "together"].indexOf(input.shipmentMode) < 0) fail("出荷方法を選択してください。");
-      var shipDate = input.shipDate ? isoDate(input.shipDate, "出荷予定日") : "";
+      if (["split", "together"].indexOf(scheduleValues.shipmentMode) < 0) fail("出荷方法を選択してください。");
+      var shipDate = scheduleValues.shipDate ? isoDate(scheduleValues.shipDate, "出荷予定日") : "";
       var completionDate = input.completionDate ? isoDate(input.completionDate, "完成予定日") : "";
-      if (input.shipmentMode === "together" && stockTarget < ordered && shipDate && (completionDate || scheduledJob.dueDate) && shipDate < (completionDate || scheduledJob.dueDate)) fail("一緒に出荷する予定日は不足分の完成予定日以降にしてください。");
+      if (scheduleValues.shipmentMode === "together" && stockTarget < ordered && shipDate && (completionDate || scheduledJob.dueDate) && shipDate < (completionDate || scheduledJob.dueDate)) fail("一緒に出荷する予定日は不足分の完成予定日以降にしてください。");
       event.jobId = scheduledJob.id; event.jobVersion = scheduledJob.version; event.productId = scheduledProduct.id;
-      event.orderQuantity = ordered; event.stockQuantity = stockTarget; event.shipmentMode = input.shipmentMode; event.shipDate = shipDate; event.completionDate = completionDate;
+      if (scheduleValues.orderQuantity !== undefined) event.orderQuantity = ordered;
+      event.stockQuantity = stockTarget; event.shipmentMode = scheduleValues.shipmentMode; event.shipDate = shipDate; event.completionDate = completionDate;
       event.customer = text(scheduledJob.customer); event.serialNo = text(scheduledJob.serialNo); event.quantity = stockTarget;
     } else if (action === "opening") {
-      var openingProduct = CATALOG.filter(function (item) { return item.id === text(input.productId); })[0];
+      var openingProduct = catalog(options.jobs, options.events).filter(function (item) { return item.id === text(input.productId); })[0];
       if (!openingProduct) fail("製品を選択してください。");
+      if (openingProduct.identityIssue) fail(openingProduct.identityIssue);
       event.productId = openingProduct.id; event.quantity = safeInteger(input.quantity, 0, MAX_QUANTITY, "数量"); event.lotNo = text(input.lotNo).slice(0, 120) || event.id;
       event.productionDate = input.productionDate ? isoDate(input.productionDate, "製造日") : "";
       event.producers = producersFrom(input.producers, false);
@@ -352,8 +435,9 @@ var FinishedStock = (function () {
       event.lotNo = text(input.lotNo).slice(0, 120) || event.id; event.productionDate = productionDate; event.producers = producers;
       event.stageAssignees = Object.keys(job.stages || {}).reduce(function (out, key) { out[key] = text(job.stages[key] && job.stages[key].assignee); return out; }, {});
     } else if (action === "ship") {
-      var shipProduct = CATALOG.filter(function (item) { return item.id === text(input.productId); })[0];
+      var shipProduct = catalog(options.jobs, options.events).filter(function (item) { return item.id === text(input.productId); })[0];
       if (!shipProduct) fail("製品を選択してください。");
+      if (shipProduct.identityIssue) fail(shipProduct.identityIssue);
       event.productId = shipProduct.id; event.quantity = safeInteger(input.quantity, 1, MAX_QUANTITY, "数量");
       var current = snapshot({ jobs: options.jobs || [], events: options.events || [], at: options.at });
       var orderJobId = text(input.orderJobId), linkedOrder = null;
@@ -398,6 +482,9 @@ var FinishedStock = (function () {
       }
       event.eventId = target.id; event.productId = target.productId; event.quantity = target.quantity;
     }
+    var registeredProduct = catalog(options.jobs, options.events).filter(function (product) { return product.id === event.productId; })[0];
+    if (action === "note" && !registeredProduct) fail("製品を選択してください。");
+    if (registeredProduct && registeredProduct.custom) event.productDefinition = clone(registeredProduct.definition);
     var candidateEvents = (options.events || []).concat([event]);
     var resultSnapshot = snapshot({ jobs: options.jobs || [], events: candidateEvents });
     return { event: event, snapshot: resultSnapshot, retry: false };

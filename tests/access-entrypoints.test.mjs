@@ -32,7 +32,7 @@ test("collaborators cannot call admin operations or edit Gmail settings directly
   for (const name of ["setupSystem", "scanOrderEmails", "migrateLegacySheet", "runAiDiagnosticStep"]) {
     assert.throws(() => context[name]({ isAdmin: true }), /(ADMIN_REQUIRED|OWNER_REQUIRED):/, name);
   }
-  for (const name of ["createIntakeFromImage", "createIntakeFromPdfText", "createIntakeFromText", "createIntakeWithAi", "saveJob", "markLabelsPrinted"]) {
+  for (const name of ["createIntakeFromImage", "createIntakeFromPdfText", "createIntakeFromText", "createIntakeAutomatically", "createIntakeWithAi", "saveJob", "markLabelsPrinted"]) {
     assert.throws(() => context[name]({}), /ACCESS_DENIED:/, name);
   }
   for (const input of [{ gmailQuery: "in:anywhere" }, { maxEmailThreads: "50" }]) {
@@ -72,7 +72,7 @@ test("viewers are denied every public data mutation RPC before Google services a
   context.requireOwnerAccess_ = () => { throw new Error("OWNER_REQUIRED: read-only account"); };
 
   const editorMutations = [
-    "createIntakeFromImage", "createIntakeFromPdfText", "createIntakeFromText", "createIntakeWithAi",
+    "createIntakeFromImage", "createIntakeFromPdfText", "createIntakeFromText", "createIntakeAutomatically", "createIntakeWithAi",
     "saveJob", "setJobArchived", "markLabelsPrinted",
     "approveIntake", "approveIntakes", "rejectIntake", "rejectIntakes", "savePolishingMovement", "savePolishingEventDate", "savePolishingProductRule"
   ];
@@ -92,7 +92,7 @@ test("workers cannot import or administer, but can use worker mutation entrypoin
   context.requireEditorAccess_ = () => { throw new Error("EDITOR_REQUIRED:"); };
   context.requireAdminAccess_ = () => { throw new Error("ADMIN_REQUIRED:"); };
   context.requireOwnerAccess_ = () => { throw new Error("OWNER_REQUIRED:"); };
-  for (const name of ["createIntakeFromImage", "createIntakeFromPdfText", "createIntakeFromText", "createIntakeWithAi", "saveJob", "setJobArchived", "markLabelsPrinted", "approveIntake", "approveIntakes", "rejectIntake", "rejectIntakes", "getAiImportStatus", "getCustomerRules"]) {
+  for (const name of ["createIntakeFromImage", "createIntakeFromPdfText", "createIntakeFromText", "createIntakeAutomatically", "createIntakeWithAi", "saveJob", "setJobArchived", "markLabelsPrinted", "approveIntake", "approveIntakes", "rejectIntake", "rejectIntakes", "getAiImportStatus", "getCustomerRules"]) {
     assert.throws(() => context[name]({}), /(EDITOR_REQUIRED|ADMIN_REQUIRED):/, name);
   }
   for (const name of ["savePolishingMovement", "savePolishingEventDate", "savePolishingProductRule"]) assert.throws(() => context[name]({}), /EDITOR_REQUIRED:/, `workers cannot call ${name}`);

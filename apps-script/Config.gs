@@ -7,6 +7,7 @@ var APP = Object.freeze({
     POLISHING: "工程管理_研磨",
     LEARNING: "工程管理_製品補完",
     MATERIALS: "工程管理_材料履歴",
+    MATERIAL_EXCLUSIONS: "工程管理_材料対象外",
     FINISHED_STOCK: "工程管理_Tezoe完成品在庫"
   }),
   STAGES: Object.freeze(["welding", "base", "grinding", "heat", "finish"]),
@@ -80,13 +81,16 @@ function setupSystem() {
   });
 }
 
-function ensureSystem_(alreadyLocked) {
+function ensureSystem_(alreadyLocked, snapshotScope) {
   var spreadsheet = getSpreadsheet_();
   ensureSheet_(spreadsheet, APP.SHEETS.JOBS, APP.JOB_HEADERS);
-  ensureSheet_(spreadsheet, APP.SHEETS.INTAKE, APP.INTAKE_HEADERS);
+  if (!snapshotScope) ensureSheet_(spreadsheet, APP.SHEETS.INTAKE, APP.INTAKE_HEADERS);
   ensureSheet_(spreadsheet, APP.SHEETS.SETTINGS, APP.SETTING_HEADERS);
-  ensureSheet_(spreadsheet, APP.SHEETS.LOG, APP.LOG_HEADERS);
-  ensureSheet_(spreadsheet, APP.SHEETS.LEARNING, APP.LEARNING_HEADERS);
+  if (snapshotScope === "orders") return ensureDefaultSettings_();
+  if (!snapshotScope) {
+    ensureSheet_(spreadsheet, APP.SHEETS.LOG, APP.LOG_HEADERS);
+    ensureSheet_(spreadsheet, APP.SHEETS.LEARNING, APP.LEARNING_HEADERS);
+  }
   if (typeof ensurePolishingSheet_ === "function") ensurePolishingSheet_(spreadsheet);
   var settings = ensureDefaultSettings_();
   if (typeof repairPolishingMirrorIfNeeded_ === "function") repairPolishingMirrorIfNeeded_(alreadyLocked);

@@ -1,0 +1,372 @@
+{
+  "capturedAt": "2026-11-20",
+  "localDemoOnly": true,
+  "entry": "Index.html",
+  "version": 119,
+  "bundleSha256": "31ab894eedd255cf8df596bd70a3459e6f9534b43b2fd2800317ef4b09926623",
+  "accessSha256": "e3fa5c5c57866e774e8d1f382cb3d78daa25ed3b24b0e38b1237793e00a71db3",
+  "fixture": "tools/manual-screenshots-fixture.js",
+  "viewport": {
+    "width": 1180,
+    "height": 940,
+    "deviceScaleFactor": 2
+  },
+  "images": {
+    "ledger": {
+      "file": "2026-11-20/ledger.jpg",
+      "caption": "工程一覧　作業員の画面"
+    },
+    "ledger-toolbar": {
+      "file": "2026-11-20/ledger-toolbar.jpg",
+      "caption": "工程一覧のタブと表示倍率"
+    },
+    "filters": {
+      "file": "2026-11-20/filters.jpg",
+      "caption": "検索と並び順は一覧ごとに設定"
+    },
+    "filters-focus": {
+      "file": "2026-11-20/filters-focus.jpg",
+      "caption": "第1から第3条件と昇順・降順"
+    },
+    "zoom": {
+      "file": "2026-11-20/zoom.jpg",
+      "caption": "品名と連番と5工程を160%で表示"
+    },
+    "ledger-focus": {
+      "file": "2026-11-20/ledger-focus.jpg",
+      "caption": "品名・連番と各工程の担当・状態"
+    },
+    "process": {
+      "file": "2026-11-20/process.jpg",
+      "caption": "工程ごとの状態と担当を選び、工程を保存",
+      "focus": [
+        {
+          "step": 1,
+          "box": [
+            630,
+            436,
+            779,
+            524
+          ]
+        },
+        {
+          "step": 2,
+          "box": [
+            1181,
+            436,
+            1269,
+            524
+          ]
+        },
+        {
+          "step": 3,
+          "box": [
+            1982,
+            1129,
+            2270,
+            1217
+          ]
+        }
+      ]
+    },
+    "bulk-held": {
+      "file": "2026-11-20/bulk-held.jpg",
+      "caption": "押したまま上の全へ移動して離す"
+    },
+    "bulk": {
+      "file": "2026-11-20/bulk.jpg",
+      "caption": "全工程への反映と 直前の一括変更を戻す"
+    },
+    "discard": {
+      "file": "2026-11-20/discard.jpg",
+      "caption": "入力を変更して閉じるときの3つの選択肢"
+    },
+    "final-finish": {
+      "file": "2026-11-20/final-finish.jpg",
+      "caption": "全数戻り後に最終仕上げの完了を選ぶ"
+    },
+    "distribution": {
+      "file": "2026-11-20/distribution.jpg",
+      "caption": "月→連番順で鋭匙鉗子の配布担当を確認",
+      "focus": [
+        {
+          "step": 1,
+          "box": [
+            70,
+            428,
+            1086,
+            572
+          ]
+        },
+        {
+          "step": 2,
+          "box": [
+            1312,
+            477,
+            1740,
+            565
+          ]
+        },
+        {
+          "step": 3,
+          "box": [
+            1815,
+            1157,
+            1903,
+            1245
+          ]
+        },
+        {
+          "step": 4,
+          "box": [
+            1975,
+            224,
+            2340,
+            312
+          ]
+        }
+      ]
+    },
+    "distribution-controls": {
+      "file": "2026-11-20/distribution-controls.jpg",
+      "caption": "納期の期間と月→連番順"
+    },
+    "theme": {
+      "file": "2026-11-20/theme.jpg",
+      "caption": "表示モードはこの端末に保存"
+    },
+    "dashboard": {
+      "file": "2026-11-20/dashboard.jpg",
+      "caption": "概況から納期注意や出荷待ちへ進む"
+    },
+    "completed": {
+      "file": "2026-11-20/completed.jpg",
+      "caption": "完成品リストの上段は出荷待ち 下段は出荷済み"
+    },
+    "shipping": {
+      "file": "2026-11-20/shipping.jpg",
+      "caption": "最終仕上げと出荷の状態を確認"
+    },
+    "new-order": {
+      "file": "2026-11-20/new-order.jpg",
+      "caption": "案件の追加画面"
+    },
+    "order-stock": {
+      "file": "2026-11-20/order-stock.jpg",
+      "caption": "数量は製造総数 うち在庫予定はその内数"
+    },
+    "import": {
+      "file": "2026-11-20/import.jpg",
+      "caption": "注文の取り込み方法を選ぶ"
+    },
+    "intake": {
+      "file": "2026-11-20/intake.jpg",
+      "caption": "取込キューで内容を確認してから案件へ反映"
+    },
+    "intake-review": {
+      "file": "2026-11-20/intake-review.jpg",
+      "caption": "原文と読み取った得意先・品名・数量・納期を照合"
+    },
+    "intake-learning": {
+      "file": "2026-11-20/intake-learning.jpg",
+      "caption": "数量や納期は毎回確認し 製品に共通する修正だけを覚える"
+    },
+    "labels": {
+      "file": "2026-11-20/labels.jpg",
+      "caption": "印刷対象とプレビューを確認"
+    },
+    "labels-detail": {
+      "file": "2026-11-20/labels-detail.jpg",
+      "caption": "品名・型・刃幅などを印刷プレビューで確認"
+    },
+    "labels-confirm": {
+      "file": "2026-11-20/labels-confirm.jpg",
+      "caption": "印刷できたことを確認してから待ちから外す"
+    },
+    "labels-print": {
+      "file": "2026-11-20/labels-print.jpg",
+      "caption": "A4縦に配置する実際のラベル印刷用レイアウト"
+    },
+    "polishing": {
+      "file": "2026-11-20/polishing.jpg",
+      "caption": "研磨屋にある製品と戻り日の指定"
+    },
+    "polishing-history": {
+      "file": "2026-11-20/polishing-history.jpg",
+      "caption": "戻り取消と日付編集を履歴から選ぶ"
+    },
+    "polishing-date": {
+      "file": "2026-11-20/polishing-date.jpg",
+      "caption": "発送日と戻り日は履歴から訂正"
+    },
+    "polishing-cancel": {
+      "file": "2026-11-20/polishing-cancel.jpg",
+      "caption": "発送取消の数量と対象を確認"
+    },
+    "polishing-billing": {
+      "file": "2026-11-20/polishing-billing.jpg",
+      "caption": "戻り月ごとの研磨代"
+    },
+    "polishing-custom": {
+      "file": "2026-11-20/polishing-custom.jpg",
+      "caption": "自由設定では製品ごとに江部と嘉代の単価を保存"
+    },
+    "materials": {
+      "file": "2026-11-20/materials.jpg",
+      "caption": "現在庫と発注残を確認"
+    },
+    "material-order": {
+      "file": "2026-11-20/material-order.jpg",
+      "caption": "発注数と入庫予定日を記録"
+    },
+    "material-orders": {
+      "file": "2026-11-20/material-orders.jpg",
+      "caption": "同じ発注に分納履歴と残数をまとめて表示"
+    },
+    "material-receive": {
+      "file": "2026-11-20/material-receive.jpg",
+      "caption": "実際に届いた数量だけを入庫"
+    },
+    "material-adjust": {
+      "file": "2026-11-20/material-adjust.jpg",
+      "caption": "棚卸差は増減数量と理由を残して調整"
+    },
+    "material-order-edit": {
+      "file": "2026-11-20/material-order-edit.jpg",
+      "caption": "入庫済数を確認して発注数量と入庫予定日を直す"
+    },
+    "material-note": {
+      "file": "2026-11-20/material-note.jpg",
+      "caption": "材料の行で備考を入力し、保存"
+    },
+    "material-exclusion-dialog": {
+      "file": "2026-11-20/material-exclusion-dialog.jpg",
+      "caption": "得意先・品名・仕様を確認して対象外として登録"
+    },
+    "material-exclusions": {
+      "file": "2026-11-20/material-exclusions.jpg",
+      "caption": "登録した碓井材料の対象外製品と、登録を取り消す操作"
+    },
+    "stock-overview": {
+      "file": "2026-11-20/stock-overview.jpg",
+      "caption": "Tezoeの現在庫と出荷見込"
+    },
+    "stock-note": {
+      "file": "2026-11-20/stock-note.jpg",
+      "caption": "Tezoe製品ごとの備考を保存",
+      "focus": [
+        {
+          "step": 2,
+          "box": [
+            34,
+            224,
+            1310,
+            492
+          ]
+        },
+        {
+          "step": 3,
+          "box": [
+            1102,
+            550,
+            1310,
+            638
+          ]
+        }
+      ]
+    },
+    "stock-orders": {
+      "file": "2026-11-20/stock-orders.jpg",
+      "caption": "受注ごとに在庫分と製造分を確認"
+    },
+    "stock-schedule": {
+      "file": "2026-11-20/stock-schedule.jpg",
+      "caption": "注文数量と在庫から出す累計数量を設定"
+    },
+    "stock-plans": {
+      "file": "2026-11-20/stock-plans.jpg",
+      "caption": "製造総数と受注分と在庫追加分を確認"
+    },
+    "stock-receive": {
+      "file": "2026-11-20/stock-receive.jpg",
+      "caption": "完成した在庫分をロットとして入庫"
+    },
+    "stock-ship": {
+      "file": "2026-11-20/stock-ship.jpg",
+      "caption": "対象の受注とロットと実際の出荷数量を確認"
+    },
+    "stock-reverse": {
+      "file": "2026-11-20/stock-reverse.jpg",
+      "caption": "元の記録と取消理由を確認"
+    },
+    "stock-history": {
+      "file": "2026-11-20/stock-history.jpg",
+      "caption": "履歴から元の記録を確認して取り消す"
+    },
+    "stock-only": {
+      "file": "2026-11-20/stock-only.jpg",
+      "caption": "全数在庫で出荷し製造総数が0の受注は受注履行完了"
+    },
+    "stock-custom": {
+      "file": "2026-11-20/stock-custom.jpg",
+      "caption": "案件に保存した特注製品を選び、現物がなければ0で登録",
+      "focus": [
+        {
+          "step": 2,
+          "box": [
+            34,
+            333,
+            656,
+            421
+          ]
+        },
+        {
+          "step": 3,
+          "box": [
+            688,
+            333,
+            1310,
+            421
+          ]
+        }
+      ]
+    },
+    "stock-opening": {
+      "file": "2026-11-20/stock-opening.jpg",
+      "caption": "手元の在庫を数えて追加"
+    },
+    "accounts": {
+      "file": "2026-11-20/accounts.jpg",
+      "caption": "登録するアカウントごとに権限を設定"
+    },
+    "assignees": {
+      "file": "2026-11-20/assignees.jpg",
+      "caption": "工程別の担当候補を全端末で共有"
+    },
+    "distribution-settings": {
+      "file": "2026-11-20/distribution-settings.jpg",
+      "caption": "配布担当の候補を全端末で共有"
+    },
+    "polishing-rates": {
+      "file": "2026-11-20/polishing-rates.jpg",
+      "caption": "対象月を確認して月別の単価を保存"
+    },
+    "owner-gmail": {
+      "file": "2026-11-20/owner-gmail.jpg",
+      "caption": "注文メールの検索条件は所有者が設定"
+    },
+    "owner-migration": {
+      "file": "2026-11-20/owner-migration.jpg",
+      "caption": "旧管理表は内容を確認してから取り込む"
+    },
+    "save-error": {
+      "file": "2026-11-20/save-error.jpg",
+      "caption": "保存失敗の表示から入力を復元して再試行"
+    },
+    "login": {
+      "file": "2026-11-20/login.jpg",
+      "caption": "初回にメールアドレスと8桁の確認コードを入力"
+    }
+  },
+  "errors": []
+}

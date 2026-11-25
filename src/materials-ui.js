@@ -1,12 +1,16 @@
 (function (root) {
   "use strict";
 
-  const ACTIONS = Object.freeze({ opening: "開始残高", order: "発注", receive: "入庫", use: "案件引当", release: "引当解除", adjust: "在庫調整", cancel: "発注取消" });
+  const ACTIONS = Object.freeze({ opening: "開始残高", order: "発注", editOrder: "発注変更", receive: "入庫", use: "案件引当", release: "引当解除", adjust: "在庫調整", cancel: "発注取消", stockNote: "備考更新" });
   const OPERATIONS = Object.freeze({
     order: { title: "材料を発注", date: "発注日", submit: "発注を記録", api: "saveMaterialOrder" },
+    editOrder: { title: "材料の発注を編集", submit: "発注の変更を保存", api: "updateMaterialOrder" },
     receive: { title: "材料の入庫を記録", date: "入庫日", submit: "入庫を記録", api: "receiveMaterialOrder" },
     adjust: { title: "材料の在庫を調整", date: "調整日", submit: "在庫を調整", api: "adjustMaterialStock" },
     cancel: { title: "発注残を取り消す", date: "取消日", submit: "発注残を取り消す", api: "cancelMaterialOrder" },
+    stockNote: { submit: "備考を保存", api: "saveMaterialStockNote" },
+    exclude: { title: "碓井材料を使わない製品として登録", submit: "使わない製品として登録", api: "saveMaterialExclusion" },
+    restore: { title: "材料を使わない製品の登録を取り消す", submit: "登録を取り消す", api: "saveMaterialExclusion" },
   });
   const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
   const number = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
@@ -15,6 +19,11 @@
   const materialName = (material) => [material?.code, material?.name].filter(Boolean).join(" · ") || "不明な材料";
   const emptyRow = (columns, message) => `<tr><td colspan="${columns}" class="material-empty">${escape(message)}</td></tr>`;
   const actionButton = (action, label, attributes = "") => `<button class="button button-secondary material-row-button" type="button" data-material-action="${escape(action)}" ${attributes}>${escape(label)}</button>`;
+  const isOrderAction = (action) => ["receive", "cancel", "editOrder"].includes(action);
+  const orderAllows = (action, order) => order && number(order.canceledQuantity) <= 0 && (action !== "cancel" || number(order.remainingQuantity) > 0);
+  const isExclusion = (action) => ["exclude", "restore"].includes(action);
+  const draftTarget = (draft) => draft.orderId || draft.jobId || draft.ruleId || draft.materialId;
+  const productDetails = (product) => [product.customer, product.productCode ? `製品番号 ${product.productCode}` : "", product.specLength, product.specShape, product.bladeWidth].filter(Boolean).join(" / ");
 
   function purchaseStatus(order) {
     const remaining = number(order.remainingQuantity), received = number(order.receivedQuantity), canceled = number(order.canceledQuantity);
@@ -50,7 +59,9 @@
     let pending = false;
     let draft = null;
     let attempt = null;
+    let stockRowsKey = "";
     const failedDrafts = new Map();
+    const stockNoteDrafts = new Map();
     const filters = { material: "all", action: "all", search: "" };
     const permitted = () => options.canEdit?.() === true;
     const field = (name) => form?.elements?.namedItem?.(name) || form?.elements?.[name];
@@ -66,11 +77,73 @@
     const notifyError = (message) => { if (typeof options.onError === "function") options.onError(message); };
     const notifySnapshot = () => { if (permitted() && typeof options.onSnapshot === "function") options.onSnapshot(snapshotSource || snapshot); };
 
+    function renderNoteControls(row) {
+      const id = row.dataset.materialStockRow;
+      const editor = row.querySelector("[data-material-stock-note]");
+      const save = row.querySelector('[data-material-action="stockNote"]');
+      const restore = row.querySelector('[data-material-action="restoreNote"]');
+      const material = materialFor(id);
+      const changes = stockNoteDrafts.get(id);
+      editor.readOnly = pending || !permitted() || !material;
+      save.disabled = editor.readOnly || !changes;
+      restore.hidden = !material || !changes || changes.expectedRevision === String(material.noteRevision || "");
+    }
+
+    function onNoteInput(event) {
+      const editor = event.target;
+      const id = editor?.dataset?.materialStockNote;
+      const material = materialFor(id);
+      if (!permitted() || pending || !material) return;
+      const current = stockNoteDrafts.get(id);
+      if (editor.value.trim() === String(material.note || "") && !current?.attempt?.failed) {
+        stockNoteDrafts.delete(id);
+      } else {
+        stockNoteDrafts.set(id, { ...current, value: editor.value, expectedRevision: current?.expectedRevision ?? String(material.noteRevision || "") });
+      }
+      const row = editor.closest?.("[data-material-stock-row]");
+      if (row) renderNoteControls(row);
+    }
+
+    function renderStockRows(materials) {
+      const body = query("#material-stock-rows");
+      if (!body) return;
+      const rows = materials.map((material) => {
+        const stock = number(material.stockQuantity);
+        const tone = stock < 0 ? "material-stock-negative" : stock === 0 ? "material-stock-zero" : "";
+        const badge = stock < 0 ? `不足 ${quantity(Math.abs(stock))} セット` : stock === 0 ? "在庫なし" : "";
+        const balance = `<strong>${quantity(stock)}</strong>${badge ? `<span class="material-stock-badge">${escape(badge)}</span>` : ""}`;
+        const onOrder = quantity(material.onOrderQuantity);
+        const nextDate = escape(material.nextExpectedDate ? dateLabel(material.nextExpectedDate) : number(material.onOrderQuantity) > 0 ? "予定未定" : "—");
+        const note = stockNoteDrafts.get(String(material.id))?.value ?? String(material.note || "");
+        return { material, tone, balance, onOrder, nextDate, note };
+      });
+      const layoutKey = JSON.stringify(materials.map(({ id, code, name, shape, specification }) => [id, code, name, shape, specification]));
+      if (stockRowsKey !== layoutKey || !body.rows?.length) {
+        body.innerHTML = rows.map(({ material, tone, balance, onOrder, nextDate, note }) => {
+          const id = escape(material.id);
+          const code = escape(material.code || material.name || material.id);
+          const attributes = `data-material-id="${id}"`;
+          return `<tr class="${tone}" data-material-stock-row="${id}"><th scope="row"><strong>${escape(material.code || "—")}</strong><small>${escape(material.name || "")}</small></th><td>${escape(material.shape || "—")}<small>${escape(material.specification || "")}</small></td><td class="material-number material-stock-value">${balance}</td><td class="material-number">${onOrder}</td><td class="material-stock-date">${nextDate}</td><td><div class="material-actions">${actionButton("order", "発注", attributes)}${actionButton("adjust", "在庫調整", attributes)}</div></td><td class="material-stock-note"><div class="material-note-editor"><textarea name="stockNote" rows="1" maxlength="1000" autocomplete="off" data-material-stock-note="${id}" aria-label="${code}の備考">${escape(note)}</textarea>${actionButton("stockNote", "保存", `${attributes} aria-label="${code}の備考を保存"`)}${actionButton("restoreNote", "最新の備考を表示", `${attributes} hidden`)}</div></td></tr>`;
+        }).join("") || emptyRow(7, "登録済みの材料がありません。");
+        stockRowsKey = layoutKey;
+      }
+      for (const [index, row] of Array.from(body.querySelectorAll?.("[data-material-stock-row]") || []).entries()) {
+        const { tone, balance, onOrder, nextDate, note } = rows[index];
+        row.className = tone;
+        for (const [offset, value] of [balance, onOrder, nextDate].entries()) {
+          const cell = row.cells[2 + offset];
+          if (cell.innerHTML !== value) cell.innerHTML = value;
+        }
+        const editor = row.querySelector("[data-material-stock-note]");
+        if (editor.value !== note) editor.value = note;
+      }
+    }
+
     function rememberFailedDraft() {
       if (!draft || !attempt?.failed || !permitted()) return;
       const values = Object.fromEntries(["materialId", "date", "quantity", "expectedDate", "note"].map((name) => [name, String(field(name)?.value || "")]));
       const materialId = ["order", "adjust"].includes(draft.action) ? values.materialId : draft.materialId;
-      failedDrafts.set(`${draft.action}:${draft.orderId || materialId}`, { draft: { ...draft, materialId }, values, attempt, order: orderFor(draft.orderId), message: query("#material-form-status")?.textContent || "" });
+      failedDrafts.set(`${draft.action}:${draftTarget({ ...draft, materialId })}`, { draft: { ...draft, materialId }, values, attempt, order: orderFor(draft.orderId), message: query("#material-form-status")?.textContent || "" });
     }
 
     function close() {
@@ -87,13 +160,14 @@
         const action = button.dataset.materialAction;
         button.disabled = !editable || (action === "refresh" ? refreshing : pending || !snapshot?.materials?.length);
       });
+      query("#material-stock-rows")?.querySelectorAll?.("[data-material-stock-row]").forEach(renderNoteControls);
       const refresh = panel.querySelector?.('[data-material-action="refresh"]');
       if (refresh) {
         refresh.setAttribute?.("aria-busy", String(refreshing));
         const label = refresh.querySelector?.("span");
         if (label) label.textContent = refreshing ? "更新中…" : "更新";
       }
-      Array.from(form.elements || []).forEach((input) => { input.disabled = pending || !editable; });
+      Array.from(form.elements || []).forEach((input) => { input.disabled = pending || !editable || (isExclusion(draft?.action) && ["materialId", "date", "quantity", "expectedDate", "note"].includes(input.name)); });
       dialog.querySelectorAll?.('[data-material-action="close"]').forEach((button) => { button.disabled = pending; });
       form.setAttribute?.("aria-busy", String(pending));
       text("#material-submit", pending ? "反映中…" : attempt?.failed ? "同じ内容で再試行" : OPERATIONS[draft?.action]?.submit || "保存");
@@ -112,7 +186,7 @@
       const orders = new Map(snapshot.orders.map((order) => [String(order.id), order]));
       snapshot.history.forEach((entry, index) => {
         const orderId = entry.orderId || (entry.action === "order" ? entry.id : "");
-        const order = ["order", "receive", "cancel"].includes(entry.action) && orderId ? orders.get(String(orderId)) : null;
+        const order = ["order", "editOrder", "receive", "cancel"].includes(entry.action) && orderId ? orders.get(String(orderId)) : null;
         if (!order || String(order.materialId) !== String(entry.materialId)) {
           rows.push({ entries: [entry], materialId: entry.materialId, date: entry.date || "", index });
           return;
@@ -137,12 +211,16 @@
         if (row.order) {
           const order = row.order, status = purchaseStatus(order);
           const eventNotes = row.entries.slice().sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")) || String(a.at || "").localeCompare(String(b.at || "")))
-            .map((entry) => `<div class="material-history-event-note"><span>${escape(ACTIONS[entry.action])} ${escape(dateLabel(entry.date))}${entry.action === "cancel" ? ` ${quantity(entry.quantity)} セット` : ""}</span>${entry.note ? `<div>${escape(entry.note)}</div>` : ""}${entry.actor ? `<small>${escape(entry.actor)}</small>` : ""}</div>`).join("");
+            .map((entry) => {
+              const amount = ["order", "editOrder", "cancel"].includes(entry.action) ? `　${quantity(entry.quantity)} セット` : "";
+              const expected = entry.action === "editOrder" ? ` / 入庫予定 ${escape(dateLabel(entry.expectedDate))}` : "";
+              return `<div class="material-history-event-note"><span>${escape(ACTIONS[entry.action])} ${escape(dateLabel(entry.date))}${amount}${expected}</span>${entry.note ? `<div>${escape(entry.note)}</div>` : ""}${entry.actor ? `<small>${escape(entry.actor)}</small>` : ""}</div>`;
+            }).join("");
           const orderNote = order.note && !row.entries.some((entry) => entry.note === order.note) ? `<div>${escape(order.note)}</div>` : "";
           return `<tr data-material-history-order="${escape(order.id)}"><td>${escape(dateLabel(order.orderDate))}</td><td><span class="material-history-action" data-material-kind="order">発注・入庫</span><small><span class="material-order-status" data-material-order-status="${status.key}">${status.label}</span></small></td><td>${escape(materialName(materialFor(order.materialId)))}</td><td class="material-number">発注 ${quantity(order.quantity)}<small>入庫 ${quantity(order.receivedQuantity)}</small><small>発注残 ${quantity(order.remainingQuantity)}</small>${number(order.canceledQuantity) > 0 ? `<small>取消 ${quantity(order.canceledQuantity)}</small>` : ""}</td><td class="material-order-receipts">${purchaseReceipts(order, row.entries)}</td><td class="material-history-job">—</td><td class="material-history-note">${orderNote}${eventNotes}</td></tr>`;
         }
         const entry = row.entries[0];
-        let amount = quantity(entry.quantity);
+        let amount = entry.action === "stockNote" ? "—" : quantity(entry.quantity);
         if (entry.action === "use") amount = `−${quantity(Math.abs(number(entry.quantity)))}`;
         else if (["receive", "release"].includes(entry.action)) amount = `+${quantity(Math.abs(number(entry.quantity)))}`;
         else if (["opening", "adjust"].includes(entry.action) && number(entry.quantity) > 0) amount = `+${amount}`;
@@ -160,15 +238,21 @@
         snapshotSource = null;
         refreshQueued = false;
         failedDrafts.clear();
+        stockNoteDrafts.clear();
+        stockRowsKey = "";
         panel.hidden = true;
-        ["#material-summary", "#material-stock-rows", "#material-order-rows", "#material-history-rows", "#material-unresolved-list"].forEach((selector) => markup(selector, ""));
+        ["#material-summary", "#material-stock-rows", "#material-order-rows", "#material-history-rows", "#material-unresolved-list", "#material-exclusions-list"].forEach((selector) => markup(selector, ""));
         markup("#material-form-material", "");
         markup("#material-history-material", '<option value="all">すべての材料</option>');
         text("#material-dialog-summary", "");
         text("#material-status", "");
         text("#material-form-status", "");
-        ["#material-orders-count", "#material-history-count", "#material-unresolved-count", "#material-initialized-at"].forEach((selector) => text(selector, ""));
+        ["#material-orders-count", "#material-history-count", "#material-unresolved-count", "#material-exclusions-count", "#material-initialized-at"].forEach((selector) => text(selector, ""));
         hide("#material-unresolved", true);
+        hide("#material-exclusions", true);
+        text("#material-exclusion-help", "");
+        draft = null;
+        attempt = null;
         form.reset?.();
         if (dialog.open) {
           if (typeof dialog.close === "function") dialog.close();
@@ -179,10 +263,12 @@
       }
       if (!snapshot) {
         markup("#material-summary", "");
-        markup("#material-stock-rows", emptyRow(6, refreshing ? "碓井材料在庫を読み込み中…" : "更新すると碓井材料在庫を表示します。"));
+        stockRowsKey = "";
+        markup("#material-stock-rows", emptyRow(7, refreshing ? "碓井材料在庫を読み込み中…" : "更新すると碓井材料在庫を表示します。"));
         markup("#material-order-rows", emptyRow(9, "碓井材料在庫を読み込んでください。"));
-        markup("#material-history-rows", emptyRow(6, "碓井材料在庫を読み込んでください。"));
+        markup("#material-history-rows", emptyRow(7, "碓井材料在庫を読み込んでください。"));
         hide("#material-unresolved", true);
+        hide("#material-exclusions", true);
         renderControls();
         return;
       }
@@ -204,13 +290,7 @@
       const shortage = materials.filter((material) => number(material.stockQuantity) < 0).length;
       const zero = materials.filter((material) => number(material.stockQuantity) === 0).length;
       markup("#material-summary", `<p><span>管理する材料</span><strong>${quantity(materials.length)}<small>種類</small></strong></p><p><span>入庫待ち</span><strong>${quantity(outstanding.reduce((sum, order) => sum + number(order.remainingQuantity), 0))}<small>セット</small></strong></p><p class="${shortage ? "material-summary-danger" : ""}"><span>不足している材料</span><strong>${quantity(shortage)}<small>種類</small></strong></p><p class="${zero ? "material-summary-warning" : ""}"><span>在庫なし</span><strong>${quantity(zero)}<small>種類</small></strong></p>`);
-      markup("#material-stock-rows", materials.map((material) => {
-        const stock = number(material.stockQuantity);
-        const tone = stock < 0 ? "material-stock-negative" : stock === 0 ? "material-stock-zero" : "";
-        const badge = stock < 0 ? `不足 ${quantity(Math.abs(stock))} セット` : stock === 0 ? "在庫なし" : "";
-        const attributes = `data-material-id="${escape(material.id)}"`;
-        return `<tr class="${tone}"><th scope="row"><strong>${escape(material.code || "—")}</strong><small>${escape(material.name || "")}</small></th><td>${escape(material.shape || "—")}<small>${escape(material.specification || "")}</small></td><td class="material-number material-stock-value"><strong>${quantity(stock)}</strong>${badge ? `<span class="material-stock-badge">${escape(badge)}</span>` : ""}</td><td class="material-number">${quantity(material.onOrderQuantity)}</td><td>${escape(material.nextExpectedDate ? dateLabel(material.nextExpectedDate) : number(material.onOrderQuantity) > 0 ? "予定未定" : "—")}</td><td><div class="material-actions">${actionButton("order", "発注", attributes)}${actionButton("adjust", "在庫調整", attributes)}</div></td></tr>`;
-      }).join("") || emptyRow(6, "登録済みの材料がありません。"));
+      renderStockRows(materials);
       text("#material-orders-count", `${orders.length}件（入庫待ち ${outstanding.length}件）`);
       markup("#material-order-rows", orders.map((order) => {
         const attributes = `data-material-order="${escape(order.id)}"`;
@@ -220,13 +300,18 @@
         const overdue = remaining > 0 && order.expectedDate && order.expectedDate < (options.today?.() || "");
         const { key: status, label: statusLabel } = purchaseStatus(order);
         const receiptDetails = purchaseReceipts(order, receiptsByOrder.get(String(order.id)) || []);
-        const actions = remaining > 0 ? `<div class="material-actions">${actionButton("receive", "入庫を記録", attributes)}${actionButton("cancel", "残数を取消", attributes)}</div>` : "—";
-        return `<tr data-material-order-status="${status}"><th scope="row">${escape(materialName(materialFor(order.materialId)))}${order.note ? `<small>${escape(order.note)}</small>` : ""}</th><td>${escape(dateLabel(order.orderDate))}</td><td class="material-number">${quantity(order.quantity)}</td><td class="material-number">${quantity(received)}</td><td class="material-number"><strong>${quantity(remaining)}</strong></td><td class="${overdue ? "material-overdue" : ""}">${escape(dateLabel(order.expectedDate))}${overdue ? "<small>予定日を過ぎています</small>" : ""}</td><td class="material-order-receipts">${receiptDetails}</td><td><span class="material-order-status" data-material-order-status="${status}">${statusLabel}</span>${canceled > 0 ? `<small>取消 ${quantity(canceled)} セット</small>` : ""}</td><td>${actions}</td></tr>`;
+        const excess = received - number(order.quantity);
+        const actions = canceled > 0 ? "—" : `<div class="material-actions">${actionButton("receive", remaining > 0 ? "入庫を記録" : "追加で入庫", attributes)}${actionButton("editOrder", "発注を編集", attributes)}${remaining > 0 ? actionButton("cancel", "残数を取消", attributes) : ""}</div>`;
+        return `<tr data-material-order-status="${status}"><th scope="row">${escape(materialName(materialFor(order.materialId)))}${order.note ? `<small>${escape(order.note)}</small>` : ""}</th><td>${escape(dateLabel(order.orderDate))}</td><td class="material-number">${quantity(order.quantity)}</td><td class="material-number">${quantity(received)}</td><td class="material-number"><strong>${quantity(remaining)}</strong></td><td class="${overdue ? "material-overdue" : ""}">${escape(dateLabel(order.expectedDate))}${overdue ? "<small>予定日を過ぎています</small>" : ""}</td><td class="material-order-receipts">${receiptDetails}</td><td><span class="material-order-status" data-material-order-status="${status}">${statusLabel}</span>${canceled > 0 ? `<small>取消 ${quantity(canceled)} セット</small>` : ""}${excess > 0 ? `<small>発注超過 ${quantity(excess)} セット</small>` : ""}</td><td>${actions}</td></tr>`;
       }).join("") || emptyRow(9, "発注はまだありません。材料を選んで発注を記録してください。"));
       const unresolved = snapshot.unresolved;
       hide("#material-unresolved", unresolved.length === 0);
       text("#material-unresolved-count", `${unresolved.length}件`);
-      markup("#material-unresolved-list", unresolved.map((job) => `<div class="material-unresolved-row"><div><strong>${escape(job.product || "製品名未設定")}</strong><span>${quantity(job.quantity)} セット · 型：${escape(job.specShape || "未設定")}</span><small>${escape(job.reason || "材料の対応を確認してください。")}</small></div>${actionButton("job", "注文を確認・修正", `data-material-job="${escape(job.id)}"`)}</div>`).join(""));
+      markup("#material-unresolved-list", unresolved.map((job) => `<div class="material-unresolved-row"><div><strong>${escape(job.product || "製品名未設定")}</strong><span>${escape(productDetails(job))}</span><span>${quantity(job.quantity)} セット${job.serialNo ? ` · 連番 ${escape(job.serialNo)}` : ""}</span><small>${escape(job.reason || "材料の対応を確認してください。")}</small></div><div class="material-actions" role="group" aria-label="${escape(job.product || "製品")}の材料確認">${actionButton("job", "注文を確認・修正", `data-material-job="${escape(job.id)}"`)}${job.productKey ? actionButton("exclude", "碓井材料を使わない", `data-material-job="${escape(job.id)}"`) : ""}</div></div>`).join(""));
+      const excludedProducts = snapshot.excludedProducts;
+      hide("#material-exclusions", excludedProducts.length === 0);
+      text("#material-exclusions-count", `${excludedProducts.length}件`);
+      markup("#material-exclusions-list", excludedProducts.map((product) => `<div class="material-unresolved-row"><div><strong>${escape(product.product)}</strong><span>${escape(productDetails(product))}</span><small>碓井材料を使わない · 登録 ${escape(dateLabel(product.at))}</small></div>${actionButton("restore", "登録を取り消す", `data-material-rule="${escape(product.id)}" aria-label="${escape(product.product)}の登録を取り消す"`)}</div>`).join(""));
       text("#material-initialized-at", snapshot.initializedAt ? `開始残高の登録：${dateLabel(snapshot.initializedAt)}` : "");
       renderHistory();
       renderControls();
@@ -237,7 +322,7 @@
       if (source !== snapshotSource && source !== snapshot) {
         revision += 1;
         snapshotSource = source;
-        snapshot = source ? { ...source, materials: source.materials, orders: Array.isArray(source.orders) ? source.orders : [], history: Array.isArray(source.history) ? source.history : [], unresolved: Array.isArray(source.unresolved) ? source.unresolved : [] } : null;
+        snapshot = source ? { ...source, materials: source.materials, orders: Array.isArray(source.orders) ? source.orders : [], history: Array.isArray(source.history) ? source.history : [], unresolved: Array.isArray(source.unresolved) ? source.unresolved : [], excludedProducts: Array.isArray(source.excludedProducts) ? source.excludedProducts : [] } : null;
       }
       render();
     }
@@ -300,78 +385,179 @@
 
     function updateDialogSummary() {
       if (!draft || !snapshot) return;
+      if (isExclusion(draft.action)) {
+        text("#material-dialog-summary", [draft.product.product, productDetails(draft.product)].filter(Boolean).join(" / "));
+        return;
+      }
       const material = materialFor(field("materialId")?.value || draft.materialId);
       const order = orderFor(draft.orderId);
       const balance = material ? `現在庫 ${quantity(material.stockQuantity)} セット` : "";
-      text("#material-dialog-summary", [materialName(material), order ? `発注日 ${dateLabel(order.orderDate)} / 未入庫 ${quantity(order.remainingQuantity)} セット` : balance, draft.action === "cancel" ? "未入庫の残数をすべて取り消します。入庫済みの在庫は変わりません。" : ""].filter(Boolean).join(" · "));
+      const orderSummary = order ? `発注日 ${dateLabel(order.orderDate)} / 発注 ${quantity(order.quantity)} / 入庫済 ${quantity(order.receivedQuantity)} / 発注残 ${quantity(order.remainingQuantity)} セット` : balance;
+      text("#material-dialog-summary", [materialName(material), orderSummary, draft.action === "cancel" ? "未入庫の残数をすべて取り消します。入庫済みの在庫は変わりません。" : ""].filter(Boolean).join(" · "));
+    }
+
+    function showDialog() {
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.open = true;
+      options.onDialogOpen?.();
     }
 
     function open(action, button) {
       if (!permitted() || pending || !snapshot || !OPERATIONS[action] || !dialog || !form) return;
       rememberFailedDraft();
-      const target = button?.dataset.materialOrder || button?.dataset.materialId;
-      const recovered = target ? failedDrafts.get(`${action}:${target}`) : Array.from(failedDrafts.values()).reverse().find((saved) => saved.draft.action === action);
+      const target = button?.dataset.materialOrder || button?.dataset.materialJob || button?.dataset.materialRule || button?.dataset.materialId;
+      const draftKey = `${action}:${target}`;
+      let recovered = target ? failedDrafts.get(draftKey) : Array.from(failedDrafts.values()).reverse().find((saved) => saved.draft.action === action);
+      const exclusion = isExclusion(action);
+      const product = exclusion ? action === "exclude" ? snapshot.unresolved.find((job) => job.id === target) : snapshot.excludedProducts.find((rule) => rule.id === target) : null;
+      const productKey = product?.productKey || product?.key;
+      if (exclusion && !productKey) return;
+      hide("#material-fields", exclusion);
+      hide("#material-exclusion-help", !exclusion);
+      if (exclusion) {
+        if (recovered && recovered.draft.productKey !== productKey) {
+          failedDrafts.delete(draftKey);
+          recovered = null;
+        }
+        form.reset?.();
+        draft = { action, product, productKey, ...(action === "exclude" ? { jobId: product.id } : { ruleId: product.id }) };
+        attempt = recovered?.attempt || null;
+        text("#material-dialog-title", OPERATIONS[action].title);
+        text("#material-exclusion-help", action === "exclude" ? "同じ得意先・品名・製品番号・仕様の製品に適用します。今後の注文も材料の確認対象から外れます。現在庫と過去の材料履歴は変更しません。" : "登録を取り消すと、同じ製品の案件が再び材料の確認対象になります。現在庫と過去の材料履歴は変更しません。");
+        setStatus("#material-form-status", recovered?.message || "", recovered ? "error" : "");
+        updateDialogSummary();
+        renderControls();
+        showDialog();
+        return;
+      }
       const order = orderFor(button?.dataset.materialOrder || recovered?.draft.orderId) || recovered?.order;
+      if (action === "editOrder" && order && recovered?.attempt?.conflict && recovered.draft.expectedRevision !== String(order.revision || "")) {
+        failedDrafts.delete(draftKey);
+        recovered = null;
+      }
       const selected = materialFor(order?.materialId || button?.dataset.materialId || recovered?.draft.materialId) || snapshot.materials[0];
-      if (!selected || (["receive", "cancel"].includes(action) && (!order || (!recovered && number(order.remainingQuantity) <= 0)))) return;
+      if (!selected || (isOrderAction(action) && !orderAllows(action, order) && !recovered)) return;
       form.reset?.();
-      draft = { action, materialId: selected.id, orderId: order?.id || "" };
+      const editing = action === "editOrder";
+      draft = {
+        action, materialId: selected.id, orderId: order?.id || "",
+        ...(editing ? { expectedRevision: recovered?.draft.expectedRevision ?? String(order.revision || ""), orderDate: order.orderDate } : {}),
+      };
       attempt = recovered?.attempt || null;
       const operation = OPERATIONS[action];
       text("#material-dialog-title", operation.title);
-      text("#material-date-label", `${operation.date}（必須）`);
-      text("#material-quantity-label", action === "adjust" ? "増減数量（セット・必須）" : "数量（セット・必須）");
-      text("#material-quantity-help", action === "adjust" ? "増やすときは正の数、減らすときはマイナスを入力します。" : action === "receive" ? `一部の入庫も記録できます。今回の上限は${quantity(order.remainingQuantity)} セットです。` : "本体とカブセで1セット。整数で入力してください。");
+      text("#material-date-label", editing ? "" : `${operation.date}（必須）`);
+      const quantityLabel = { adjust: "増減数量", order: "発注数量", editOrder: "発注数量", receive: "今回の入庫数量" };
+      text("#material-quantity-label", `${quantityLabel[action] || "数量"}（セット・必須）`);
+      text("#material-quantity-help", action === "adjust" ? "増やすときは正の数、減らすときはマイナスを入力します。" : action === "receive" ? number(order.receivedQuantity) > 0 ? "入庫済みの分を差し引き、今回分だけ入力してください。" : "今回入庫した実際のセット数を入力してください。" : "本体とカブセで1セット。整数で入力してください。");
       text("#material-note-label", ["adjust", "cancel"].includes(action) ? "理由（必須）" : "備考（任意）");
-      hide("#material-field-material", ["receive", "cancel"].includes(action));
+      hide("#material-field-material", isOrderAction(action));
+      hide("#material-field-date", editing);
       hide("#material-field-quantity", action === "cancel");
-      hide("#material-field-expected", action !== "order");
+      hide("#material-field-expected", action !== "order" && !editing);
+      hide("#material-field-note", editing);
       markup("#material-form-material", snapshot.materials.map((item) => `<option value="${escape(item.id)}">${escape(materialName(item))}</option>`).join(""));
       field("materialId").value = String(selected.id);
       field("materialId").required = ["order", "adjust"].includes(action);
       field("date").value = options.today?.() || new Date().toISOString().slice(0, 10);
+      field("date").required = !editing;
       const amount = field("quantity");
-      amount.value = action === "receive" ? String(number(order.remainingQuantity)) : "";
+      amount.value = editing ? String(order.quantity) : action === "receive" && number(order.remainingQuantity) > 0 ? String(order.remainingQuantity) : "";
       amount.required = action !== "cancel";
       amount.min = action === "adjust" ? "" : "1";
-      amount.max = action === "receive" ? String(number(order.remainingQuantity)) : "";
-      field("expectedDate").value = "";
-      field("expectedDate").required = action === "order";
+      amount.max = "";
+      field("expectedDate").value = editing ? order.expectedDate || "" : "";
+      field("expectedDate").required = action === "order" || editing;
       field("note").required = ["adjust", "cancel"].includes(action);
       field("note").value = "";
       if (recovered) Object.entries(recovered.values).forEach(([name, value]) => { if (field(name)) field(name).value = value; });
       setStatus("#material-form-status", recovered?.message || "", recovered ? "error" : "");
       updateDialogSummary();
       renderControls();
-      if (typeof dialog.showModal === "function") dialog.showModal();
-      else dialog.open = true;
+      showDialog();
+    }
+
+    function readExpectedDate(orderDate) {
+      const expectedDate = String(field("expectedDate")?.value || "");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(expectedDate)) throw new Error("入庫予定日を入力してください。");
+      if (expectedDate < orderDate) throw new Error("入庫予定日は発注日以降を入力してください。");
+      return expectedDate;
     }
 
     function readPayload() {
       if (!draft) throw new Error("入力画面を開き直してください。");
       const action = draft.action;
+      if (isExclusion(action)) return { action, productKey: draft.productKey, ...(action === "exclude" ? { jobId: draft.jobId } : { ruleId: draft.ruleId }) };
       const date = String(field("date")?.value || "");
       const note = String(field("note")?.value || "").trim();
       const amountText = String(field("quantity")?.value || "").trim();
       const amount = Number(amountText);
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`${OPERATIONS[action].date}を入力してください。`);
+      if (action !== "editOrder" && !/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`${OPERATIONS[action].date}を入力してください。`);
       if (["adjust", "cancel"].includes(action) && !note) throw new Error("理由を入力してください。");
       if (action !== "cancel" && (!amountText || !Number.isSafeInteger(amount) || (action === "adjust" ? amount === 0 : amount <= 0))) throw new Error(action === "adjust" ? "増減数量を0以外の整数で入力してください。" : "数量を1以上の整数で入力してください。");
-      if (["receive", "cancel"].includes(action)) {
-        const payload = { orderId: draft.orderId, date, ...(action === "receive" ? { quantity: amount } : {}), note };
+      if (isOrderAction(action)) {
+        const payload = action === "editOrder"
+          ? { orderId: draft.orderId, quantity: amount, expectedDate: readExpectedDate(draft.orderDate), expectedRevision: draft.expectedRevision }
+          : { orderId: draft.orderId, date, ...(action === "receive" ? { quantity: amount } : {}), note };
         const retrying = attempt?.failed && attempt.signature === `${action}:${JSON.stringify(payload)}`;
         const order = orderFor(draft.orderId);
-        if (!retrying && (!order || number(order.remainingQuantity) <= 0)) throw new Error("この発注の未入庫数量がありません。在庫を更新してください。");
-        if (!retrying && action === "receive" && amount > number(order.remainingQuantity)) throw new Error(`入庫数量は未入庫の${quantity(order.remainingQuantity)} セット以内で入力してください。`);
+        if (!retrying && !orderAllows(action, order)) throw new Error("対象の発注を確認できません。在庫を更新して開き直してください。");
         return payload;
       }
       const materialId = String(field("materialId")?.value || "");
       if (!materialFor(materialId)) throw new Error("材料を選んでください。");
       if (action === "adjust") return { materialId, date, quantity: amount, note };
-      const expectedDate = String(field("expectedDate")?.value || "");
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(expectedDate)) throw new Error("入庫予定日を入力してください。");
-      if (expectedDate < date) throw new Error("入庫予定日は発注日以降を入力してください。");
-      return { materialId, orderDate: date, quantity: amount, expectedDate, note };
+      return { materialId, orderDate: date, quantity: amount, expectedDate: readExpectedDate(date), note };
+    }
+
+    function attemptFor(action, payload, previous) {
+      const signature = `${action}:${JSON.stringify(payload)}`;
+      if (previous?.signature === signature) return previous;
+      return { signature, requestId: `material-${root.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`, failed: false };
+    }
+
+    async function saveMutation(action, payload, request, { status, onSaved, onFailed }) {
+      const operation = OPERATIONS[action];
+      if (typeof options.api?.[operation.api] !== "function") {
+        setStatus(status, "碓井材料在庫に接続できません。画面を更新してください。", "error");
+        return false;
+      }
+      pending = true;
+      revision += 1;
+      const startRevision = revision;
+      readRevision += 1;
+      refreshing = false;
+      setStatus(status, "反映中です。完了するまでお待ちください。", "pending");
+      renderControls();
+      let succeeded = false;
+      let acceptedSnapshot = false;
+      try {
+        const data = await options.api[operation.api]({ ...payload, requestId: request.requestId });
+        if (!Array.isArray(data?.materials)) throw new Error("保存後の応答を確認できませんでした。");
+        succeeded = true;
+        onSaved?.();
+        if (permitted() && startRevision === revision) {
+          setSnapshot(data);
+          acceptedSnapshot = true;
+          setStatus("#material-status", `${operation.submit}：完了しました。`, "success");
+        }
+      } catch (error) {
+        request.failed = true;
+        request.conflict = /別の端末で/.test(error?.message || "");
+        if (permitted()) {
+          const unknown = error?.name === "TypeError" || /network|fetch|通信|接続|timeout|タイムアウト|応答/i.test(`${error?.code || ""} ${error?.message || ""}`);
+          const message = unknown ? `通信結果を確認できません。反映済みの可能性があります。入力を変えずに再試行すると、同じ操作として確認します。${error?.message ? ` ${error.message}` : ""}` : `保存できませんでした。入力を確認して再試行してください。${error?.message ? ` ${error.message}` : ""}`;
+          setStatus(status, message, "error");
+          onFailed?.();
+          notifyError(message);
+        }
+      } finally {
+        pending = false;
+        renderControls();
+      }
+      if (succeeded && acceptedSnapshot) notifySnapshot();
+      if (refreshQueued && !refreshPromise && permitted()) void refresh();
+      return succeeded;
     }
 
     async function submit(event) {
@@ -380,52 +566,28 @@
       let payload;
       try { payload = readPayload(); }
       catch (error) { setStatus("#material-form-status", error.message, "error"); return; }
-      const operation = OPERATIONS[draft.action];
-      if (typeof options.api?.[operation.api] !== "function") {
-        setStatus("#material-form-status", "碓井材料在庫に接続できません。画面を更新してください。", "error");
-        return;
-      }
-      const signature = `${draft.action}:${JSON.stringify(payload)}`;
-      const operationKey = `${draft.action}:${payload.orderId || payload.materialId}`;
-      if (!attempt || attempt.signature !== signature) attempt = { signature, requestId: `material-${root.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`, failed: false };
-      pending = true;
-      revision += 1;
-      const startRevision = revision;
-      readRevision += 1;
-      refreshing = false;
-      setStatus("#material-form-status", "反映中です。完了するまでお待ちください。", "pending");
-      renderControls();
-      let succeeded = false;
-      let acceptedSnapshot = false;
-      try {
-        const data = await options.api[operation.api]({ ...payload, requestId: attempt.requestId });
-        if (!Array.isArray(data?.materials)) throw new Error("保存後の応答を確認できませんでした。");
-        succeeded = true;
-        failedDrafts.delete(operationKey);
-        if (permitted() && startRevision === revision) {
-          setSnapshot(data);
-          acceptedSnapshot = true;
-          setStatus("#material-status", `${operation.submit}：完了しました。`, "success");
-        }
-      } catch (error) {
-        attempt.failed = true;
-        if (permitted()) {
-          const unknown = error?.name === "TypeError" || /network|fetch|通信|接続|timeout|タイムアウト|応答/i.test(`${error?.code || ""} ${error?.message || ""}`);
-          const message = unknown ? `通信結果を確認できません。反映済みの可能性があります。入力を変えずに再試行すると、同じ操作として確認します。${error?.message ? ` ${error.message}` : ""}` : `保存できませんでした。入力を確認して再試行してください。${error?.message ? ` ${error.message}` : ""}`;
-          setStatus("#material-form-status", message, "error");
-          rememberFailedDraft();
-          notifyError(message);
-        }
-      } finally {
-        pending = false;
-        if (succeeded) {
+      const action = draft.action;
+      attempt = attemptFor(action, payload, attempt);
+      const succeeded = await saveMutation(action, payload, attempt, {
+        status: "#material-form-status",
+        onSaved() {
+          failedDrafts.delete(`${action}:${draftTarget(payload)}`);
           attempt = null;
-          close();
-        }
-        renderControls();
-      }
-      if (succeeded && acceptedSnapshot) notifySnapshot();
-      if (refreshQueued && !refreshPromise && permitted()) void refresh();
+        },
+        onFailed: rememberFailedDraft,
+      });
+      if (succeeded) close();
+    }
+
+    async function saveStockNote(id) {
+      const changes = stockNoteDrafts.get(id);
+      if (pending || !materialFor(id) || !changes) return;
+      const payload = { materialId: id, note: changes.value.trim(), expectedRevision: changes.expectedRevision };
+      changes.attempt = attemptFor("stockNote", payload, changes.attempt);
+      await saveMutation("stockNote", payload, changes.attempt, {
+        status: "#material-status",
+        onSaved() { stockNoteDrafts.delete(id); },
+      });
     }
 
     function onClick(event) {
@@ -436,6 +598,13 @@
       if (!permitted()) return;
       if (action === "refresh") { void refresh(); return; }
       if (action === "job") { options.onJob?.(button.dataset.materialJob); return; }
+      if (action === "stockNote") return saveStockNote(button.dataset.materialId);
+      if (action === "restoreNote") {
+        stockNoteDrafts.delete(button.dataset.materialId);
+        render();
+        button.closest?.("[data-material-stock-row]")?.querySelector("[data-material-stock-note]")?.focus();
+        return;
+      }
       open(action, button);
     }
 
@@ -447,6 +616,7 @@
       if (!panel || !dialog || !form) return;
       bound = true;
       panel.addEventListener?.("click", onClick);
+      panel.addEventListener?.("input", onNoteInput);
       dialog.addEventListener?.("click", (event) => {
         if (event.target === dialog) { event.preventDefault?.(); close(); }
         else onClick(event);
@@ -470,7 +640,7 @@
 
     if (doc?.readyState === "loading") doc.addEventListener?.("DOMContentLoaded", () => { bind(); render(); }, { once: true });
     else bind();
-    return Object.freeze({ setSnapshot, render, refresh, invalidate });
+    return Object.freeze({ setSnapshot, render, refresh, invalidate, hasUnsavedNotes: () => stockNoteDrafts.size > 0 });
   }
 
   root.MaterialInventoryUI = Object.freeze({ create });

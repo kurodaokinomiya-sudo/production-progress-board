@@ -1,13 +1,15 @@
 import { createServer } from "node:http";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseLocalOrderPdf } from "./local-pdf-parser.mjs";
 import { parseLocalOrderText } from "./local-text-parser.mjs";
+import { parseRememberedOrderAutomatically } from "./local-auto-import.mjs";
 import { localProductMetadata } from "./local-product-master.mjs";
 import { localAiStatus, parseLocalOrderAi, diagnoseLocalAi } from "./local-ai-import.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const realRoot = await realpath(root);
 const port = Number(process.env.PROGRESS_BOARD_PORT || 4173);
 const qaMode = process.env.PROGRESS_BOARD_QA_MODE === "1";
 const mime = {
@@ -37,14 +39,45 @@ function sendJson(response, status, value) {
   response.end(JSON.stringify(value));
 }
 
+function localRequestOrigin(request) {
+  const host = request.headers.host;
+  if (typeof host !== "string" || !host) return null;
+  let requestUrl;
+  try { requestUrl = new URL(`http://${host}`); } catch { return null; }
+  if (!(["127.0.0.1", "localhost"].includes(requestUrl.hostname) && !requestUrl.username && !requestUrl.password && requestUrl.pathname === "/" && !requestUrl.search && !requestUrl.hash)) return null;
+  const origin = request.headers.origin;
+  if (origin !== undefined) {
+    try {
+      const parsedOrigin = new URL(origin);
+      if (parsedOrigin.origin !== requestUrl.origin || !["127.0.0.1", "localhost"].includes(parsedOrigin.hostname)) return null;
+    } catch { return null; }
+  }
+  return requestUrl.origin;
+}
+
+function assetScope(requested) {
+  if (requested === "/tokens.css") return { path: "tokens.css", root: realRoot };
+  const source = requested.match(/^\/src\/([A-Za-z0-9._-]+\.(?:html|css|js))$/);
+  if (source) return { path: `src/${source[1]}`, root: path.join(realRoot, "src") };
+  if (qaMode) {
+    const bundle = requested.match(/^\/dist\/(Index|Access)\.html$/);
+    if (bundle) return { path: `dist/${bundle[1]}.html`, root: path.join(realRoot, "dist") };
+  }
+  return null;
+}
+
+function isWithin(parent, candidate) {
+  const relative = path.relative(parent, candidate);
+  return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
+}
+
 const server = createServer(async (request, response) => {
   try {
-    const url = new URL(request.url, `http://${request.headers.host}`);
+    const origin = localRequestOrigin(request);
+    if (!origin) { sendJson(response, 403, { error: "ローカル画面から実行してください。" }); return; }
+    const url = new URL(request.url, origin);
+    if (url.origin !== origin) { sendJson(response, 403, { error: "ローカル画面から実行してください。" }); return; }
     if (url.pathname.startsWith("/api/local/")) {
-      if (!["127.0.0.1", "localhost"].includes(url.hostname) || (request.headers.origin && request.headers.origin !== url.origin)) {
-        sendJson(response, 403, { error: "ローカル画面から実行してください。" });
-        return;
-      }
       if (qaMode && ["/api/local/parse-order-ai", "/api/local/diagnose-ai"].includes(url.pathname)) {
         sendJson(response, 403, { error: "QAでは外部AIを呼び出せません。合成応答を使用してください。" });
         return;
@@ -68,15 +101,20 @@ const server = createServer(async (request, response) => {
       } catch { sendJson(response, 200, { scriptEditorUrl: "" }); }
       return;
     }
-    if (request.method === "POST" && url.pathname === "/api/local/parse-order-text") {
+    if (request.method === "POST" && ["/api/local/parse-order-text", "/api/local/parse-order-auto"].includes(url.pathname)) {
       if (!String(request.headers["content-type"] || "").startsWith("application/json")) {
         sendJson(response, 415, { error: "JSON形式で送信してください。" });
         return;
       }
       try {
-        const input = await readJsonBody(request, 512 * 1024, "本文は30000文字以下にしてください。");
+        const fileAuto = url.pathname === "/api/local/parse-order-auto";
+        const input = await readJsonBody(request, (fileAuto ? 16 : 4) * 1024 * 1024, "本文・ファイルまたは補完情報が大きすぎます。");
         if (qaMode && input.engine === "ai") throw new Error("QAでは外部AIを呼び出せません。合成応答を使用してください。");
-        sendJson(response, 200, await parseLocalOrderText(input));
+        const aiParser = qaMode ? async () => { throw new Error("QAでは外部AIを呼び出せません。合成応答を使用してください。"); } : undefined;
+        const parsed = url.pathname === "/api/local/parse-order-auto"
+          ? await parseRememberedOrderAutomatically(input, aiParser ? { aiParser } : {})
+          : await parseLocalOrderText(input, aiParser ? { aiParser } : {});
+        sendJson(response, 200, parsed);
       } catch (error) {
         sendJson(response, 400, { error: error.message || "本文を解析できませんでした。" });
       }
@@ -118,13 +156,17 @@ const server = createServer(async (request, response) => {
       return;
     }
     const requested = decodeURIComponent(url.pathname);
-    if (qaMode && (!/^\/(?:src\/|dist\/|tests\/fixtures\/|node_modules\/pdfjs-dist\/|tokens\.css$)/.test(requested) || requested.split(/[\\/]/).some(part => part === ".."))) throw new Error("not a QA asset");
-    const target = path.resolve(root, `.${requested}`);
-    if (!target.startsWith(root + path.sep)) throw new Error("outside workspace");
-    const info = await stat(target);
+    if (requested.includes("\\") || requested.split("/").some(part => part === "." || part === "..")) throw new Error("invalid asset path");
+    const scope = assetScope(requested);
+    if (!scope) throw new Error("not an allowed asset");
+    const target = path.resolve(realRoot, scope.path);
+    if (!isWithin(scope.root, target)) throw new Error("outside asset scope");
+    const resolvedTarget = await realpath(target);
+    if (!isWithin(scope.root, resolvedTarget)) throw new Error("outside asset scope");
+    const info = await stat(resolvedTarget);
     if (!info.isFile()) throw new Error("not a file");
-    const body = await readFile(target);
-    response.writeHead(200, { "Content-Type": mime[path.extname(target).toLowerCase()] || "application/octet-stream", "Cache-Control": "no-store" });
+    const body = await readFile(resolvedTarget);
+    response.writeHead(200, { "Content-Type": mime[path.extname(resolvedTarget).toLowerCase()] || "application/octet-stream", "Cache-Control": "no-store" });
     response.end(body);
   } catch {
     response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });

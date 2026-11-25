@@ -5,10 +5,12 @@ import vm from "node:vm";
 
 const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
 const snapshot = (seconds, jobs = []) => ({ jobs, intake: [], settings: { syncIntervalSeconds: seconds }, mode: "demo", access: { role: "owner", canEdit: true, isOwner: true } });
+const scopedSnapshot = (jobs, access = snapshot(20).access) => ({ jobs, settings: { syncIntervalSeconds: 20 }, mode: "demo", access });
+const settle = () => new Promise(setImmediate);
 
 function harness(seconds) {
   let now = 0, nextId = 0, installed = 0, calls = 0, result = () => snapshot(seconds);
-  const intervals = new Map(), timeouts = new Map();
+  const intervals = new Map(), timeouts = new Map(), requests = [];
   const storage = new Map();
   const element = { hidden: false, textContent: "", focus() {}, classList: { add() {}, remove() {}, toggle() {} } };
   const document = { visibilityState: "visible", querySelector: () => element, querySelectorAll: () => [], body: element };
@@ -20,12 +22,18 @@ function harness(seconds) {
     setInterval: (fn, ms) => { const id = ++nextId; installed++; intervals.set(id, { fn, ms, due: now + ms }); return id; },
     clearInterval: id => intervals.delete(id),
   });
-  vm.runInContext(`${source.replace(/\ninit\(\);\s*$/, "")}\nglobalThis.ui = { state, api, init, refreshData, startAutoSync, handleAccessRequired, backgroundOperations, pendingProcessSaves, setPinch(value) { ledgerPinch = value; }, saveRevision() { mutationRevision++; processSaveRevision++; } };`, c);
-  for (const name of ["applyTheme", "renderSkeletons", "bindEvents", "bindLedgerDisplay", "switchView", "setStartupState", "setConnection", "renderAll", "showToast", "reconcilePolishingRetry", "renderBackgroundActivity"]) c[name] = () => {};
-  c.ui.api.getSnapshot = () => { calls++; return Promise.resolve().then(result); };
-  return { ...c.ui, document, intervals, c, calls: () => calls, installed: () => installed,
+  vm.runInContext(`${source.replace(/\ninit\(\);\s*$/, "")}\nglobalThis.ui = { state, api, init, refreshData, startAutoSync, handleAccessRequired, loadDeferredData, deferredReads, refreshIntakeAfterImport, backgroundOperations, pendingProcessSaves, setPinch(value) { ledgerPinch = value; }, saveRevision() { mutationRevision++; processSaveRevision++; } };`, c);
+  for (const name of ["applyTheme", "renderSkeletons", "bindEvents", "bindLedgerDisplay", "switchView", "setStartupState", "setConnection", "renderAll", "renderActiveView", "renderIntakeBadge", "renderAiImportStatus", "showToast", "reconcilePolishingRetry", "renderBackgroundActivity"]) c[name] = () => {};
+  c.ui.api.getSnapshot = (request) => { calls++; requests.push(request); return Promise.resolve().then(() => result(request)); };
+  return { ...c.ui, document, intervals, c, requests, calls: () => calls, installed: () => installed,
     respond: fn => { result = fn; },
     activeDelay: () => { assert.equal(intervals.size, 1); return [...intervals.values()][0].ms; },
+    runPrefetch() {
+      const next = [...timeouts.entries()].find(([, timer]) => timer.ms === 0);
+      assert.ok(next, "a prefetch task is scheduled");
+      timeouts.delete(next[0]);
+      next[1].fn();
+    },
     async advance(ms) {
       const end = now + ms;
       while (true) {
@@ -111,6 +119,20 @@ test("N06 a delayed pre-save response cannot replace new jobs, settings or their
   h.pendingProcessSaves.clear();
 });
 
+test("refreshing jobs after a stock save skips stock reads while periodic sync still refreshes stock", async () => {
+  const h = harness(10); await h.init();
+  h.state.activeView = "finishedStock";
+  const stockRefreshes = [];
+  h.c.invalidateFinishedStock = (options) => stockRefreshes.push(options);
+  h.respond(() => snapshot(10, [{ id: "reopened-job", version: 5 }]));
+  await h.refreshData({ quiet: true, refreshFinishedStock: false });
+  assert.equal(h.state.jobs[0].id, "reopened-job");
+  assert.equal(stockRefreshes.length, 0);
+  await h.advance(10000);
+  assert.equal(stockRefreshes.length, 1);
+  assert.equal(stockRefreshes[0].passive, true);
+});
+
 test("N06 revocation stops polling and reauthentication restarts only one current timer", async () => {
   const h = harness(300); await h.init();
   h.handleAccessRequired(); assert.equal(h.intervals.size, 0);
@@ -120,4 +142,107 @@ test("N06 revocation stops polling and reauthentication restarts only one curren
   assert.equal(h.activeDelay(), 10000);
   assert.equal(h.installed(), 2);
   await h.advance(10000); assert.equal(h.calls(), 3);
+});
+
+test("first paint precedes ordered prefetch and a selected tab starts while another section is loading", async () => {
+  const h = harness(20);
+  const trace = [];
+  let finishJobs, finishIntake;
+  h.respond(({ scope }) => {
+    trace.push(scope);
+    if (scope === "orders") return scopedSnapshot([{ id: "working" }]);
+    return new Promise(resolve => { finishJobs = resolve; });
+  });
+  h.c.renderAll = () => trace.push("render");
+  h.c.refreshMaterialInventory = async () => { trace.push("materials"); };
+  h.c.renderFinishedStockWorkspace = async () => { trace.push("finishedStock"); };
+  h.api.getIntakeSnapshot = () => {
+    trace.push("intake");
+    return new Promise(resolve => { finishIntake = resolve; });
+  };
+  h.api.getAccessSettings = async () => { trace.push("accessSettings"); return { users: [] }; };
+
+  await h.init();
+  assert.deepEqual(trace, ["orders", "render"]);
+  assert.equal(h.requests[0].includeMaterials, false);
+  assert.equal(h.state.jobHistoryReady, false);
+
+  h.runPrefetch(); await settle();
+  assert.equal(trace.at(-1), "jobs");
+  h.state.activeView = "intake";
+  const intake = h.loadDeferredData("intake");
+  assert.equal(h.loadDeferredData("intake"), intake);
+  assert.equal(trace.at(-1), "intake", "the foreground request does not wait for history");
+  finishIntake({ intake: [{ id: "pending", status: "pending" }] });
+  await intake;
+  assert.equal(h.state.intake[0].id, "pending");
+  assert.equal(h.state.jobHistoryReady, false);
+
+  finishJobs(scopedSnapshot([{ id: "working" }, { id: "shipped", shippingStatus: "shipped" }]));
+  await settle();
+  assert.equal(h.state.jobHistoryReady, true);
+  assert.equal(h.state.jobs[1].id, "shipped");
+  for (const section of ["materials", "finishedStock", "accessSettings"]) {
+    h.runPrefetch(); await settle();
+    assert.equal(trace.at(-1), section);
+  }
+  await h.loadDeferredData("intake");
+  assert.equal(trace.filter(section => section === "intake").length, 1, "opening a warm tab reuses its data");
+});
+
+test("history prefetch failure keeps the ledger and allows another section and a history retry", async () => {
+  const h = harness(20);
+  h.respond(({ scope }) => {
+    if (scope === "orders") return scopedSnapshot([{ id: "working" }]);
+    throw new Error("history offline");
+  });
+  await h.init();
+  h.runPrefetch(); await settle();
+  assert.equal(h.deferredReads.get("jobs").error, true);
+  assert.equal(h.state.jobs[0].id, "working");
+  assert.equal(h.state.jobHistoryReady, false);
+
+  let materialReads = 0;
+  h.c.refreshMaterialInventory = async () => { materialReads++; };
+  h.runPrefetch(); await settle();
+  assert.equal(materialReads, 1);
+
+  h.respond(() => scopedSnapshot([{ id: "working" }, { id: "shipped" }]));
+  assert.equal(await h.loadDeferredData("jobs"), true);
+  assert.equal(h.deferredReads.get("jobs").error, false);
+  assert.equal(h.state.jobs[1].id, "shipped");
+});
+
+test("a pending queue read predating an import cannot overwrite the fresh queue", async () => {
+  const h = harness(20);
+  h.respond(() => scopedSnapshot([]));
+  await h.init();
+  const responses = [];
+  h.api.getIntakeSnapshot = () => new Promise(resolve => { responses.push(resolve); });
+  const pending = h.loadDeferredData("intake");
+  const imported = h.refreshIntakeAfterImport();
+  responses[0]({ intake: [{ id: "old", status: "pending" }] });
+  assert.equal(await pending, false);
+  assert.equal(h.state.intake.length, 0);
+  await settle();
+  assert.equal(responses.length, 2);
+  responses[1]({ intake: [{ id: "new", status: "pending" }] });
+  await imported;
+  assert.equal(h.state.intake[0].id, "new");
+});
+
+test("permission downgrades discard an intake response already in flight", async () => {
+  const h = harness(20);
+  h.respond(() => scopedSnapshot([]));
+  await h.init();
+  let finishIntake;
+  h.api.getIntakeSnapshot = () => new Promise(resolve => { finishIntake = resolve; });
+  const intake = h.loadDeferredData("intake");
+  h.respond(() => scopedSnapshot([], { role: "worker", canWork: true, canEdit: false }));
+  await h.refreshData();
+  finishIntake({ intake: [{ id: "private", status: "pending" }], aiImport: { ready: true } });
+  assert.equal(await intake, false);
+  assert.equal(h.deferredReads.has("intake"), false);
+  assert.equal(h.state.intake.length, 0);
+  assert.equal(h.state.aiImport.ready, false);
 });

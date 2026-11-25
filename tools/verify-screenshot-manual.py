@@ -1,76 +1,151 @@
-"""Verify A4 layout, screen assets, Japanese fonts, and render contact sheets."""
-from pathlib import Path
+"""Check the rendered manual and publish the verified PDF and Markdown."""
+
+import argparse
+import hashlib
 import json
+from pathlib import Path
+from runpy import run_path
+from shutil import copy2
+
 from PIL import Image
 from pypdf import PdfReader
 from reportlab.pdfbase.ttfonts import TTFont
 
-ROOT = Path(__file__).resolve().parents[1]
-PDF = ROOT / 'output/pdf/生産工程管理_操作マニュアル_実画面版.pdf'
-TMP = ROOT / 'tmp/pdfs'
-reader = PdfReader(PDF)
-texts = [page.extract_text() for page in reader.pages]
-assert len(reader.pages) == 21
-assert '職人編の目次' in texts[2] and '事務編の目次' in texts[11]
-assert '実画面版' in texts[0]
-assert '○件を案件へ反映' in texts[15]
-assert '設定済みのアプリを開く' in texts[1]
-assert '印刷完了・待ちから外す' in texts[16]
-assert '研磨状態に戻す' in texts[7] and '発送数量を訂正' in texts[7]
-assert 'B(メニスカス)' in texts[17] and '3,300' in texts[17]
-assert '江部' in texts[18] and '嘉代' in texts[18] and '未確定' in texts[18]
-assert '元の戻り月' in texts[18]
-assert '戻りを間違えて反映した' in texts[19]
-assert '8ページの「研磨状態に戻す」' in texts[9].replace('\n', '')
-assert '取消・訂正は8ページ' in texts[11]
-assert '8・10' in texts[19]
-assert all('QR' not in t and '�' not in t for t in texts)
-for i, page in enumerate(reader.pages, 1):
-    assert abs(float(page.mediabox.width) - 595.2756) < .1
-    assert abs(float(page.mediabox.height) - 841.8898) < .1
-    assert f'{i} / 21' in texts[i-1]
-    assert '2026年10月8日版' in texts[i-1]
-    for f in page['/Resources']['/Font'].get_object().values():
-        f = f.get_object()
-        if f.get('/Subtype') == '/TrueType':
-            desc = f['/FontDescriptor'].get_object()
-            assert any(k in desc for k in ['/FontFile','/FontFile2','/FontFile3'])
-for name in ['meiryo.ttc','meiryob.ttc']:
-    font = TTFont('check-'+name, 'C:/Windows/Fonts/'+name, subfontIndex=0)
-    missing = sorted({c for t in texts for c in t if ord(c) >= 32 and ord(c) not in font.face.charToGlyph})
-    assert not missing, (name, missing)
-links = [a.get_object() for page in reader.pages for a in page.get('/Annots', [])]
-assert len(links) == 19
-assert not any(a.get('/A', {}).get('/S') == '/URI' for a in links)
-page_numbers = {page.indirect_reference.idnum: i for i, page in enumerate(reader.pages, 1)}
-destinations = [page_numbers[link['/Dest'][0].idnum] for link in links]
-assert destinations == [3, 12, *range(4, 12), *range(13, 22)], destinations
-manifest = json.loads((ROOT/'docs/manual-screenshots/manifest.json').read_text(encoding='utf-8'))
-assets = [item for group in manifest.values() for item in group]
-for item in assets:
-    with Image.open(ROOT/'docs/manual-screenshots'/item['file']) as im:
-        assert im.width >= 1200 and im.height >= 700, (item['file'], im.size)
-        x,y,w,h = (item['clip'][key] for key in ['x','y','width','height'])
-        assert 0 <= x < im.width and 0 <= y < im.height and w > 0 and h > 0
-        assert x+w <= im.width and y+h <= im.height
-layout = json.loads((TMP/'screenshot-manual-layout.json').read_text(encoding='utf-8'))
-expected_figures = sum(len(items) for kind, items in manifest.items() if kind != 'cover')
-assert len(layout['screenshots']) == expected_figures
-for block in layout['screenshots']:
-    assert block['image']['top']+block['image']['height'] < 795
-pages = sorted(TMP.glob('screenshot-manual-page-*.png'))
-assert len(pages) == 21
-tw, pad, gutter = 690, 22, 22
-th = round(tw*297/210)
-for i in range((len(pages)+3)//4):
-    sheet = Image.new('RGB', (pad*2+tw*2+gutter, pad*2+th*2+gutter), '#d5dce3')
-    for j,p in enumerate(pages[i*4:i*4+4]):
-        im = Image.open(p).convert('RGB')
-        im.thumbnail((tw,th),Image.Resampling.LANCZOS)
-        sheet.paste(im,(pad+(j%2)*(tw+gutter),pad+(j//2)*(th+gutter)))
-    sheet.save(TMP/f'screenshot-manual-contact-{i+1}.png')
-report = dict(pages=21,paper='A4 portrait',japanese_fonts_embedded=True,missing_glyphs=[],
-              internal_toc_links=19,external_links=0,screen_captures=len({item['file'] for item in assets}),
-              page_figures=len(layout['screenshots']),rendered_pages=len(pages),pdf_bytes=PDF.stat().st_size)
-(TMP/'screenshot-manual-verification.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
-print(json.dumps(report,ensure_ascii=False))
+
+BUILDER = run_path(str(Path(__file__).with_name('build-current-screenshot-manual.py')))
+QA = BUILDER['QA']
+OUT = BUILDER['OUT']
+MARKDOWN = BUILDER['MARKDOWN']
+PDF = QA / OUT.name
+CONTENT = json.loads(BUILDER['CONTENT'].read_text(encoding='utf-8'))
+MANIFEST = json.loads(
+    (BUILDER['ASSETS'] / BUILDER['CAPTURE_KEY'] / 'manifest.json').read_text(encoding='utf-8')
+)
+LAYOUT = json.loads((QA / 'layout.json').read_text(encoding='utf-8'))
+W, H = BUILDER['W'], BUILDER['H']
+
+
+def without_spaces(text):
+    return ''.join(text.split())
+
+
+def outline_items(entries):
+    for entry in entries:
+        if isinstance(entry, list):
+            yield from outline_items(entry)
+        else:
+            yield entry
+
+
+def verify():
+    reader = PdfReader(PDF)
+    topics = CONTENT['pages']
+    count = len(topics)
+    assert len(reader.pages) == LAYOUT['pages'] == count
+    assert MANIFEST['localDemoOnly'] and not MANIFEST['errors']
+    release = BUILDER['RELEASE']
+    expected_version = json.loads((release / 'version.json').read_text(encoding='utf-8'))['versionNumber']
+    assert MANIFEST['version'] == LAYOUT['version'] == expected_version
+    assert {topic['role'] for topic in topics} == {'作業者・編集者', '編集者'}
+    assert not {'accounts', 'assignees', 'owner'} & {topic['id'] for topic in topics}
+    assert '�' not in ''.join(p.extract_text() for p in reader.pages)
+    version_dir = release / 'deployed-version/download'
+    for file, key in [('Index.html', 'bundleSha256'), ('Access.html', 'accessSha256')]:
+        assert hashlib.sha256((version_dir / file).read_bytes()).hexdigest() == MANIFEST[key], file
+
+    page_ids = {topic['id']: page.indirect_reference.idnum for topic, page in zip(topics, reader.pages)}
+    targets = [(entry.title, reader.get_destination_page_number(entry)) for entry in outline_items(reader.outline)]
+    all_text = ''
+    links = 0
+    for index, (page, topic) in enumerate(zip(reader.pages, topics), 1):
+        assert abs(float(page.mediabox.width) - W) < .1
+        assert abs(float(page.mediabox.height) - H) < .1
+        page_text = page.extract_text()
+        assert f'{index} / {count}' in page_text and CONTENT['edition'] + '版' in page_text
+        assert without_spaces(topic['title']) in without_spaces(page_text), topic['title']
+        assert (topic['title'], index - 1) in targets, topic['title']
+        if topic.get('images'):
+            assert page.images, f'{topic["id"]} is missing its image'
+            for key in topic['images']:
+                role = MANIFEST['images'][key].get('role')
+                if topic['role'] == '編集者':
+                    assert role == 'editor', key
+                elif key != 'editor-navigation' and key != 'login':
+                    assert role == 'worker', key
+        for font in page['/Resources']['/Font'].get_object().values():
+            font = font.get_object()
+            if font.get('/Subtype') == '/TrueType':
+                assert '/FontFile2' in font['/FontDescriptor'].get_object()
+                assert '/ToUnicode' in font
+
+        expected = [link for link in LAYOUT['links'] if link['page'] == index]
+        annotations = [annot.get_object() for annot in page.get('/Annots', [])]
+        assert len(expected) == len(annotations), topic['id']
+        for link, annot in zip(expected, annotations):
+            assert annot['/Subtype'] == '/Link'
+            assert all(abs(float(a) - b) < .1 for a, b in zip(annot['/Rect'], link['rect']))
+            if link['target'] == 'app':
+                assert annot['/A']['/URI'] == BUILDER['APP_URL']
+            else:
+                assert annot['/Dest'][0].idnum == page_ids[link['target']], link
+        links += len(annotations)
+        all_text += page_text + '\n'
+
+    for word in (
+        '発注を編集', '追加で入庫', '備考を保存', 'この製品の修正を次回にも使う',
+        '月→連番順', '受注履行完了', '印刷完了・待ちから外す', '他端末の更新を確認',
+    ):
+        assert word in without_spaces(all_text), word
+    for excluded in ('利用アカウントと権限を管理する', 'この月の単価を保存', 'メールを探す', '閲覧のみ', '所有者'):
+        assert excluded not in without_spaces(all_text), excluded
+    for filename in ('meiryo.ttc', 'meiryob.ttc'):
+        font = TTFont(filename, f'C:/Windows/Fonts/{filename}', subfontIndex=0)
+        missing = {c for c in all_text if ord(c) >= 32 and ord(c) not in font.face.charToGlyph}
+        assert not missing, (filename, sorted(missing))
+    for item in LAYOUT['screenshots'] + LAYOUT['text_boxes']:
+        assert 0 <= item['x'] < item['x'] + item['width'] <= W, item
+        assert 0 <= item['top'] < item['top'] + item['height'] <= BUILDER['BOTTOM'], item
+    for figure in LAYOUT['screenshots']:
+        assert figure['width'] >= 130, figure
+        assert figure['source_width'] >= 1.8 * figure['width'], figure
+
+    rendered = sorted(QA.glob('page-*.png'))
+    assert len(rendered) == count, f'Render all pages first: {len(rendered)}'
+    for image in rendered:
+        assert image.stat().st_mtime_ns >= PDF.stat().st_mtime_ns, image
+        with Image.open(image) as page:
+            assert page.width >= 900 and abs(page.height / page.width - H / W) < .005, image
+            page.verify()
+
+    report = {
+        'edition': CONTENT['edition'], 'version': MANIFEST['version'], 'pages': count,
+        'screenshots': len(LAYOUT['screenshots']), 'callouts': sum(len(f['callouts']) for f in LAYOUT['screenshots']),
+        'links': links, 'outline_entries': len(targets), 'rendered_pages': len(rendered),
+        'pdf_bytes': PDF.stat().st_size, 'browser_errors': MANIFEST['errors'],
+        'japanese_fonts_embedded': True, 'bundle_hashes_match': True,
+    }
+    (QA / 'verification.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+    return report
+
+
+def publish():
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    if OUT.exists() and '2026年10月30日' in PdfReader(OUT).metadata.title:
+        archive = OUT.parent / 'archive' / f'2026-10-30_{OUT.name}'
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        if not archive.exists():
+            copy2(OUT, archive)
+    for source, target in ((PDF, OUT), (QA / MARKDOWN.name, MARKDOWN)):
+        pending = target.with_suffix(target.suffix + '.new')
+        copy2(source, pending)
+        pending.replace(target)
+        assert target.read_bytes() == source.read_bytes(), target
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--publish', action='store_true')
+    args = parser.parse_args()
+    print(json.dumps(verify(), ensure_ascii=False))
+    if args.publish:
+        publish()

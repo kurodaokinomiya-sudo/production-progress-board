@@ -30,7 +30,7 @@ function harness() {
         const range = {
           getValues: values, getDisplayValues: () => values().map(cells => cells.map(String)),
           setValues(rows) {
-            if (name === "工程管理_材料履歴" || name === "工程管理_案件" && row > 1) assert.equal(state.locked, true, "material and job writes must hold the document lock");
+            if (name === "工程管理_材料履歴" || name === "工程管理_材料対象外" || name === "工程管理_案件" && row > 1) assert.equal(state.locked, true, "material and job writes must hold the document lock");
             if (state.failSheet === name) { state.failSheet = ""; throw new Error("write failed before commit"); }
             writes.push({ name, row, height: rows.length });
             rows.forEach((cells, r) => { grid[row + r - 1] ||= []; cells.forEach((value, c) => { grid[row + r - 1][column + c - 1] = value; }); });
@@ -82,6 +82,7 @@ test("image opening balances seed exactly once and preserve exact material speci
   assert.equal(second.history.length, 6);
   assert.equal(h.grids.get(h.context.APP.SHEETS.MATERIALS).length, 7);
   assert.ok(first.history.every(event => event.action === "opening" && /2026-10-20提供画像/.test(event.note)));
+  assert.ok(first.materials.every(material => material.note === "" && material.noteRevision === ""));
   assert.match(first.materials.find(item => item.id === "CK022").specification, /212mm.*173mm/);
   assert.equal(first.initializedAt, second.initializedAt);
 });
@@ -345,7 +346,11 @@ test("process, shipping, print state and archive keep usage; stock returns requi
   assert.equal(h.inventory().history.filter(event => event.action === "use").length, 1);
   h.context.adjustMaterialStock({ requestId: "returned", materialId: "CK001", date: "2026-10-20", quantity: 4, note: "削除案件の材料を現物確認して返却" });
   assert.equal(h.material("CK001").stockQuantity, 28);
-  h.context.setJobArchived({ id: saved.id, version: saved.version, archived: false });
+  saved = h.context.setJobArchived({ id: saved.id, version: saved.version, archived: false });
+  const archive = { ...saved, requestId: "archive-eligible-job", archived: true };
+  const archived = h.context.saveJob(archive);
+  assert.equal(archived.archived, true);
+  assert.equal(h.context.saveJob(archive).version, archived.version);
   assert.equal(h.material("CK001").stockQuantity, 28);
 });
 
@@ -385,7 +390,7 @@ test("partial receipt changes stock and outstanding atomically; cancellation aff
   const eventCount = snapshot.history.length;
   assert.equal(h.context.receiveMaterialOrder(receipt).history.length, eventCount);
   assert.throws(() => h.context.receiveMaterialOrder({ ...receipt, quantity: 2 }), /同じリクエストID/);
-  assert.throws(() => h.context.receiveMaterialOrder({ ...receipt, requestId: "over", quantity: 8 }), /発注残/);
+  assert.throws(() => h.context.receiveMaterialOrder({ ...receipt, requestId: "zero", quantity: 0 }), /数量/);
   assert.throws(() => h.context.cancelMaterialOrder({ requestId: "cancel", orderId: id, date: "2026-10-23", note: "" }), /理由/);
   snapshot = h.context.cancelMaterialOrder({ requestId: "cancel", orderId: id, date: "2026-10-23", note: "残数不要" });
   assert.equal(snapshot.orders[0].remainingQuantity, 0);
@@ -393,26 +398,95 @@ test("partial receipt changes stock and outstanding atomically; cancellation aff
   assert.deepEqual(copy(snapshot.history.filter(event => event.action === "receive" && event.orderId === id).map(event => [event.materialId, event.date, event.quantity])), [["CK021", "2026-10-22", 3]]);
   assert.equal(snapshot.materials.find(item => item.id === "CK021").stockQuantity, 3);
   assert.equal(snapshot.materials.find(item => item.id === "CK021").onOrderQuantity, 0);
+  assert.throws(() => h.context.receiveMaterialOrder({ ...receipt, requestId: "after-cancel" }), /取り消されています/);
+  assert.throws(() => h.context.updateMaterialOrder({ requestId: "edit-canceled", orderId: id, quantity: 12, expectedDate: "2026-11-02" }), /取り消されています/);
 });
 
-test("fully received orders retain their order row and every actual partial receipt date after rereading", () => {
+test("over-receipts and late additional receipts retain full actual quantities and dates after rereading", () => {
   const h = harness();
   const placed = h.context.saveMaterialOrder({ requestId: "dated-order", materialId: "CK021", orderDate: "2026-10-20", quantity: 10, expectedDate: "2026-10-30", note: "分納の実績を確認" });
   const orderId = placed.orders[0].id;
   const first = { requestId: "dated-receipt-1", orderId, date: "2026-10-22", quantity: 3, note: "1 回目" };
-  const final = { requestId: "dated-receipt-2", orderId, date: "2026-10-23", quantity: 7, note: "2 回目" };
+  const final = { requestId: "dated-receipt-2", orderId, date: "2026-10-23", quantity: 9, note: "2 回目" };
+  const late = { requestId: "dated-receipt-3", orderId, date: "2026-10-26", quantity: 2, note: "遅れて追加で入庫" };
   h.context.receiveMaterialOrder(first);
   h.context.receiveMaterialOrder(final);
   h.context.receiveMaterialOrder(final);
+  h.context.receiveMaterialOrder(late);
+  assert.throws(() => h.context.cancelMaterialOrder({ requestId: "cancel-fulfilled", orderId, date: "2026-10-27", note: "不要" }), /発注残/);
   const fresh = copy(h.inventory());
   assert.equal(fresh.orders.length, 1);
   assert.equal(fresh.orders[0].id, orderId);
-  assert.equal(fresh.orders[0].receivedQuantity, 10);
+  assert.equal(fresh.orders[0].quantity, 10);
+  assert.equal(fresh.orders[0].receivedQuantity, 14);
   assert.equal(fresh.orders[0].remainingQuantity, 0);
-  assert.equal(fresh.materials.find(item => item.id === "CK021").stockQuantity, 10);
+  assert.equal(fresh.materials.find(item => item.id === "CK021").stockQuantity, 14);
   assert.equal(fresh.materials.find(item => item.id === "CK021").onOrderQuantity, 0);
+  assert.equal(fresh.materials.find(item => item.id === "CK021").nextExpectedDate, "");
   const receipts = fresh.history.filter(event => event.action === "receive" && event.orderId === orderId).sort((a, b) => a.date.localeCompare(b.date));
-  assert.deepEqual(receipts.map(event => [event.materialId, event.date, event.quantity]), [["CK021", "2026-10-22", 3], ["CK021", "2026-10-23", 7]]);
+  assert.deepEqual(receipts.map(event => [event.materialId, event.date, event.quantity]), [["CK021", "2026-10-22", 3], ["CK021", "2026-10-23", 9], ["CK021", "2026-10-26", 2]]);
+});
+
+test("order edits change only current quantity and expected date, retaining receipts, original order and revision history", () => {
+  const h = harness(), payload = { materialId: "CK021", orderDate: "2026-10-20", expectedDate: "2026-10-30", quantity: 10, note: "元の発注備考" };
+  const initial = h.context.saveMaterialOrder({ ...payload, requestId: "purchase-edit" }).orders[0];
+  assert.equal(initial.revision, initial.id);
+  h.context.receiveMaterialOrder({ orderId: initial.id, requestId: "prior-receipt", date: "2026-10-27", quantity: 3 });
+  const edit = { orderId: initial.id, expectedRevision: initial.revision, requestId: "edit", expectedDate: "2026-11-03", quantity: 12 };
+  const before = h.writes.length;
+  assert.throws(() => h.context.updateMaterialOrder({ ...edit, expectedDate: "2026-10-19" }), /入庫予定日/);
+  assert.throws(() => h.context.updateMaterialOrder({ ...edit, quantity: 0 }), /数量/);
+  assert.equal(h.writes.length, before);
+  h.state.failFlush = true;
+  assert.throws(() => h.context.updateMaterialOrder(edit), /reply lost/);
+  const edited = h.context.updateMaterialOrder(edit).orders[0];
+  assert.notEqual(edited.revision, initial.revision);
+  assert.equal(edited.id, initial.id);
+  assert.equal(edited.orderDate, "2026-10-20");
+  assert.equal(edited.note, "元の発注備考");
+  assert.equal(edited.quantity, 12);
+  assert.equal(edited.expectedDate, "2026-11-03");
+  assert.equal(edited.receivedQuantity, 3);
+  assert.equal(edited.remainingQuantity, 9);
+  assert.equal(h.material("CK021").nextExpectedDate, "2026-11-03");
+  assert.equal(h.material("CK021").onOrderQuantity, 9);
+  assert.throws(() => h.context.updateMaterialOrder({ ...edit, quantity: 15 }), /同じリクエストID/);
+  assert.throws(() => h.context.updateMaterialOrder({ ...edit, requestId: "stale-edit" }), /別の端末/);
+  const reduced = h.context.updateMaterialOrder({ ...edit, requestId: "reduce", expectedRevision: edited.revision, quantity: 2 }).orders[0];
+  assert.equal(reduced.receivedQuantity, 3);
+  assert.equal(reduced.remainingQuantity, 0);
+  assert.equal(h.material("CK021").stockQuantity, 3);
+  assert.equal(h.material("CK021").nextExpectedDate, "");
+  const reopened = h.context.updateMaterialOrder({ ...edit, requestId: "increase", expectedRevision: reduced.revision, quantity: 5 }).orders[0];
+  assert.equal(reopened.remainingQuantity, 2);
+  const history = h.inventory().history.filter(event => event.orderId === initial.id);
+  assert.equal(history.filter(event => event.action === "editOrder").length, 3);
+  const original = history.find(event => event.action === "order");
+  assert.equal(original.quantity, 10);
+  assert.equal(original.expectedDate, "2026-10-30");
+  assert.equal(original.requestHash, h.context.MaterialInventory.hash({ action: "order", ...payload }));
+  assert.deepEqual(copy(history.filter(event => event.action === "receive").map(event => event.quantity)), [3]);
+});
+
+test("material stock notes are per-row, revision checked, retryable, and independent of quantity", () => {
+  const h = harness(), original = h.material("CK001");
+  const note = { requestId: "note", materialId: original.id, note: "本体 12、カブセ 10\n残り2本は確認待ち", expectedRevision: original.noteRevision };
+  const saved = h.context.saveMaterialStockNote(note).materials.find(item => item.id === original.id);
+  assert.equal(saved.note, note.note);
+  assert.ok(saved.noteRevision);
+  assert.equal(h.material(original.id).note, note.note);
+  assert.equal(h.material("CK011").note, "");
+  assert.equal(h.material(original.id).stockQuantity, original.stockQuantity);
+  assert.throws(() => h.context.saveMaterialStockNote({ ...note, note: "別の内容" }), /同じリクエストID/);
+  assert.throws(() => h.context.saveMaterialStockNote({ ...note, requestId: "stale-note", note: "別の端末" }), /別の端末/);
+  assert.throws(() => h.context.saveMaterialStockNote({ ...note, requestId: "long-note", note: "あ".repeat(1001) }), /1000文字/);
+  const cleared = h.context.saveMaterialStockNote({ ...note, requestId: "clear-note", note: "", expectedRevision: saved.noteRevision }).materials.find(item => item.id === original.id);
+  assert.notEqual(cleared.noteRevision, saved.noteRevision);
+  assert.equal(h.context.saveMaterialStockNote(note).materials.find(item => item.id === original.id).note, "");
+  assert.equal(h.material(original.id).note, "");
+  const events = h.inventory().history.filter(event => event.action === "stockNote");
+  assert.equal(events.length, 2);
+  assert.ok(events.every(event => event.materialId === original.id && event.quantity === 0));
 });
 
 test("signed adjustments require reason, support retries, and preserve the audit", () => {
@@ -430,7 +504,7 @@ test("material orders require a valid planned date no earlier than their order d
   h.inventory();
   const writes = h.writes.length;
   for (const expectedDate of ["", "2026-10-19", "2026-11-31"]) {
-    assert.throws(() => h.context.saveMaterialOrder({ requestId: "invalid-expected", materialId: "CK001", orderDate: "2026-10-20", quantity: 5, expectedDate, note: "" }), /仕上り予定日/);
+    assert.throws(() => h.context.saveMaterialOrder({ requestId: "invalid-expected", materialId: "CK001", orderDate: "2026-10-20", quantity: 5, expectedDate, note: "" }), /入庫予定日/);
     assert.equal(h.writes.length, writes);
     assert.equal(h.inventory().orders.length, 0);
   }
@@ -444,11 +518,13 @@ test("locking rereads concurrent receipt state and stale job versions", () => {
     const prepared = h.context.MaterialInventory.prepareMutation("receive", { requestId: "other-device", orderId: id, date: "2026-10-20", quantity: 4, note: "" }, { events: h.context.readMaterialEvents_(), id: "other-event", at: timestamp });
     h.context.appendMaterialEvents_([prepared.event]);
   };
-  assert.throws(() => h.context.receiveMaterialOrder({ requestId: "stale", orderId: id, date: "2026-10-20", quantity: 3, note: "" }), /発注残/);
-  assert.equal(h.material("CK001").stockQuantity, 28);
+  const received = h.context.receiveMaterialOrder({ requestId: "stale", orderId: id, date: "2026-10-20", quantity: 3, note: "" });
+  assert.equal(received.orders[0].receivedQuantity, 7);
+  assert.equal(received.orders[0].remainingQuantity, 0);
+  assert.equal(h.material("CK001").stockQuantity, 31);
   h.state.beforeLock = () => { h.grids.get(h.context.APP.SHEETS.JOBS)[1][h.context.APP.JOB_HEADERS.indexOf("version")] = 9; };
   assert.throws(() => h.context.saveJob({ ...saved, requestId: "stale-save", quantity: 9 }), /別の端末/);
-  assert.equal(h.material("CK001").stockQuantity, 28);
+  assert.equal(h.material("CK001").stockQuantity, 31);
 });
 
 test("failed row writes cannot leave phantom usage or partially applied receipt totals", () => {
@@ -471,19 +547,166 @@ test("failed row writes cannot leave phantom usage or partially applied receipt 
   assert.equal(recovered.orders[0].remainingQuantity, 3);
 });
 
+test("overflow in the prospective stock total rejects the receipt before writing a ledger row", () => {
+  const h = harness();
+  const placed = h.context.saveMaterialOrder({ requestId: "small-order", materialId: "CK002", orderDate: "2026-10-20", quantity: 1, expectedDate: "2026-10-30" });
+  const receipt = { requestId: "excess-stock", orderId: placed.orders[0].id, date: "2026-10-30", quantity: 2 };
+  const writes = h.writes.length;
+  // Shrink the safe-integer range to exercise real replay overflow with a short ledger.
+  function LimitedNumber(value) { return Number(value); }
+  Object.setPrototypeOf(LimitedNumber, Number);
+  LimitedNumber.isSafeInteger = value => Number.isSafeInteger(value) && Math.abs(value) <= 43;
+  h.context.Number = LimitedNumber;
+  assert.throws(() => h.context.receiveMaterialOrder(receipt), /累計数量が上限/);
+  assert.equal(h.writes.length, writes);
+  assert.equal(h.material("CK002").stockQuantity, 42);
+  assert.equal(h.inventory().orders[0].remainingQuantity, 1);
+  h.context.Number = Number;
+  const accepted = h.context.receiveMaterialOrder(receipt);
+  assert.equal(accepted.materials.find(item => item.id === "CK002").stockQuantity, 44);
+  assert.equal(accepted.orders[0].receivedQuantity, 2);
+});
+
 test("inventory RPCs and embedded job material data are limited to editor, administrator and owner", () => {
   const h = harness();
   h.order({ category: "鋭匙鉗子" });
   for (const role of ["owner", "admin", "editor"]) { h.state.role = role; assert.equal(h.inventory().materials.length, 6); assert.ok(h.context.getSnapshot({}).jobs[0].materials); }
   for (const role of ["worker", "viewer"]) {
     h.state.role = role;
-    for (const name of ["getMaterialInventory", "saveMaterialOrder", "receiveMaterialOrder", "adjustMaterialStock", "cancelMaterialOrder"]) assert.throws(() => h.context[name]({}), /ACCESS_DENIED/, `${role} ${name}`);
+    for (const name of ["getMaterialInventory", "saveMaterialOrder", "updateMaterialOrder", "receiveMaterialOrder", "adjustMaterialStock", "saveMaterialStockNote", "cancelMaterialOrder", "saveMaterialExclusion"]) assert.throws(() => h.context[name]({}), /ACCESS_DENIED/, `${role} ${name}`);
     const snapshot = h.context.getSnapshot({});
     assert.equal(snapshot.materialInventory, null);
     assert.equal(snapshot.jobs[0].materials, undefined);
     assert.equal(snapshot.jobs[0]._materialsJsonRaw, undefined);
     assert.equal(snapshot.jobs[0].materialsJson, undefined);
   }
+});
+
+test("product-level material exclusion is exact, durable, retryable, and reversible without changing ledger", () => {
+  const h = harness(), inventory = () => h.inventory();
+  const first = h.order({ product: "確認対象ケリソン CK099", productCode: "CK099", specShape: "弱弯・上向", serialNo: "A-1", quantity: 4 });
+  let snapshot = inventory();
+  const unresolved = snapshot.unresolved.find(item => item.id === first.id);
+  assert.ok(unresolved?.productKey);
+  const stockBefore = copy(snapshot.materials.map(item => item.stockQuantity));
+  const historyBefore = copy(snapshot.history.map(item => item.id));
+  const exclusionRequest = { requestId: "exclude-product-1", action: "exclude", jobId: first.id, productKey: unresolved.productKey };
+  snapshot = h.context.saveMaterialExclusion(exclusionRequest);
+  assert.equal(snapshot.unresolved.some(item => item.id === first.id), false);
+  assert.equal(snapshot.excludedProducts.length, 1);
+  assert.deepEqual(copy(snapshot.materials.map(item => item.stockQuantity)), stockBefore);
+  assert.deepEqual(copy(snapshot.history.map(item => item.id)), historyBefore);
+  const exclusionRowCount = h.grids.get(h.context.APP.SHEETS.MATERIAL_EXCLUSIONS).length;
+  h.context.saveMaterialExclusion(exclusionRequest);
+  assert.equal(h.grids.get(h.context.APP.SHEETS.MATERIAL_EXCLUSIONS).length, exclusionRowCount, "identical request retry is idempotent");
+  assert.throws(() => h.context.saveMaterialExclusion({ requestId: exclusionRequest.requestId, action: "restore", ruleId: snapshot.excludedProducts[0].id, productKey: unresolved.productKey }), /リクエストID/);
+
+  const sameProduct = h.order({ product: first.product, productCode: first.productCode, specShape: first.specShape, serialNo: "A-2", quantity: 7 });
+  assert.deepEqual(copy(sameProduct.materials.allocation), []);
+  assert.deepEqual(copy(sameProduct.materials.history), []);
+  assert.equal(inventory().unresolved.some(item => item.id === sameProduct.id), false);
+  for (const [field, value] of [["customer", "別の得意先"], ["product", "別製品 CK099"], ["productCode", "CK098"], ["specLength", "20cm"], ["specShape", "強弯・上向"], ["bladeWidth", "4mm"]]) {
+    const changed = h.order({ product: first.product, productCode: first.productCode, specShape: first.specShape, [field]: value, serialNo: `DIFFERENT-${field}`, requestId: `different-${field}` });
+    assert.equal(inventory().unresolved.some(item => item.id === changed.id), true, `${field} is part of the exact product identity`);
+  }
+  const otherProduct = h.order({ product: first.product, productCode: first.productCode, specShape: "強弯・上向", serialNo: "A-3", quantity: 2 });
+  assert.equal(inventory().unresolved.some(item => item.id === otherProduct.id), true, "a different exact specification does not inherit the exclusion");
+
+  const activeRule = inventory().excludedProducts[0];
+  const restore = { requestId: "restore-product-1", action: "restore", ruleId: activeRule.id, productKey: activeRule.key };
+  snapshot = h.context.saveMaterialExclusion(restore);
+  assert.equal(snapshot.excludedProducts.length, 0);
+  assert.equal(snapshot.unresolved.some(item => item.id === first.id), true);
+  assert.equal(snapshot.unresolved.some(item => item.id === sameProduct.id), true);
+  assert.deepEqual(copy(snapshot.materials.map(item => item.stockQuantity)), stockBefore);
+  assert.deepEqual(copy(snapshot.history.map(item => item.id)), historyBefore);
+  assert.throws(() => h.context.saveMaterialExclusion({ ...restore, requestId: "restore-stale", ruleId: "stale-rule" }), /対象外|更新|一致/);
+});
+
+test("future intake approval honors an active product exclusion", () => {
+  const h = harness();
+  const first = h.order({ product: "確認対象ケリソン CK099", productCode: "CK099", specShape: "弱弯・上向", serialNo: "INITIAL", quantity: 4 });
+  const unresolved = h.inventory().unresolved.find(item => item.id === first.id);
+  h.context.saveMaterialExclusion({ requestId: "exclude-before-intake", action: "exclude", jobId: first.id, productKey: unresolved.productKey });
+  const candidate = h.candidate({ product: first.product, productCode: first.productCode, specShape: first.specShape, serialNo: "FROM-INTAKE", quantity: 6 });
+  const imported = h.approve(candidate);
+  assert.deepEqual(copy(imported.materials.allocation), []);
+  assert.deepEqual(copy(imported.materials.history), []);
+  assert.equal(h.inventory().unresolved.some(item => item.id === imported.id), false);
+  assert.deepEqual(copy(h.inventory().materials.map(item => item.stockQuantity)), [28, 12, 42, 1, 0, 0]);
+});
+
+test("exclusion append retries after a failed write or a lost flush response", () => {
+  for (const failure of ["write", "flush"]) {
+    const h = harness();
+    const job = h.order({ product: "確認対象ケリソン CK099", productCode: "CK099", specShape: "弱弯・上向", serialNo: `FAIL-${failure}` });
+    const productKey = h.inventory().unresolved.find(item => item.id === job.id).productKey;
+    const request = { requestId: `retry-${failure}`, action: "exclude", jobId: job.id, productKey };
+    if (failure === "write") h.state.failSheet = h.context.APP.SHEETS.MATERIAL_EXCLUSIONS;
+    else h.state.failFlush = true;
+    assert.throws(() => h.context.saveMaterialExclusion(request), failure === "write" ? /write failed/ : /reply lost/);
+    const afterFailure = h.grids.get(h.context.APP.SHEETS.MATERIAL_EXCLUSIONS)?.length || 1;
+    const snapshot = h.context.saveMaterialExclusion(request);
+    assert.equal(snapshot.excludedProducts.length, 1);
+    assert.equal(h.grids.get(h.context.APP.SHEETS.MATERIAL_EXCLUSIONS).length, afterFailure === 1 ? 2 : afterFailure, "retry does not append a duplicate decision");
+  }
+});
+
+test("canceling a product exclusion on a legacy order keeps the original material baseline", () => {
+  for (const quantity of [4, 7, 2]) {
+    const h = harness();
+    const legacy = h.context.normalizeJobInput_(order({ id: "legacy-excluded", productCode: "CK099", quantity: 4 }), null);
+    legacy.materials = { version: 1, baseline: { allocation: [], at: timestamp, unresolvedTargetQuantity: 4 }, allocation: [], history: [], requests: [] };
+    h.seed([legacy]);
+    const before = h.inventory();
+    const productKey = before.unresolved.find(item => item.id === legacy.id).productKey;
+    const excluded = h.context.saveMaterialExclusion({ requestId: "legacy-exclude", action: "exclude", jobId: legacy.id, productKey });
+    let edited = h.context.saveJob({ ...h.context.readJobs_()[0], note: "備考だけ変更", requestId: "legacy-excluded-note" });
+    if (quantity !== 4) edited = h.context.saveJob({ ...edited, quantity, requestId: "legacy-excluded-quantity" });
+
+    assert.equal(h.inventory().unresolved.some(item => item.id === legacy.id), false);
+    assert.deepEqual(copy(h.inventory().materials.map(item => item.stockQuantity)), copy(before.materials.map(item => item.stockQuantity)));
+    assert.deepEqual(copy(edited.materials.history), []);
+    const restored = h.context.saveMaterialExclusion({ requestId: "legacy-restore", action: "restore", ruleId: excluded.excludedProducts[0].id, productKey });
+    assert.equal(restored.unresolved.some(item => item.id === legacy.id), true);
+
+    const corrected = h.context.saveJob({ ...edited, productCode: "CK001", requestId: "legacy-correct-code" });
+    const change = quantity - 4;
+    assert.equal(h.material("CK001").stockQuantity, 28 - change);
+    assert.deepEqual(copy(corrected.materials.baseline.allocation), [{ materialId: "CK001", quantity: 4 }]);
+    assert.deepEqual(copy(corrected.materials.history.map(event => [event.action, event.quantity])), change === 0 ? [] : [[change > 0 ? "use" : "release", Math.abs(change)]]);
+    assert.equal(h.inventory().unresolved.some(item => item.id === legacy.id), false);
+  }
+});
+
+test("a lost response for an already excluded product cannot undo a later restoration", () => {
+  const h = harness();
+  const job = h.order({ productCode: "CK099" });
+  const productKey = h.inventory().unresolved.find(item => item.id === job.id).productKey;
+  const request = { requestId: "exclude-from-first-device", action: "exclude", jobId: job.id, productKey };
+  const { excludedProducts: [rule] } = h.context.saveMaterialExclusion(request);
+  const duplicate = { ...request, requestId: "exclude-from-second-device" };
+  assert.equal(h.context.saveMaterialExclusion(duplicate).excludedProducts[0].id, rule.id);
+  h.context.saveMaterialExclusion({ requestId: "restore-from-first-device", action: "restore", ruleId: rule.id, productKey });
+
+  const rowsBeforeRetry = h.grids.get(h.context.APP.SHEETS.MATERIAL_EXCLUSIONS).length;
+  const retried = h.context.saveMaterialExclusion(duplicate);
+  assert.equal(retried.excludedProducts.length, 0);
+  assert.equal(retried.unresolved.some(item => item.id === job.id), true);
+  assert.equal(h.grids.get(h.context.APP.SHEETS.MATERIAL_EXCLUSIONS).length, rowsBeforeRetry);
+  assert.throws(() => h.context.saveMaterialExclusion({ ...duplicate, jobId: "another-job" }), /リクエストID/);
+  assert.equal(h.context.saveMaterialExclusion({ ...duplicate, requestId: "new-exclusion" }).excludedProducts.length, 1);
+});
+
+test("a product exclusion cannot hide a current material allocation or accept a stale product signature", () => {
+  const h = harness();
+  const allocated = h.order({ product: "慈大式 彫骨器", productCode: "CK001", specShape: "直・上向" });
+  const allocatedKey = h.context.MaterialInventory.productKey(allocated);
+  assert.throws(() => h.context.saveMaterialExclusion({ requestId: "exclude-allocated", action: "exclude", jobId: allocated.id, productKey: allocatedKey }), /使用|割当|材料/);
+
+  const unresolved = h.order({ product: "確認対象ケリソン CK099", productCode: "CK099", specShape: "弱弯・上向" });
+  const staleKey = h.context.MaterialInventory.productKey({ ...unresolved, specLength: "old" });
+  assert.throws(() => h.context.saveMaterialExclusion({ requestId: "exclude-stale", action: "exclude", jobId: unresolved.id, productKey: staleKey }), /製品|一致|更新/);
 });
 
 test("corrupt or oversized job material history is rejected before altering stock", () => {

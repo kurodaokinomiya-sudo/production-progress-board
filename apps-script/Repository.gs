@@ -61,8 +61,29 @@ function readSettings_() {
   }, {});
 }
 
-function readJobs_() {
-  return readRows_(APP.SHEETS.JOBS, APP.JOB_HEADERS).map(jobFromRow_);
+function settingsForAccess_(settings, access) {
+  var response = Object.assign({}, settings || {});
+  if (!access || !access.isOwner) {
+    delete response.gmailQuery;
+    delete response.maxEmailThreads;
+  }
+  if (!access || access.canEdit !== true) {
+    delete response.customerRules;
+    delete response.importSettings;
+  }
+  if (access && access.role === "worker") {
+    delete response.polishingRates;
+    delete response.polishingProductRules;
+  }
+  return response;
+}
+
+function readJobs_(options) {
+  var rows = readRows_(APP.SHEETS.JOBS, APP.JOB_HEADERS);
+  if (options && options.unshippedOnly) {
+    rows = rows.filter(function(row) { return !isArchivedValue_(row.archived) && row.shippingStatus !== "shipped"; });
+  }
+  return rows.map(jobFromRow_);
 }
 
 function jobFromRow_(row) {
@@ -119,6 +140,12 @@ function jobFromRow_(row) {
 
 function isArchivedValue_(value) {
   return value === true || String(value).toLowerCase() === "true";
+}
+
+function validatedJobArchive_(requested, polishing) {
+  if (requested !== true) return false;
+  if (polishingOutstanding_(polishing) > 0) throw new Error("研磨から未返却の数量がある案件は削除できません。");
+  return true;
 }
 
 function normalizeStoredDate_(value) {
@@ -246,7 +273,7 @@ function normalizeJobInput_(input, existing, normalizationOptions) {
     sourceType: existing ? existing.sourceType : sanitizeText_(input.sourceType, 40) || "manual",
     sourceRef: existing ? existing.sourceRef : sanitizeText_(input.sourceRef, 500),
     priority: priority,
-    archived: input.archived === true,
+    archived: validatedJobArchive_(input.archived, polishing),
     createdAt: existing ? existing.createdAt : sanitizeText_(input.createdAt, 40) || now,
     updatedAt: now,
     version: existing ? Number(existing.version || 1) + 1 : 1,
@@ -331,7 +358,39 @@ function saveJob(input) {
 
 function decorateJobForResponse_(job, settings) {
   var response = typeof decorateProductJobs_ === "function" ? decorateProductJobs_([job], settings || readSettings_())[0] : job;
-  return typeof materialJobForAccess_ === "function" ? materialJobForAccess_(response, typeof requireAppAccess_ === "function" ? requireAppAccess_() : null) : response;
+  return jobForAccess_(response, typeof requireAppAccess_ === "function" ? requireAppAccess_() : null);
+}
+
+function jobForAccess_(job, access) {
+  var response = Object.assign({}, job);
+  delete response._materialsJsonRaw;
+  delete response.materialsJson;
+  if (!access || access.canEdit !== true) delete response.materials;
+  if (!access || access.role !== "worker") return response;
+
+  delete response._polishingJsonRaw;
+  delete response.polishingJson;
+  if (job.productMaster) {
+    response.productMaster = Object.assign({}, job.productMaster);
+    delete response.productMaster.customRates;
+  }
+  if (job.polishing) {
+    // Ledger clients read the latest dispatch date from the last send in history.
+    // Keep the date and action fields they use alongside the running totals.
+    var history = job.polishing.history || [];
+    var latestDispatch = [];
+    for (var i = history.length - 1; i >= 0; i -= 1) {
+      if (history[i].action !== "send") continue;
+      latestDispatch.push({ action: "send", at: history[i].at });
+      break;
+    }
+    response.polishing = {
+      sentQuantity: job.polishing.sentQuantity,
+      returnedQuantity: job.polishing.returnedQuantity,
+      history: latestDispatch
+    };
+  }
+  return response;
 }
 
 // The job row (including material usage/retry identity) can commit before its
@@ -446,9 +505,8 @@ function setJobArchived(input) {
     if (Number(input.version || 0) !== Number(job.version || 0)) {
       throw new Error("別の端末で先に更新されています。画面を更新して内容を確認してください。");
     }
-    if (input.archived === true && polishingOutstanding_(job.polishing) > 0) throw new Error("研磨から未返却の数量がある案件は削除できません。");
     var previous = Object.assign({}, job);
-    job.archived = input.archived === true;
+    job.archived = validatedJobArchive_(input.archived, job.polishing);
     job.updatedAt = new Date().toISOString();
     job.version = Number(job.version || 1) + 1;
     var values = jobToRow_(job);
@@ -613,8 +671,12 @@ function withDocumentLock_(callback) {
   }
 }
 
-function readIntake_() {
-  return readRows_(APP.SHEETS.INTAKE, APP.INTAKE_HEADERS).map(function(row) {
+function readIntake_(options) {
+  options = options || {};
+  var rows = options.pendingOnly === true ? readPendingIntakeRows_() : readRows_(APP.SHEETS.INTAKE, APP.INTAKE_HEADERS);
+  return rows.filter(function(row) {
+    return options.pendingOnly !== true || !row.status || String(row.status) === "pending";
+  }).map(function(row) {
     var parsed = {};
     try { parsed = row.parsedJson ? JSON.parse(String(row.parsedJson)) : {}; } catch (error) { parsed = {}; }
     return {
@@ -624,6 +686,63 @@ function readIntake_() {
       status: String(row.status || "pending"), createdAt: normalizeDateTime_(row.createdAt), updatedAt: normalizeDateTime_(row.updatedAt)
     };
   });
+}
+
+// Snapshot callers can request only pending intake. Scan the narrow status
+// column first, then fetch selected full-width blocks. Coalesce smaller gaps
+// when there are more than eight blocks to cap Sheets service calls.
+function readPendingIntakeRows_() {
+  var sheet = getSpreadsheet_().getSheetByName(APP.SHEETS.INTAKE);
+  var lastRow = sheet ? Number(sheet.getLastRow() || 0) : 0;
+  if (lastRow < 2) return [];
+  var count = lastRow - 1;
+  var statusColumn = APP.INTAKE_HEADERS.indexOf("status") + 1;
+  var statuses = sheet.getRange(2, statusColumn, count, 1).getValues();
+  var selected = [];
+  for (var index = 0; index < count; index += 1) {
+    var status = String(statuses[index][0] || "pending");
+    // Blank status is conservatively treated as pending. Empty rows are removed
+    // after the payload read, preserving rows with other fields but no ID/status.
+    if (status === "pending") selected.push(index + 2);
+  }
+  if (!selected.length) return [];
+
+  var blocks = [];
+  selected.forEach(function(rowNumber) {
+    var last = blocks[blocks.length - 1];
+    if (last && rowNumber === last.end + 1) last.end = rowNumber;
+    else blocks.push({ start: rowNumber, end: rowNumber });
+  });
+  if (blocks.length > 8) {
+    var gaps = [];
+    for (var blockIndex = 0; blockIndex < blocks.length - 1; blockIndex += 1) {
+      gaps.push({ index: blockIndex, size: blocks[blockIndex + 1].start - blocks[blockIndex].end - 1 });
+    }
+    // Keep the seven largest gaps as separators; equal gaps keep earlier
+    // separators first. This bounds coalescing to O(n log n), not repeated merges.
+    gaps.sort(function(left, right) { return right.size - left.size || left.index - right.index; });
+    var separators = Object.create(null);
+    gaps.slice(0, 7).forEach(function(gap) { separators[gap.index] = true; });
+    var bounded = [blocks[0]];
+    for (var gapIndex = 0; gapIndex < blocks.length - 1; gapIndex += 1) {
+      if (separators[gapIndex]) bounded.push(blocks[gapIndex + 1]);
+      else bounded[bounded.length - 1].end = blocks[gapIndex + 1].end;
+    }
+    blocks = bounded;
+  }
+
+  var result = [];
+  blocks.forEach(function(block) {
+    var values = sheet.getRange(block.start, 1, block.end - block.start + 1, APP.INTAKE_HEADERS.length).getValues();
+    values.forEach(function(valuesRow, offset) {
+      if (!valuesRow.some(function(cell) { return cell !== ""; })) return;
+      var record = recordFromValues_(valuesRow, APP.INTAKE_HEADERS, block.start + offset);
+      // Recheck status after the wide read in case a row was approved after the
+      // status scan but before its payload was fetched.
+      if (!record.status || String(record.status) === "pending") result.push(record);
+    });
+  });
+  return result;
 }
 
 function appendIntake_(item) {

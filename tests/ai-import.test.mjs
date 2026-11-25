@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import test from "node:test";
+import { gmailMessage, gmailPartData, gmailTextPart, stubGmail } from "./helpers/gmail-fixture.mjs";
 
 const sources = await Promise.all(["src/intake-duplicates.js", "apps-script/Config.gs", "apps-script/Parser.gs", "apps-script/Import.gs", "apps-script/AiImport.gs", "apps-script/Repository.gs"].map((name) => readFile(new URL(`../${name}`, import.meta.url), "utf8")));
 const item = (overrides = {}) => ({ customer: "検証用商事", product: "ケリソン 18cm 上向 3.5mm", productCode: "", quantity: 10, dueDate: "2026-11-30", serialNo: "TEST-01", externalOrderNo: "", externalLineNo: "", specLength: "", specShape: "", bladeWidth: "", note: "", sourceDocument: 1, sourcePage: 1, sourceRow: "1", evidence: "1 ケリソン 18cm 上向 3.5mm 数量10 納期2026/11/30", warnings: [], ...overrides });
@@ -277,21 +278,68 @@ test("本文貼り付け候補も数量空欄・ゼロ・小数で承認でき�
 
 test("AIメール取込は本文と添付を1回で解析し、同じメールを二重登録しない", () => {
   const { context, saved, calls } = harness();
-  const message = {
-    getId: () => "mock-message", getSubject: () => "検証用注文", getFrom: () => "qa@example.invalid",
-    getDate: () => new Date("2026-09-07T00:00:00Z"), getPlainBody: () => "添付の明細をお願いします",
-    getAttachments: () => [{ getContentType: () => "application/pdf", getBytes: () => [1, 2, 3] }]
-  };
-  context.Utilities.base64Encode = () => "AQID";
+  const subject = "検証用注文";
+  const message = gmailMessage("mock-message", {
+    receivedAt: "2026-09-07T00:00:00Z", sender: "=?UTF-8?Q?Fixture_Shop?= <qa@example.invalid>",
+    subject: `=?UTF-8?B?${Buffer.from(subject).toString("base64")}?=`, payload: {
+      mimeType: "multipart/mixed", parts: [
+        { mimeType: "multipart/alternative", parts: [
+          gmailTextPart("添付の明細をお願いします"),
+          { mimeType: "multipart/related", parts: [
+            gmailTextPart("<p>同じ本文のHTML版</p>", "text/html"),
+            { mimeType: "image/png", filename: "inline.png", headers: [
+              { name: "Content-Disposition", value: "inline" }, { name: "Content-Id", value: "<fixture-logo>" },
+            ], body: { attachmentId: "logo", size: 3 } },
+          ] },
+        ] },
+        { mimeType: "application/pdf", filename: "order.pdf", body: { attachmentId: "order-attachment", size: 2 } },
+      ],
+    },
+  });
   context.APP = { DEFAULTS: { gmailQuery: "subject:検証" } };
   context.readSettings_ = () => ({});
   context.readJobs_ = () => [];
   context.readIntake_ = () => saved;
-  context.GmailApp = { search: () => [{ getMessages: () => [message] }] };
+  const fetched = [], attachments = [];
+  stubGmail(context, {
+    list(userId, options) {
+      assert.equal(userId, "me");
+      assert.equal(options.q, "subject:検証");
+      return { messages: [{ id: message.id, threadId: message.threadId }] };
+    },
+    get(userId, id) { assert.equal(userId, "me"); fetched.push(id); return message; },
+    getAttachment(userId, messageId, attachmentId) {
+      assert.equal(userId, "me");
+      assert.equal(messageId, message.id);
+      assert.equal(attachmentId, "order-attachment");
+      attachments.push(attachmentId);
+      return gmailPartData([251, 255]);
+    },
+  });
   assert.equal(context.scanOrderEmails({ engine: "ai" }).added, 1);
   assert.equal(calls.length, 1);
   assert.match(saved[0].sourceRef, /^gmail:mock-message:item:v1:[a-f0-9]{64}$/);
-  assert.match(calls[0].options.payload, /添付の明細/);
+  assert.equal(saved[0].sender, "Fixture Shop <qa@example.invalid>");
+  assert.equal(saved[0].subject, subject);
+  const parts = JSON.parse(calls[0].options.payload).contents[0].parts;
+  const text = parts.map(part => part.text ?? "").join("\n");
+  assert.match(text, /添付の明細をお願いします/);
+  assert.doesNotMatch(text, /同じ本文のHTML版/);
+  assert.deepEqual(parts.filter(part => part.inlineData).map(part => part.inlineData), [{ mimeType: "application/pdf", data: "+/8=" }]);
   assert.equal(context.scanOrderEmails({ engine: "ai" }).added, 0);
   assert.equal(calls.length, 1);
+  assert.deepEqual(fetched, ["mock-message"]);
+  assert.deepEqual(attachments, ["order-attachment"]);
+});
+
+test("GmailのHTMLのみの本文を改行とセルの区切りを保って読み取る", () => {
+  const { context } = harness();
+  const payload = gmailTextPart("<head><title>文書タイトル</title></head><p>依頼&#x66F8;<br>ケリソン&nbsp;18cm</p><table><tr><td>数量</td><td>10</td></tr></table>", "text/html");
+  const date = "2026-09-07T00:00:00.000Z";
+  const message = gmailMessage("html-order", { sender: "fixture@example.invalid", subject: "注文", receivedAt: date, payload });
+  stubGmail(context, { get: () => message });
+  const result = context.readOrderEmail_(message.id);
+  assert.equal(result.text, "依頼書\nケリソン 18cm\n数量\t10\t\n");
+  assert.equal(result.receivedAt, date);
+  assert.equal(result.attachments.length, 0);
 });

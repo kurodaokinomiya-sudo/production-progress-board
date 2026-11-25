@@ -200,3 +200,47 @@ test("an older full sync cannot refill inventory invalidated by a background ord
   await tick();
   assert.equal(h.ui.state.materialInventory.materials[0].code, "JOB-CURRENT");
 });
+
+test("startup opens the ledger without an inventory read; entering materials loads it on demand", async () => {
+  const h = harness();
+  h.ui.state.activeView = "orders";
+  h.ui.state.mode = "loading";
+  h.ui.state.materialInventory = null;
+  h.context.renderAll = () => {};
+  const startup = h.ui.refreshData();
+  assert.equal(h.calls.getSnapshot[0].payload.includeMaterials, false);
+  h.calls.getSnapshot[0].resolve(h.fullSnapshot(null));
+  await startup;
+  assert.equal(h.ui.state.mode, "live");
+  assert.equal(h.calls.getMaterialInventory.length, 0);
+
+  h.ui.state.activeView = "materials";
+  h.ui.renderMaterialWorkspace();
+  assert.equal(h.calls.getMaterialInventory.length, 1);
+  assert.match(h.get("#material-status").textContent, /読み込み中/);
+  h.calls.getMaterialInventory[0].resolve(inventory("ON-DEMAND", 12));
+  await h.ui.refreshPending;
+  assert.equal(h.ui.state.materialInventory.materials[0].code, "ON-DEMAND");
+  const sync = h.ui.refreshData({ quiet: true });
+  assert.equal(h.calls.getSnapshot[1].payload.includeMaterials, true);
+  h.calls.getSnapshot[1].resolve(h.fullSnapshot(inventory("SYNCED", 11)));
+  await sync;
+  assert.equal(h.ui.state.materialInventory.materials[0].stockQuantity, 11);
+});
+
+test("a ledger sync in flight cannot clear an inventory read started after navigation", async () => {
+  const h = harness();
+  h.ui.state.activeView = "orders";
+  h.context.renderAll = () => { if (h.ui.state.activeView === "materials") h.ui.renderMaterialWorkspace(); };
+  const sync = h.ui.refreshData({ quiet: true });
+  assert.equal(h.calls.getSnapshot[0].payload.includeMaterials, false);
+  h.ui.state.activeView = "materials";
+  const dedicated = h.ui.refreshMaterialInventory();
+  h.calls.getMaterialInventory[0].resolve(inventory("AFTER-NAVIGATION", 7));
+  await dedicated;
+  h.calls.getSnapshot[0].resolve(h.fullSnapshot(null));
+  await sync;
+  assert.equal(h.ui.state.materialInventory.materials[0].code, "AFTER-NAVIGATION");
+  assert.equal(h.calls.getMaterialInventory.length, 1);
+  assert.equal(h.messages.length, 0);
+});

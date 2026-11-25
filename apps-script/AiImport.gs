@@ -427,7 +427,7 @@ function prepareAiMailBatch_(base, results, envelope) {
   if (!Array.isArray(results) || !results.length || results.length > 100) throw new Error("メールの明細数を確認できません。候補は登録していません。");
   var refs = {};
   var prepared = results.map(function(result, index) {
-    var ai = result.parsed && result.parsed._ai;
+    var ai = result.parsed && (result.parsed._ai || result.parsed._memory);
     if (!ai || !Number.isInteger(ai.document) || !Number.isInteger(ai.page) || !String(ai.row || "").trim()) throw new Error("メール明細の出典を確認できません。候補は登録していません。");
     var ref = base + ":item:v1:" + aiMailHash_([ai.document, ai.page, ai.row]);
     if (refs[ref]) throw new Error("メール明細の出典が重複しています。候補は登録していません。");
@@ -435,7 +435,7 @@ function prepareAiMailBatch_(base, results, envelope) {
     return {
       sourceType: "email", sourceRef: ref, receivedAt: envelope.receivedAt, sender: envelope.sender,
       subject: intakeSubject_(envelope.subject, result, index, results.length),
-      originalText: intakePreviewText_("メールと添付の原本を照合してください。", result, index, results.length),
+      originalText: intakePreviewText_(envelope.text || "メールと添付の原本を照合してください。", result, index, results.length),
       parsed: JSON.parse(JSON.stringify(result.parsed)), confidence: 0, status: "pending"
     };
   }).sort(function(a, b) { return a.sourceRef < b.sourceRef ? -1 : a.sourceRef > b.sourceRef ? 1 : 0; });
@@ -449,40 +449,43 @@ function prepareAiMailBatch_(base, results, envelope) {
 // One mail per click; incomplete batches are retried without duplicating rows.
 function scanOrderEmailsWithAi_(input) {
   var settings = readSettings_();
-  var query = sanitizeText_(input.query || settings.gmailQuery || APP.DEFAULTS.gmailQuery, 1000);
+  var query = input.query || settings.gmailQuery || APP.DEFAULTS.gmailQuery;
   var intakes = readIntake_(), jobs = readJobs_(), review = [];
   function warnings() { return review.length ? ["全件保存を確認できない既存のAIメール取込が" + review.length + "通あります。原本と候補・承認済み案件を管理者が照合してください。自動で処理済みにはしていません。"] : []; }
-  var threads = GmailApp.search(query, 0, 20);
-  for (var t = 0; t < threads.length; t += 1) {
-    var messages = threads[t].getMessages();
-    for (var m = 0; m < messages.length; m += 1) {
-      var message = messages[m];
-      var base = "gmail:" + message.getId();
-      var state = aiMailBatchState_(base, intakes, jobs);
-      if (state.kind === "complete") continue;
-      if (state.kind === "legacy") { review.push(base); continue; }
-      var attachments = message.getAttachments({ includeInlineImages: false, includeAttachments: true });
-      if (attachments.some(function(file) { return !/^(application\/pdf|image\/(jpeg|png|webp))$/.test(file.getContentType()); })) throw new Error("AI非対応の添付があります。PDFまたは画像にしてアップロードしてください。メールは登録していません。");
-      if (attachments.length > 3) throw new Error("添付が4件以上あります。分けてアップロードしてください。メールは登録していません。");
-      var results = runAiImport_({
-        name: message.getSubject(), text: "送信者: " + message.getFrom() + "\n" + message.getPlainBody(),
-        files: attachments.map(function(file) { return { mimeType: file.getContentType(), base64: Utilities.base64Encode(file.getBytes()) }; })
-      }, requireOwnerAccess_);
-      var batch = prepareAiMailBatch_(base, results, { receivedAt: message.getDate().toISOString(), sender: message.getFrom(), subject: message.getSubject() });
-      return withDocumentLock_(function() {
-        requireOwnerAccess_();
-        var current = aiMailBatchState_(base, readIntake_(), readJobs_());
-        if (current.kind === "complete") return { added: 0, skipped: 1, warnings: warnings(), reviewRequired: review };
-        if (current.kind === "legacy" || current.kind === "partial" && current.key !== batch.key) {
-          throw new Error("AI_MAIL_REVIEW_REQUIRED: 未完了メールの再読取結果が前回と異なるか、既存候補を照合できません。原本と候補・承認済み案件を管理者が確認してください。追加保存はしていません。");
-        }
-        var missing = batch.items.filter(function(item) { return !current.rows.some(function(saved) { return saved.sourceRef === item.sourceRef; }); });
-        if (missing.length) appendIntakes_(missing);
-        SpreadsheetApp.flush();
-        if (aiMailBatchState_(base, readIntake_(), readJobs_()).kind !== "complete") throw new Error("メール明細の保存が未完了です。同じ検索を再試行してください。");
-        return { added: missing.length, skipped: batch.items.length - missing.length, warnings: warnings().concat(["AIは未取込メールを1通ずつ処理します。続きは10秒以上あけて再度検索してください。"]), reviewRequired: review };
-      });
-    }
+  var messageIds = listOrderEmailMessages_(query, 20).messageIds;
+  for (var m = 0; m < messageIds.length; m += 1) {
+    var messageId = messageIds[m];
+    var base = "gmail:" + messageId;
+    var state = aiMailBatchState_(base, intakes, jobs);
+    if (state.kind === "complete") continue;
+    if (state.kind === "legacy") { review.push(base); continue; }
+    var message = readOrderEmail_(messageId), attachments = message.attachments;
+    if (attachments.some(function(file) { return !/^(application\/pdf|image\/(jpeg|png|webp))$/.test(file.mimeType); })) throw new Error("AI非対応の添付があります。PDFまたは画像にしてアップロードしてください。メールは登録していません。");
+    if (attachments.length > 3) throw new Error("添付が4件以上あります。分けてアップロードしてください。メールは登録していません。");
+    // Attachments and partial retries retain the full AI reconciliation path:
+    // body/attachment duplicates or a changed parser must not split a batch.
+    var remembered = input.engine === "auto" && !attachments.length && (state.kind === "empty" || state.rows[0].parsed._memory)
+      ? readRememberedOrderItems_(message.text, { subject: message.subject }) : null;
+    var results = remembered || runAiImport_({
+      name: message.subject, text: "送信者: " + message.sender + "\n" + message.text,
+      files: attachments.map(function(file) { return { mimeType: file.mimeType, base64: Utilities.base64Encode(gmailPartBytes_(messageId, file)) }; })
+    }, requireOwnerAccess_);
+    var batch = prepareAiMailBatch_(base, results, {
+      receivedAt: message.receivedAt, sender: message.sender, subject: message.subject, text: remembered ? message.text : ""
+    });
+    return withDocumentLock_(function() {
+      requireOwnerAccess_();
+      var current = aiMailBatchState_(base, readIntake_(), readJobs_());
+      if (current.kind === "complete") return { added: 0, skipped: 1, warnings: warnings(), reviewRequired: review };
+      if (current.kind === "legacy" || current.kind === "partial" && current.key !== batch.key) {
+        throw new Error("AI_MAIL_REVIEW_REQUIRED: 未完了メールの再読取結果が前回と異なるか、既存候補を照合できません。原本と候補・承認済み案件を管理者が確認してください。追加保存はしていません。");
+      }
+      var missing = batch.items.filter(function(item) { return !current.rows.some(function(saved) { return saved.sourceRef === item.sourceRef; }); });
+      if (missing.length) appendIntakes_(missing);
+      SpreadsheetApp.flush();
+      if (aiMailBatchState_(base, readIntake_(), readJobs_()).kind !== "complete") throw new Error("メール明細の保存が未完了です。同じ検索を再試行してください。");
+      return { added: missing.length, skipped: batch.items.length - missing.length, warnings: warnings().concat(["AIは未取込メールを1通ずつ処理します。続きは10秒以上あけて再度検索してください。"]), reviewRequired: review };
+    });
   }
   return { added: 0, skipped: 0, warnings: warnings().length ? warnings() : ["検索範囲の20スレッド内に未取込メールはありません。"], reviewRequired: review };
 }

@@ -117,6 +117,34 @@ test("複数月の表示と印刷は月・得意先・納期の優先順で並�
   assert.deepEqual(ui.state.jobs.map((entry) => entry.id), originalOrder);
 });
 
+test("連番順は月ごとに数値順・空欄は末尾で、印刷も表示順に従う", async () => {
+  const { context, ui, elements, printed } = harness();
+  context.fitDistributionToPage = () => {};
+  ui.state.distributionEndMonth = "2026-05";
+  ui.state.distributionSort = "serial";
+  ui.state.jobs = [
+    job("ten", "2026-04-01", { serialNo: "26-10", distributionAssignee: "幹" }),
+    job("blank", "2026-04-02", { distributionAssignee: "豊" }),
+    job("may", "2026-05-01", { serialNo: "26-1", distributionAssignee: "豊" }),
+    job("two-late", "2026-04-30", { serialNo: "26-2", distributionAssignee: "豊" }),
+    job("unassigned", "2026-04-04", { serialNo: "26-4" }),
+    job("two-early", "2026-04-29", { serialNo: "26-2", distributionAssignee: "幹" }),
+  ];
+
+  ui.renderDistributionWorkspace();
+  assert.equal(elements.get("#distribution-sort").value, "serial");
+  assert.match(elements.get("#distribution-result-summary").textContent, /月→連番順/);
+  const rows = elements.get("#distribution-workspace").innerHTML.matchAll(/data-distribution-row="([^"]+)"/g);
+  assert.deepEqual(Array.from(rows, (row) => row[1]), ["two-early", "two-late", "unassigned", "ten", "blank", "may"]);
+
+  await ui.printDistribution();
+  assert.equal(printed.count, 1);
+  const print = elements.get("#distribution-print-sheet").innerHTML;
+  assert.match(print, /月→連番順/);
+  const products = print.matchAll(/<td>製品([^<]+)<\/td>/g);
+  assert.deepEqual(Array.from(products, (product) => product[1]), ["two-early", "two-late", "ten", "blank", "may"]);
+});
+
 test("期間初期値は単月で、範囲操作は逆転を防ぎ移動で期間長を保つ", () => {
   const { ui, elements } = harness();
   ui.state.distributionEndMonth = "";
@@ -327,6 +355,53 @@ test("配布担当保存中は印刷せず、成功後もラベル印刷状態�
   assert.equal(ui.state.jobs[0].labelPrintStatus, "printed");
   assert.equal(ui.state.jobs[0].labelPrintedAt, target.labelPrintedAt);
   assert.equal(elements.get("#distribution-print-sheet")?.innerHTML || "", "");
+});
+
+test("担当の保存中は行にフォーカスを保ち、対象が絞り込みから消えたら次の行へ移す", () => {
+  const { context, ui, elements } = harness();
+  const { document } = context;
+  context.CSS = { escape: (value) => value };
+  const jobs = [job("one", "2026-04-01"), job("two", "2026-04-02")];
+  ui.state.jobs = jobs;
+  ui.renderDistributionWorkspace();
+  const workspace = elements.get("#distribution-workspace");
+  const filter = document.querySelector('[data-distribution-filter][aria-pressed="true"]');
+  filter.focus = () => { document.activeElement = filter; };
+
+  function row(id, index, assignee, saving = false) {
+    const item = { dataset: { distributionRow: id }, sectionRowIndex: index };
+    const button = { dataset: { distributionAssignee: assignee } };
+    for (const target of [item, button]) {
+      target.closest = () => item;
+      target.focus = () => { document.activeElement = target; };
+    }
+    item.querySelector = () => saving ? null : button;
+    return { item, button };
+  }
+  const original = row("one", 0, "豊");
+  const pending = row("one", 0, "豊", true);
+  const saved = row("one", 0, "豊");
+  const next = row("two", 0, "");
+  original.button.focus();
+  let rows = [pending.item, next.item];
+  workspace.querySelectorAll = () => rows;
+  ui.state.distributionSaving.add("one");
+  ui.renderDistributionWorkspace();
+  assert.equal(document.activeElement, pending.item);
+
+  ui.state.distributionSaving.clear();
+  jobs[0].distributionAssignee = "豊";
+  rows = [saved.item, next.item];
+  ui.renderDistributionWorkspace();
+  assert.equal(document.activeElement, saved.button);
+  ui.state.distributionFilter = "";
+  rows = [next.item];
+  ui.renderDistributionWorkspace();
+  assert.equal(document.activeElement, next.button);
+  jobs[1].distributionAssignee = "豊";
+  rows = [];
+  ui.renderDistributionWorkspace();
+  assert.equal(document.activeElement, filter);
 });
 
 test("配布表の印刷は保留中のラベル確認・ラベル選択を保持する", async () => {

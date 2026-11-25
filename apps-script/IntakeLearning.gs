@@ -57,7 +57,7 @@ function forgetIntakeLearningRule(input) {
 function learnIntakeProduct_(candidate, job, request) {
   if (request.learnProduct !== true) return "";
   var rules = readIntakeLearningRules_();
-  var result = IntakeLearning.learn({ rules: rules, parsed: candidate.parsed || {}, order: job,
+  var result = IntakeLearning.remember({ rules: rules, parsed: candidate.parsed || {}, order: job,
     intakeId: String(candidate.id), includeNote: request.learnNote === true, updatedAt: new Date().toISOString() });
   if (!result.changed) return result.message || "";
   var changedKey = result.rule ? result.rule.key : result.removedKey;
@@ -68,7 +68,8 @@ function learnIntakeProduct_(candidate, job, request) {
     var revisions = candidate.parsed._learning && candidate.parsed._learning.ruleIntakeIds || {};
     var staleNote = request.learnNote === true && current.note &&
       (!result.rule || String(result.rule.note || "") !== current.note) && revisions[current.key] !== current.intakeId;
-    var stale = (result.rule ? result.rule.fields : current.fields).some(function(field) {
+    var fields = result.rule && result.rule.confirmed ? Object.keys(result.rule.target) : result.rule ? result.rule.fields : current.fields;
+    var stale = fields.some(function(field) {
       return String(current.target[field] || "") !== String(job[field] || "") &&
         String(current.target[field] || "") !== String(candidate.parsed[field] || "");
     });

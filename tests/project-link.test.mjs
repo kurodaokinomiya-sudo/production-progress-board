@@ -4,9 +4,11 @@ import vm from "node:vm";
 import test from "node:test";
 
 test("本番の管理リンクは実行中のスクリプトIDから作る", async () => {
-  const source = await readFile(new URL("../apps-script/Code.gs", import.meta.url), "utf8");
+  const sources = await Promise.all(["Code.gs", "Repository.gs"].map((file) => readFile(new URL(`../apps-script/${file}`, import.meta.url), "utf8")));
   const context = vm.createContext({ requireAppAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireAdminAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireEditorAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), requireOwnerAccess_: () => ({email: "owner@example.com", role: "owner", isOwner: true, isAdmin: true, canEdit: true}), getAccessSettings: () => ({emails: [], version: 1}), ensureSystem_: () => {}, readJobs_: () => [], readIntake_: () => [], readSettings_: () => ({}), getAiImportStatus: () => ({}), ScriptApp: { getScriptId: () => "different-project_123" } });
-  vm.runInContext(source, context);
+  const stubs = { ...context };
+  vm.runInContext(sources.join("\n"), context);
+  Object.assign(context, stubs);
   assert.equal(context.getSnapshot({}).scriptEditorUrl, "https://script.google.com/home/projects/different-project_123/edit");
 });
 

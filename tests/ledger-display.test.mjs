@@ -239,7 +239,7 @@ test("ledger tables put product and serial first and progress view contains only
   const compact = keys(ui.orderTableHeader({ ledger: true, compact: true, category: "鋭匙鉗子" }));
   assert.deepEqual(full.slice(0, 8), ["product", "serial", "customer", "due", "quantity", "length", "shape", "blade"]);
   assert.deepEqual(compact.slice(0, 8), ["product", "serial", "customer", "due", "quantity", "length", "shape", "blade"]);
-  assert.equal(full.length, 17);
+  assert.equal(full.length, 16);
   assert.equal(compact.length, 14);
   assert.deepEqual(keys(ui.orderTableHeader()).slice(0, 2), ["customer", "product"], "non-ledger tables keep their existing column order");
 
@@ -352,6 +352,30 @@ test("focus table keeps the product and every process while omitting notes and r
   assert.equal((standardRow.match(/<td[ >]/g) || []).length, 17);
   assert.doesNotMatch(standardHeader, /大分類|分類/);
   assert.match(standardRow, /cell-note/);
+});
+
+test("the production ledger omits shipping and finished-list tables retain their shipping columns", () => {
+  const { ui, jobs } = harness();
+  const cells = (markup, tag) => [...markup.matchAll(new RegExp(`<${tag} [^>]*class="cell-([^"]+)"`, "g"))].map((match) => match[1]);
+  for (const [table, controls] of [
+    [{}, ["polishing", "shipping", "edit", "note"]],
+    [{ ledger: true }, ["polishing", "edit", "note"]],
+    [{ ledger: true, compact: true }, ["polishing"]],
+    [{ ledger: true, progressOnly: true }, ["stage"]],
+    [{ ledger: true, shipping: true }, ["polishing", "shipping", "edit", "note"]],
+    [{ ledger: true, shipping: true, compact: true }, ["polishing", "shipping"]],
+    [{ ledger: true, shipping: true, progressOnly: true }, ["shipping"]],
+    [{ ledger: true, completed: true }, ["polishing", "shipping", "edit", "note"]],
+  ]) {
+    const header = ui.orderTableHeader(table);
+    const headings = cells(header, "th");
+    const row = cells(ui.orderTableRows(jobs, table), "td");
+    const columns = [...header.matchAll(/<col class="col-(?!scroll-space")([^"]+)">/g)].map((match) => match[1]);
+    assert.deepEqual(columns, headings);
+    assert.deepEqual(row, headings);
+    assert.equal(row.filter((key) => key === "shipping").length, controls.includes("shipping") ? 1 : 0);
+    assert.deepEqual(row.slice(-controls.length), controls);
+  }
 });
 
 test("background refresh renders only the active view and switching sees current job data", () => {

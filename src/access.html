@@ -3,18 +3,18 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <meta name="description" content="生産工程管理の利用アカウントを確認します">
+    <meta name="description" content="HAKOBI｜生産工程管理の利用アカウントを確認します">
     <meta name="color-scheme" content="light">
-    <title>生産工程管理</title>
+    <title>HAKOBI｜生産工程管理</title>
     <link rel="stylesheet" href="../tokens.css" data-inline="tokens">
     <link rel="stylesheet" href="access.css" data-inline="styles" data-access-shell>
   </head>
   <body>
     <main class="access-page" id="main-content">
       <section class="access-card" aria-labelledby="access-title">
-        <p class="access-brand">生産工程管理</p>
+        <p class="access-brand" translate="no">HAKOBI｜生産工程管理</p>
         <h1 id="access-title">利用アカウントの確認</h1>
-        <p class="access-intro" id="access-intro">初回だけ、利用するGoogleアカウントのメールアドレスを確認します。同じブラウザーでは次回から自動で接続します。</p>
+        <p class="access-intro" id="access-intro">利用するGoogleアカウントのメールアドレスを確認します。同じブラウザーでは90日間、自動で接続できます。</p>
 
         <form id="request-form" novalidate>
           <label class="access-label" for="email">メールアドレス</label>
@@ -22,16 +22,16 @@
             <input id="email" name="email" type="email" required maxlength="254" autocomplete="email" inputmode="email" autocapitalize="none" spellcheck="false" aria-describedby="email-help access-status">
             <button class="button button-secondary" id="request-code" type="submit">確認コードを送信</button>
           </div>
-          <p class="access-help" id="email-help">確認コードは入力したアドレスが対象の場合に送信されます。</p>
+          <p class="access-help" id="email-help">対象のアドレスに確認コードを送ります。届いている有効なコードも使えます。</p>
         </form>
 
         <form id="verify-form" novalidate>
-          <label class="access-label" for="code">確認コード（8桁）</label>
+          <label class="access-label" for="code">確認コード</label>
           <div class="access-field-row">
-            <input id="code" name="code" type="text" required inputmode="numeric" autocomplete="one-time-code" maxlength="8" pattern="[0-9]{8}" aria-describedby="code-help access-status">
+            <input id="code" name="code" type="text" required autocomplete="one-time-code" autocapitalize="none" spellcheck="false" maxlength="64" pattern="[0-9]{8}|[A-Fa-f0-9]{32}" aria-describedby="code-help access-status">
             <button class="button button-primary" id="verify-code" type="submit">確認する</button>
           </div>
-          <p class="access-help" id="code-help">メールに届いた8桁の数字を入力してください。</p>
+          <p class="access-help" id="code-help">メールに届いたコードを貼り付けてください。</p>
         </form>
 
         <p class="access-status" id="access-status" role="status" aria-live="polite" aria-atomic="true"></p>

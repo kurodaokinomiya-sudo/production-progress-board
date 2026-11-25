@@ -97,7 +97,7 @@ var IntakeLearning = (function () {
     input.fields.forEach(function (field) {
       if (FIELDS.indexOf(field) >= 0 && fields.indexOf(field) < 0 && !same(field, source[field], target[field])) fields.push(field);
     });
-    if (!fields.length && !bounded(input.note, MAX_NOTE)) return null;
+    if (!fields.length && !bounded(input.note, MAX_NOTE) && input.confirmed !== true) return null;
     var note = input.note === undefined || input.note === null ? "" : bounded(input.note, MAX_NOTE);
     if (note === null) return null;
     var updatedAt = bounded(input.updatedAt, 80);
@@ -105,6 +105,7 @@ var IntakeLearning = (function () {
     if (intakeId === null) return null;
     return {
       key: key, customer: customer, source: source, target: target, fields: fields,
+      ...(input.confirmed === true ? { confirmed: true } : {}),
       ...(note ? { note: note } : {}), updatedAt: updatedAt || "", intakeId: intakeId || ""
     };
   }
@@ -250,6 +251,65 @@ var IntakeLearning = (function () {
     return JSON.stringify([rule.customer, rule.source, rule.target, rule.fields, rule.note || ""]);
   }
 
+  // Approval also records correctly read products, even when no correction was
+  // needed. Keep learn()'s correction/reset behavior and the original opt-in.
+  function remember(options) {
+    options = plain(options);
+    var result = learn(options);
+    if (result.removedKey) return result;
+    var parsed = plain(options.parsed), original = getOriginal(parsed), order = plain(options.order);
+    var source = prepareStable(original), target = prepareStable(order);
+    var customer = customerValue(original.customer), finalCustomer = customerValue(order.customer);
+    if (source.overflow || target.overflow || !customer || customer !== finalCustomer ||
+        !source.values.product || (!source.values.productCode && genericName(source.values.product))) return result;
+    // Do not resurrect a forgotten rule from an older, already supplemented
+    // candidate. A fresh confirmed reading can establish it again.
+    var linked = plain(parsed._learning).ruleKeys || [];
+    var rules = result.rules, selected = matchRules(original, rules);
+    if (selected.ambiguous || selected.rejected) return result;
+    var prior = result.rule || selected.matched[0];
+    if (!prior && linked.length) return result;
+    var intakeId = bounded(options.intakeId, MAX_FIELD);
+    if (!intakeId || (prior && prior.intakeId === intakeId && prior.confirmed)) return result;
+    // Another confirmation of unchanged values does not change the revision.
+    if (prior && prior.confirmed && FIELDS.every(function(field) { return same(field, prior.target[field], target.values[field]); })) return result;
+    if (!prior && rules.length >= MAX_RULES) return result;
+    var rule = sanitizeRule(Object.assign({}, prior || {
+      key: keyFor(customer, source.values), customer: customer, source: source.values, fields: []
+    }, { target: target.values, confirmed: true, intakeId: intakeId,
+      updatedAt: bounded(options.updatedAt, 80) || new Date().toISOString() }));
+    if (!rule) return result;
+    var index = rules.findIndex(function(entry) { return entry.key === rule.key; });
+    if (index >= 0) rules[index] = rule; else rules.push(rule);
+    return { rules: rules, changed: true, rule: rule, message: result.message || "確認した製品を覚えました。次回から一致する注文はAIなしで読み取ります。" };
+  }
+
+  // Product memory never supplies order-specific values. The caller must prove
+  // document boundaries and the provenance of each quantity/date first.
+  function recall(options) {
+    options = plain(options);
+    var parsed = plain(options.parsed), rules = sanitizeRules(options.rules);
+    var quantity = parsed.quantity, due = rawText(parsed.dueDate);
+    if (typeof quantity !== "number" || !Number.isSafeInteger(quantity) || quantity <= 0 ||
+        !/^20\d{2}-\d{2}-\d{2}$/.test(due) || (parsed._parseWarnings || []).length) return null;
+    var date = new Date(due + "T00:00:00Z");
+    if (!isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== due) return null;
+    var selection = matchRules(parsed, rules);
+    if (selection.matched.length !== 1 || selection.ambiguous || selection.rejected) return null;
+    var rule = selection.matched[0], name = normalizedText(parsed.product);
+    if (!name || [rule.source.product, rule.target.product].map(normalizedText).indexOf(name) < 0) return null;
+    // Explicit sizes and directions must agree with the confirmed product,
+    // including when a previous AI misreading was corrected on approval.
+    if (["specLength", "specShape", "bladeWidth"].some(function(field) {
+      return normalizedText(parsed[field]) && !same(field, parsed[field], rule.target[field]);
+    })) return null;
+    var applied = apply({ parsed: parsed, rules: [rule] });
+    if (["conflict", "ambiguous"].indexOf(applied.status) >= 0 ||
+        ["鋭匙鉗子", "ケリソンパンチ"].indexOf(applied.parsed.category) < 0) return null;
+    applied.parsed._memory = { version: 1, key: rule.key };
+    return applied.parsed;
+  }
+
   function matchRules(original, rules) {
     var customer = normalizedText(original.customer), code = semantic("productCode", original.productCode), name = normalizedText(original.product);
     if (!customer) return { matched: [], rejected: false };
@@ -300,7 +360,10 @@ var IntakeLearning = (function () {
       status = "conflict"; message = "製品仕様が共有済み修正と異なります。自動補正せず確認してください。";
     } else if (selection.matched.length) {
       var rule = selection.matched[0], proposed = Object.assign({}, values), conflict = false;
-      rule.fields.forEach(function (field) {
+      var supplementFields = rule.fields.concat(FIELDS.filter(function(field) {
+        return rule.confirmed && !values[field] && rule.target[field] && rule.fields.indexOf(field) < 0;
+      }));
+      supplementFields.forEach(function (field) {
         var incoming = values[field], sourceValue = rule.source[field], targetValue = rule.target[field];
         if (!incoming || same(field, incoming, sourceValue)) {
           proposed[field] = targetValue;
@@ -367,7 +430,7 @@ var IntakeLearning = (function () {
     return sanitizeRules(options.rules).filter(function (rule) { return rule.key !== key; });
   }
 
-  return Object.freeze({ sanitizeRules: sanitizeRules, learn: learn, apply: apply, promptExamples: promptExamples, remove: remove });
+  return Object.freeze({ sanitizeRules: sanitizeRules, learn: learn, remember: remember, recall: recall, apply: apply, promptExamples: promptExamples, remove: remove });
 }());
 
 if (typeof globalThis !== "undefined") globalThis.IntakeLearning = IntakeLearning;

@@ -25,7 +25,7 @@ function harness(role = "viewer") {
     localStorage: { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, String(value)) },
     requestAnimationFrame: (callback) => callback(),
   });
-  vm.runInContext(`${source.slice(0, source.indexOf("async function init()"))}\nglobalThis.ui = { state, api, canEdit, canWork, canAccessView, openOrderDialog, openLabelPrintDialog, renderLabelSelectionState, printSelectedLabels, confirmLabelsPrinted, stageCellButton, shippingCell, orderTableRows, renderDistributionWorkspace, renderAccessSettings };`, context);
+  vm.runInContext(`${source.slice(0, source.indexOf("async function init()"))}\nglobalThis.ui = { state, api, canEdit, canWork, canAccessView, openOrderDialog, openLabelPrintDialog, renderLabelSelectionState, printSelectedLabels, confirmLabelsPrinted, stageCellButton, shippingCell, orderTableRows, renderDistributionWorkspace, renderAccessSettings, renderSettings, saveGmailQuery };`, context);
   const ui = context.ui;
   ui.state.access = { email: `${role}@example.com`, role, isOwner: role === "owner", isAdmin: ["owner", "admin"].includes(role), canEdit: ["owner", "admin", "editor"].includes(role), canWork: role !== "viewer" };
   ui.state.jobs = [{ id: "one", product: "鋭匙鉗子", category: "鋭匙鉗子", dueDate: "2026-04-10", quantity: 4, version: 2, shippingStatus: "not_ready", labelPrintStatus: "waiting", distributionAssignee: "幹", stages: { welding: { assignee: "豊", status: "working" } } }];
@@ -33,6 +33,35 @@ function harness(role = "viewer") {
   ui.api.markLabelsPrinted = async () => { calls.saved += 1; return []; };
   return { ui, element, calls };
 }
+
+test("owner's Gmail search draft survives sync and further typing while a save is in flight", async () => {
+  const { ui, element } = harness("owner");
+  ui.state.theme = "light";
+  const input = element("#gmail-query");
+  const form = element("#gmail-settings-form");
+  form.elements = { gmailQuery: input };
+  input.defaultValue = input.value = "initial";
+  ui.state.settings.gmailQuery = "saved";
+  ui.renderSettings();
+  assert.equal(input.value, "saved");
+  input.value = "edited";
+  ui.state.settings.gmailQuery = "other device";
+  ui.renderSettings();
+  assert.equal(input.value, "edited");
+  let finish;
+  ui.api.saveSettings = ({ gmailQuery }) => new Promise(resolve => {
+    assert.equal(gmailQuery, "edited");
+    finish = () => resolve({ gmailQuery });
+  });
+  const pending = ui.saveGmailQuery({ currentTarget: form, preventDefault() {} });
+  input.value = "next edit";
+  finish();
+  await pending;
+  ui.renderSettings();
+  assert.equal(input.value, "next edit");
+  assert.equal(input.defaultValue, "edited");
+  assert.match(element("#gmail-query-status").textContent, /未保存/);
+});
 
 test("viewer label printing keeps queue state and never exposes or submits printed-state confirmation", async () => {
   const { ui, element, calls } = harness();
@@ -101,8 +130,9 @@ test("workers can update process and distribution while business editing and imp
   assert.equal(ui.canEdit(), false);
   assert.equal(ui.canWork(), true);
   assert.equal(ui.canEdit({ role: "worker", canEdit: true }), false);
-  for (const view of ["orders", "shipping", "distribution", "completed", "settings"]) assert.equal(ui.canAccessView(view), true, view);
-  for (const view of ["dashboard", "intake", "unknown"]) assert.equal(ui.canAccessView(view), false, view);
+  for (const view of ["orders", "shipping", "distribution", "completed", "settings", "castingStock"]) assert.equal(ui.canAccessView(view), true, view);
+  for (const view of ["dashboard", "intake", "materials", "finishedStock", "unknown"]) assert.equal(ui.canAccessView(view), false, view);
+  assert.equal(ui.canAccessView("castingStock", { role: "viewer" }), false);
   assert.match(ui.stageCellButton(job, { key: "welding", label: "溶接" }), /data-action="open-process"/);
   assert.doesNotMatch(ui.shippingCell(job), /data-action="open-process"/);
   assert.doesNotMatch(ui.orderTableRows([job]), /data-action="edit-order"/);

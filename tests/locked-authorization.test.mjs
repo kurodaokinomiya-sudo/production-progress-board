@@ -37,7 +37,7 @@ async function fixture(initialRole = "editor") {
   const spreadsheet = c.getSpreadsheet_();
   spreadsheet.getId = () => "synthetic-spreadsheet"; spreadsheet.getName = () => "Synthetic";
   c.SpreadsheetApp.getActiveSpreadsheet = () => spreadsheet;
-  c.GmailApp = { search: () => [] };
+  c.Gmail = { Users: { Messages: { list: () => ({}) } } };
   c.LockService.getScriptLock = () => ({
     waitLock() {
       assert.equal(h.state.locked, false, "no nested lock acquisition");
@@ -61,9 +61,9 @@ const mutations = [
   ["approveIntakes", "editor", h => h.c.approveIntakes({ items: [{ intakeId: h.intake.id, order: { customer: "合成", product: "鋭匙鉗子", quantity: 3 } }] })],
   ["rejectIntake", "editor", h => h.c.rejectIntake({ intakeId: h.intake.id })],
   ["rejectIntakes", "editor", h => h.c.rejectIntakes({ intakeIds: [h.intake.id] })],
-  ...["saveMaterialOrder", "receiveMaterialOrder", "adjustMaterialStock", "cancelMaterialOrder"].map(name => [name, "editor", h => h.c[name]({})]),
+  ...["saveMaterialOrder", "updateMaterialOrder", "receiveMaterialOrder", "adjustMaterialStock", "saveMaterialStockNote", "cancelMaterialOrder", "saveMaterialExclusion"].map(name => [name, "editor", h => h.c[name]({})]),
   ["getMaterialInventory (opening repair)", "editor", h => h.c.getMaterialInventory()],
-  ...["receiveFinishedStock", "shipFinishedStock", "openFinishedStock", "reverseFinishedStock", "saveFinishedStockSchedule"].map(name => [name, "editor", h => h.c[name]({})]),
+  ...["receiveFinishedStock", "shipFinishedStock", "openFinishedStock", "reverseFinishedStock", "saveFinishedStockSchedule", "saveFinishedStockNote"].map(name => [name, "editor", h => h.c[name]({})]),
   ["getFinishedStock (fulfillment repair)", "editor", h => h.c.getFinishedStock()],
   ["savePolishingMovement", "editor", h => h.c.savePolishingMovement({ action: "send", requestId: "queued-polish", date: "2026-10-01", items: [{ id: h.job.id, version: h.job.version, quantity: 3 }] })],
   ["savePolishingEventDate", "editor", h => h.c.savePolishingEventDate({ id: h.job.id, version: h.job.version, eventRequestId: "send", requestId: "queued-date", date: "2026-10-01" })],

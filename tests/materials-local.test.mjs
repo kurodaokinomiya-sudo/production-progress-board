@@ -99,6 +99,36 @@ test("MockApi excludes weak-bend-down variants without changing stock or persist
   assert.deepEqual(snapshot.materials.map(material => material.stockQuantity), [28, 12, 42, 1, 0, 0]);
 });
 
+test("local product material exclusion persists across orders and restores unresolved checks without ledger edits", async () => {
+  const ui = harness();
+  const initial = await ui.api.saveJob(order({ product: "確認対象 CK099", productCode: "CK099", specShape: "弱弯・上向", quantity: 3, requestId: "local-unresolved" }));
+  let snapshot = await ui.api.getMaterialInventory();
+  const unresolved = snapshot.unresolved.find(item => item.id === initial.id);
+  assert.ok(unresolved?.productKey);
+  const stockBefore = snapshot.materials.map(item => item.stockQuantity);
+  const historyBefore = snapshot.history.map(item => item.id);
+
+  snapshot = await ui.api.saveMaterialExclusion({ requestId: "local-exclude", action: "exclude", jobId: initial.id, productKey: unresolved.productKey });
+  assert.equal(snapshot.excludedProducts.length, 1);
+  assert.equal(snapshot.unresolved.some(item => item.id === initial.id), false);
+  assert.deepEqual(snapshot.materials.map(item => item.stockQuantity), stockBefore);
+  assert.deepEqual(snapshot.history.map(item => item.id), historyBefore);
+  const next = await ui.api.saveJob(order({ product: initial.product, productCode: initial.productCode, specShape: initial.specShape, quantity: 8, serialNo: "LOCAL-SECOND", requestId: "local-same-product" }));
+  assert.deepEqual(JSON.parse(JSON.stringify(next.materials.allocation)), []);
+  assert.equal((await ui.api.getMaterialInventory()).unresolved.length, 0);
+
+  const active = (await ui.api.getMaterialInventory()).excludedProducts[0];
+  const duplicate = { requestId: "local-already-excluded", action: "exclude", jobId: next.id, productKey: active.key };
+  assert.equal((await ui.api.saveMaterialExclusion(duplicate)).excludedProducts[0].id, active.id);
+  snapshot = await ui.api.saveMaterialExclusion({ requestId: "local-restore", action: "restore", ruleId: active.id, productKey: active.key });
+  assert.equal(snapshot.excludedProducts.length, 0);
+  assert.equal(snapshot.unresolved.some(item => item.id === initial.id), true);
+  assert.equal(snapshot.unresolved.some(item => item.id === next.id), true);
+  assert.deepEqual(snapshot.materials.map(item => item.stockQuantity), stockBefore);
+  assert.deepEqual(snapshot.history.map(item => item.id), historyBefore);
+  assert.equal((await ui.api.saveMaterialExclusion(duplicate)).excludedProducts.length, 0);
+});
+
 test("local receipts and order saves share a lock and retain both mutations", async () => {
   const ui = harness();
   const purchase = await ui.api.saveMaterialOrder({ requestId: "purchase", materialId: "CK001", orderDate: "2026-10-20", quantity: 10, expectedDate: "2026-10-30", note: "分納" });
@@ -109,11 +139,36 @@ test("local receipts and order saves share a lock and retain both mutations", as
   assert.equal(stock(snapshot, "CK001").onOrderQuantity, 6);
   assert.equal(snapshot.orders[0].receivedQuantity, 4);
   assert.equal(snapshot.history.filter(event => event.action === "receive").length, 1);
-  await assert.rejects(ui.api.receiveMaterialOrder({ ...receipt, requestId: "too-many", quantity: 7 }), /発注残/);
   await ui.api.cancelMaterialOrder({ requestId: "cancel", orderId: receipt.orderId, date: "2026-10-21", note: "残数の発注取消" });
   const adjusted = await ui.api.adjustMaterialStock({ requestId: "adjust", materialId: "CK001", date: "2026-10-21", quantity: -1, note: "棚卸差異" });
   assert.equal(stock(adjusted, "CK001").stockQuantity, 28);
   assert.equal(stock(adjusted, "CK001").onOrderQuantity, 0);
+});
+
+test("local purchase changes, over-receipts and per-material notes persist with distinct effects", async () => {
+  const ui = harness();
+  const purchase = await ui.api.saveMaterialOrder({ requestId: "purchase", materialId: "CK001", orderDate: "2026-11-01", quantity: 10, expectedDate: "2026-11-20" });
+  const [initial] = purchase.orders;
+  const note = "本体 13、カブセ 14\n差分は別保管";
+  await Promise.all([
+    ui.api.updateMaterialOrder({ requestId: "edit", orderId: initial.id, quantity: 12, expectedDate: "2026-11-23", expectedRevision: initial.revision }),
+    ui.api.saveMaterialStockNote({ requestId: "note", materialId: "CK001", note, expectedRevision: "" }),
+  ]);
+  const changed = await ui.api.getMaterialInventory();
+  assert.equal(stock(changed, "CK001").stockQuantity, 28);
+  assert.equal(stock(changed, "CK001").onOrderQuantity, 12);
+  assert.equal(stock(changed, "CK001").nextExpectedDate, "2026-11-23");
+  assert.equal(stock(changed, "CK001").note, note);
+  const receipt = { orderId: initial.id, date: "2026-11-24", quantity: 13, requestId: "receipt" };
+  await ui.api.receiveMaterialOrder(receipt);
+  await ui.api.receiveMaterialOrder(receipt);
+  const snapshot = await ui.api.getMaterialInventory();
+  assert.equal(stock(snapshot, "CK001").stockQuantity, 41);
+  assert.equal(stock(snapshot, "CK001").onOrderQuantity, 0);
+  assert.equal(stock(snapshot, "CK001").note, note);
+  assert.equal(snapshot.orders[0].quantity, 12);
+  assert.equal(snapshot.orders[0].receivedQuantity, 13);
+  assert.equal(snapshot.history.filter(entry => entry.action === "receive").length, 1);
 });
 
 test("local intake candidates deduct on approval only and retry the same confirmed job", async () => {
@@ -138,5 +193,7 @@ test("materials view and local material RPCs are hidden from worker and viewer r
     assert.equal(ui.canAccessView("materials"), false);
     await assert.rejects(ui.api.getMaterialInventory(), /編集権限/);
     await assert.rejects(ui.api.adjustMaterialStock({}), /編集権限/);
+    await assert.rejects(ui.api.updateMaterialOrder({}), /編集権限/);
+    await assert.rejects(ui.api.saveMaterialStockNote({}), /編集権限/);
   }
 });

@@ -72,7 +72,7 @@ function harness() {
     return prepared.snapshot;
   };
   const api = { async getFinishedStock() { calls.reads += 1; return readHandler ? readHandler() : snapshot(); } };
-  for (const [method, action] of Object.entries({ openFinishedStock: "opening", receiveFinishedStock: "receive", shipFinishedStock: "ship", reverseFinishedStock: "reverse", saveFinishedStockSchedule: "schedule" })) {
+  for (const [method, action] of Object.entries({ openFinishedStock: "opening", receiveFinishedStock: "receive", shipFinishedStock: "ship", reverseFinishedStock: "reverse", saveFinishedStockSchedule: "schedule", saveFinishedStockNote: "note" })) {
     api[method] = async payload => { calls.mutations.push(copy(payload)); return mutationHandler ? mutationHandler(action, payload) : commit(action, payload); };
   }
   const ui = context.FinishedStockUI.create({ api, canEdit: () => editable, today: () => "2026-10-20" });
@@ -87,6 +87,86 @@ function harness() {
     submit: () => form.fire("submit"), close: (method = "button") => method === "backdrop" ? dialog.fire("click") : method === "escape" ? dialog.fire("cancel") : closeButton.fire("click"),
   };
 }
+
+test("registered custom Tezoe is selectable without a warning and enters the stock table when quantity is recorded", async () => {
+  const h = harness();
+  h.setJobs([{
+    id: "custom-tezoe", version: 1, customer: "特注先", product: "Tezoe 特注側弯スタンツェ",
+    productCode: "26031", specShape: "側弯・上向", specLength: "21cm", bladeWidth: "黄",
+    quantity: 4, stockPlannedQuantity: 0,
+  }]);
+  await h.ready();
+  const product = h.snapshot().products.find(entry => entry.custom);
+  assert.ok(product);
+  assert.doesNotMatch(h.get("#finished-stock-rows").innerHTML, /26031/);
+  assert.equal(h.get("#finished-stock-issue-list").innerHTML, "");
+  assert.match(h.get("#finished-stock-product-filter").innerHTML, /26031/);
+  await h.open("opening", { productId: product.id });
+  assert.equal(h.fields.productId.value, product.id);
+  h.fill();
+  await h.submit();
+  assert.match(h.get("#finished-stock-rows").innerHTML, /26031/);
+  assert.equal(h.snapshot().products.find(entry => entry.custom).stockQuantity, 5);
+  h.get("#finished-stock-product-filter").value = product.id;
+  await h.get("#finished-stock-product-filter").fire("change");
+  assert.equal(h.get("#finished-stock-history-count").textContent, "1件");
+  await h.ui.refresh();
+  assert.equal(h.get("#finished-stock-product-filter").value, product.id);
+});
+
+test("custom Tezoe with stock planned appears in the stock table before physical receipt", async () => {
+  const h = harness();
+  h.setJobs([{
+    id: "new-tezoe", version: 1, customer: "特注先", product: "Tezoe 新形状", productCode: "T-CUSTOM",
+    quantity: 4, stockPlannedQuantity: 1, specShape: "側弯・下向",
+  }]);
+  await h.ready();
+  assert.match(h.get("#finished-stock-rows").innerHTML, /T-CUSTOM/);
+  assert.equal(h.get("#finished-stock-issue-list").innerHTML, "");
+});
+
+test("a product note appears in its overview row and accepts clearing after reopening", async () => {
+  const h = harness();
+  await h.ready();
+  assert.match(h.get("#finished-stock-rows").innerHTML, /data-stock-action="note" data-product-id="26001"/);
+  await h.open("note");
+  assert.deepEqual(Object.keys(h.fields), ["note"]);
+  assert.equal(h.get("#finished-stock-submit").textContent, "備考を保存");
+  const note = "棚Bに保管\n<検品>の後に引渡し";
+  h.fields.note.value = note;
+  await h.submit();
+  assert.deepEqual(h.calls.mutations[0], { productId: "26001", note, expectedRevision: "", requestId: "ui-1" });
+  assert.match(h.get("#finished-stock-rows").innerHTML, /棚Bに保管\n&lt;検品&gt;の後に引渡し/);
+  assert.equal(h.get("#finished-stock-history-count").textContent, "0件");
+  await h.open("note");
+  assert.equal(h.fields.note.value, note);
+  h.fields.note.value = "";
+  await h.submit();
+  assert.equal(h.snapshot().products.find(p => p.id === "26001").note, "");
+});
+
+test("note retries keep the original request after a lost reply and stale edits can reopen the latest note", async () => {
+  const h = harness();
+  await h.ready(); await h.open("note");
+  h.fields.note.value = "発送前に検品";
+  h.setMutation((action, payload) => { h.commit(action, payload); throw new Error("通信が切断されました"); });
+  await h.submit(); await h.close(); await h.open("note");
+  assert.equal(h.fields.note.value, "発送前に検品");
+  h.setMutation(null);
+  await h.submit();
+  assert.deepEqual(h.calls.mutations[0], h.calls.mutations[1]);
+  assert.equal(h.snapshot().version, 1);
+
+  await h.open("note");
+  h.fields.note.value = "こちらの入力";
+  const updated = h.snapshot().products.find(p => p.id === "26001");
+  h.commit("note", { requestId: "other-note", productId: updated.id, expectedRevision: updated.noteRevision, note: "別の端末で保存" });
+  await h.submit();
+  assert.equal(h.fields.note.value, "こちらの入力");
+  assert.match(h.get("#finished-stock-form-status").textContent, /別の端末で備考が更新されました/);
+  await h.close(); await h.open("note");
+  assert.equal(h.fields.note.value, "別の端末で保存");
+});
 
 for (const method of ["button", "backdrop", "escape"]) {
   test(`${method}: empty and edited stock forms close through the same draft-preserving path`, async () => {
@@ -195,6 +275,86 @@ test("background inventory refresh preserves in-progress form input", async () =
   assert.equal(h.fields.note.disabled, false);
 });
 
+test("periodic stock reads leave actions and the status usable and skip repainting unchanged rows", async () => {
+  const h = harness(); await h.ready();
+  const status = h.get("#finished-stock-status");
+  const originalStatus = status.textContent;
+  const rows = h.get("#finished-stock-history-rows");
+  let rowWrites = 0;
+  let html = rows.innerHTML;
+  Object.defineProperty(rows, "innerHTML", { get: () => html, set(value) { html = value; rowWrites++; } });
+  const read = deferred(); h.setRead(() => read.promise);
+  for (let sync = 0; sync < 3; sync++) {
+    h.ui.invalidate({ refresh: true, passive: true }); h.ui.render(); await tick();
+    assert.ok(h.buttons.every(button => !button.disabled));
+    assert.equal(status.textContent, originalStatus);
+  }
+  assert.equal(h.calls.reads, 2);
+  await h.open("note");
+  assert.equal(h.dialog.open, true);
+  h.fields.note.value = "入力中の備考";
+  read.resolve(h.snapshot()); await tick();
+  assert.equal(rowWrites, 0);
+  assert.equal(status.textContent, originalStatus);
+  assert.equal(h.fields.note.value, "入力中の備考");
+
+  h.commit("opening", { requestId: "periodic-change", expectedVersion: 0, productId: "26001", quantity: 5, date: "2026-10-20", note: "合成データ", lotNo: "PERIODIC-NEW" });
+  h.setRead(null); h.ui.invalidate({ refresh: true, passive: true }); await tick();
+  assert.match(h.get("#finished-stock-lot-rows").innerHTML, /PERIODIC-NEW/);
+  assert.equal(rowWrites, 1);
+  assert.equal(h.fields.note.value, "入力中の備考");
+});
+
+test("background read failure leaves controls enabled and an explicit update joins a current read", async () => {
+  const h = harness(); await h.ready();
+  const status = h.get("#finished-stock-status");
+  const originalStatus = status.textContent;
+  h.setRead(() => { throw new Error("通信エラー"); });
+  h.ui.invalidate({ refresh: true, passive: true }); await tick();
+  assert.equal(status.textContent, originalStatus);
+  assert.ok(h.buttons.every(button => !button.disabled));
+  const read = deferred(); h.setRead(() => read.promise);
+  h.ui.invalidate({ refresh: true, passive: true }); await tick();
+  const manual = h.ui.refresh();
+  assert.match(status.textContent, /読み込んで/);
+  assert.equal(h.buttons[1].disabled, true);
+  read.resolve(h.snapshot()); await manual;
+  assert.equal(h.calls.reads, 3);
+  assert.equal(h.buttons[1].disabled, false);
+});
+
+test("a late periodic response cannot overwrite a note saved while it was in flight", async () => {
+  const h = harness(); await h.ready();
+  const old = h.snapshot(), read = deferred(); h.setRead(() => read.promise);
+  h.ui.invalidate({ refresh: true, passive: true }); await tick();
+  await h.open("note"); h.fields.note.value = "確定した注意事項";
+  await h.submit();
+  read.resolve(old); await tick();
+  assert.match(h.get("#finished-stock-rows").innerHTML, /確定した注意事項/);
+  assert.equal(h.get("#finished-stock-status").textContent, "備考を保存しました。");
+  assert.equal(h.calls.reads, 2);
+  assert.equal(h.buttons[1].disabled, false);
+});
+
+test("a rejected stock write waits for a fresh version even if a periodic read was already in flight", async () => {
+  const h = harness(); await h.ready();
+  const old = h.snapshot(), read = deferred(); h.setRead(() => read.promise);
+  h.ui.invalidate({ refresh: true, passive: true }); await tick();
+  h.commit("opening", { requestId: "other-writer", expectedVersion: 0, productId: "26002", quantity: 1, date: "2026-10-20", note: "別端末" });
+  await h.open(); h.fill();
+  const rejectedSave = h.submit();
+  await tick();
+  h.setRead(null); read.resolve(old);
+  await rejectedSave;
+  assert.equal(h.calls.reads, 3);
+  assert.equal(h.dialog.open, true);
+  assert.equal(h.fields.note.value, "現物確認");
+  await h.submit();
+  assert.equal(h.calls.mutations[1].expectedVersion, 1);
+  assert.equal(h.calls.mutations[1].requestId, h.calls.mutations[0].requestId);
+  assert.equal(h.snapshot().products[0].stockQuantity, 5);
+});
+
 test("passive sync cannot starve a slow stock read, while forced invalidation still discards stale results", async () => {
   const h = harness(), initialRead = deferred();
   h.setRead(() => initialRead.promise);
@@ -275,12 +435,46 @@ test("stock-only production can set its completion date without creating custome
   await h.open("completion", { jobId: "replenishment-ui" });
   h.fields.completionDate.value = "2026-11-25";
   await h.submit();
-  assert.equal(h.calls.mutations[0].orderQuantity, 0);
-  assert.equal(h.calls.mutations[0].stockQuantity, 0);
+  assert.equal(h.calls.mutations[0].completionOnly, true);
+  assert.equal(h.calls.mutations[0].orderQuantity, undefined);
+  assert.equal(h.calls.mutations[0].stockQuantity, undefined);
   assert.equal(h.calls.mutations[0].completionDate, "2026-11-25");
   assert.equal(h.snapshot().orders.length, 0);
   assert.equal(h.snapshot().productions[0].dueDate, "2026-11-25");
   assert.equal(h.snapshot().products[0].stockQuantity, 0);
+});
+
+test("editing a customer's completion date keeps automatic allocations and any explicit shipment plan", async () => {
+  const h = harness();
+  const job = { id: "manufacture-ten", version: 1, customer: "得意先", product: "Tezoe スタンツェ 直上", productCode: "26001",
+    quantity: 10, stockPlannedQuantity: 0, dueDate: "2026-11-30", stages: { finish: { status: "working" } } };
+  h.setJobs([job]);
+  await h.ready();
+  await h.open("completion", { jobId: job.id });
+  h.fields.completionDate.value = "2026-11-25";
+  await h.submit();
+  const order = () => h.snapshot().orders[0];
+  assert.equal(order().hasSchedule, false);
+  assert.equal(order().quantity, 10);
+  assert.equal(order().allocatedQuantity, 0);
+  assert.equal(order().completionDate, "2026-11-25");
+  assert.equal(h.snapshot().productions[0].dueDate, "2026-11-25");
+  h.commit("opening", { expectedVersion: h.snapshot().version, requestId: "arrived-later", productId: "26001",
+    quantity: 4, date: "2026-10-20", note: "現物確認" });
+  assert.equal(order().allocatedQuantity, 4);
+  h.commit("schedule", { expectedVersion: h.snapshot().version, requestId: "explicit-plan", jobId: job.id, jobVersion: job.version,
+    orderQuantity: 9, stockQuantity: 2, shipmentMode: "split", shipDate: "2026-11-24", completionDate: "2026-11-25" });
+  await h.ui.refresh();
+  await h.open("completion", { jobId: job.id });
+  h.fields.completionDate.value = "";
+  await h.submit();
+  assert.equal(order().hasSchedule, true);
+  assert.equal(order().quantity, 9);
+  assert.equal(order().stockTargetQuantity, 2);
+  assert.equal(order().allocatedQuantity, 2);
+  assert.equal(order().shipDate, "2026-11-24");
+  assert.equal(order().completionDate, job.dueDate);
+  assert.equal(h.snapshot().productions[0].dueDate, job.dueDate);
 });
 
 function shipmentHarness(quantity = 5) {

@@ -60,7 +60,7 @@ test("N01 save relevance follows normalized product identity and the previous jo
     assert.equal(stock.needsJobValidation(job, null), true);
     assert.equal(stock.productFor(job).id, "26001");
     assert.equal(stock.needsJobValidation({ product: "別製品" }, job), true);
-    assert.throws(() => stock.validateJob({ ...job, productCode: "invalid", stockPlannedQuantity: 1 }, job, []), /製品番号/);
+    assert.throws(() => stock.validateJob({ ...job, productCode: "26002", stockPlannedQuantity: 1 }, job, []), /製品番号|刃向き/);
     assert.throws(() => stock.validateJob({ ...job, specShape: "強弯", stockPlannedQuantity: 1 }, job, []), /型/);
   }
   assert.equal(stock.needsJobValidation({ product: "鋭匙鉗子", stockPlannedQuantity: 0 }, null), false);
@@ -97,6 +97,18 @@ test("due-date stock plans do not become physical stock and split order quantity
   assert.equal(stock.snapshot({ jobs: [productJob({ archived: true })], events: [] }).plans.length, 0);
 });
 
+test("deleted Tezoe replenishment jobs do not leave inventory warnings for uneditable orders", () => {
+  const stock = pureContext();
+  const deleted = productJob({ id: "deleted-stock", customer: "在庫用", product: "Tezoeスタンツェ26021", productCode: "26021", stockPlannedQuantity: 0, archived: true });
+  const active = productJob({ id: "active-order", productCode: "26002", stockPlannedQuantity: 0 });
+  const shipped = productJob({ id: "shipped-stock", customer: "在庫", stockPlannedQuantity: 0, shippingStatus: "shipped" });
+  const snapshot = stock.snapshot({ jobs: [deleted, active, shipped], events: [] });
+  assert.deepEqual(copy(snapshot.issues.map(issue => issue.jobId)), [active.id]);
+  assert.match(snapshot.issues[0].message, /製品番号/);
+  assert.deepEqual(copy(snapshot.productions.map(plan => plan.jobId)), [shipped.id]);
+  assert.equal(snapshot.productions[0].stockQuantity, shipped.quantity);
+});
+
 test("opening stock is explicit, records unknown provenance, and rejects future dates", () => {
   const h = pureHarness([]);
   const opened = h.mutate("opening", h.input({ productId: "26001", quantity: 3, date: "2026-10-18", note: "手元現物を確認", lotNo: "棚A" }));
@@ -107,6 +119,129 @@ test("opening stock is explicit, records unknown provenance, and rejects future 
   assert.throws(() => h.mutate("opening", h.input({ productId: "26001", quantity: 1, date: "2026-10-22", note: "先行入力" })), /今日まで/);
   assert.throws(() => h.mutate("opening", h.input({ productId: "26001", quantity: 1, date: "2026-10-18", note: "未来製造", productionDate: "2026-10-21" })), /製造日は今日まで/);
   assert.throws(() => h.mutate("opening", h.input({ productId: "26001", quantity: 1, date: "2026-10-18" })), /理由/);
+});
+
+const customJob = (extra = {}) => productJob({
+  product: "Tezoe 特注スタンツェ", productCode: "26031", specLength: "21cm",
+  specShape: "側弯・上向", bladeWidth: "黄", stockPlannedQuantity: 0, ...extra,
+});
+
+test("contradictory embedded Tezoe codes never create a new stock identity", () => {
+  const stock = pureContext();
+  for (const product of ["Tezoeスタンツェ２６００１", "Tezoe 26001 特注スタンツェ", "TEZOE26001 試作"]) {
+    for (const stockPlannedQuantity of [0, 2]) {
+      const job = customJob({ product, productCode: "２６０３１", stockPlannedQuantity });
+      assert.throws(() => stock.validateJob(job, null, []), /26001.*26031/);
+      const result = stock.snapshot({ jobs: [job], events: [] });
+      assert.equal(result.issues.length, 1);
+      assert.equal(result.orders.length, 0);
+      assert.equal(result.plans.length, 0);
+      assert.equal(result.products.some(row => row.custom), false);
+    }
+  }
+  assert.equal(stock.productFor(customJob({ product: "Ｔｅｚｏｅ 特注２６０３１", productCode: "２６０３１" })).code, "26031");
+  assert.ok(stock.productFor(customJob({ productCode: "" })).custom);
+});
+
+test("one inconsistent replenishment remains editable and leaves other orders and reservations usable", () => {
+  const bad = productJob({ id: "legacy-stock", customer: "在庫用", productCode: "26002", stockPlannedQuantity: 0 });
+  const good = productJob({ id: "customer-order" });
+  const h = pureHarness([bad, good, { ...bad, id: "deleted", archived: true }]);
+  const result = h.mutate("opening", h.input({ productId: "26001", quantity: 4, date: "2026-10-20", note: "棚卸" })).snapshot;
+  assert.deepEqual(copy(result.issues.map(row => row.jobId)), [bad.id]);
+  assert.deepEqual(copy(result.orders.map(row => [row.jobId, row.allocatedQuantity])), [[good.id, 4]]);
+  assert.deepEqual(copy(result.productions.map(row => row.jobId)), [good.id]);
+  const corrected = { ...bad, productCode: "26001" };
+  assert.equal(h.stock.validateJob(corrected, bad, h.events), corrected.quantity);
+  const fixed = h.stock.snapshot({ jobs: [corrected, good], events: h.events });
+  assert.equal(fixed.issues.length, 0);
+  assert.equal(fixed.plans.find(row => row.jobId === bad.id).quantity, corrected.quantity);
+});
+
+test("historic mismatched custom stock can be reviewed and reversed without new movements", () => {
+  const job = customJob({ product: "Tezoe 特注スタンツェ 26001", stockPlannedQuantity: 4 });
+  const h = pureHarness([job]);
+  const definition = Object.fromEntries(["productCode", "product", "specLength", "specShape", "bladeWidth"].map(field => [field, job[field]]));
+  const legacyId = "tezoe-" + h.stock.hash(Object.values(definition).map(value => value.toLowerCase()));
+  h.events.push({ action: "receive", id: "legacy-receipt", requestId: "previous-request", requestHash: "e".repeat(64), at,
+    date: "2026-10-19", quantity: 2, jobId: job.id, productId: legacyId, productDefinition: definition });
+  const original = copy(h.events);
+  const product = h.stock.snapshot({ jobs: h.jobs, events: h.events }).products.find(row => row.id === legacyId);
+  assert.equal(product.stockQuantity, 2);
+  assert.match(product.identityIssue, /26001.*26031/);
+  assert.throws(() => h.mutate("opening", h.input({ productId: legacyId, quantity: 1, date: "2026-10-20", note: "棚卸" })), /26001.*26031/);
+  assert.throws(() => h.mutate("ship", h.input({ productId: legacyId, quantity: 1, date: "2026-10-20", customer: "顧客", orderRef: "1", purpose: "sale" })), /26001.*26031/);
+  const corrected = { ...job, productCode: "26001" };
+  assert.throws(() => h.stock.validateJob(corrected, job, h.events), /受領済み/);
+  const reversed = h.mutate("reverse", h.input({ eventId: "legacy-receipt", date: "2026-10-20", note: "番号訂正" }));
+  assert.deepEqual(h.events.slice(0, 1), original);
+  assert.equal(reversed.snapshot.products.find(row => row.id === legacyId).stockQuantity, 0);
+  assert.equal(h.stock.validateJob(corrected, job, h.events), 4);
+});
+
+test("new and custom Tezoe variants register automatically with separate exact identities", () => {
+  const stock = pureContext();
+  const jobs = [
+    customJob({ id: "new-shape" }),
+    customJob({ id: "another-width", bladeWidth: "3mm" }),
+    customJob({ id: "without-code", productCode: "", specShape: "特注・左向" }),
+  ];
+  const result = stock.snapshot({ jobs, events: [] });
+  assert.deepEqual(copy(result.issues), []);
+  const products = result.products.filter(product => product.custom);
+  assert.equal(products.length, 3);
+  assert.equal(new Set(products.map(product => product.id)).size, 3);
+  assert.ok(products.every(product => !product.stockRegistered && product.plannedQuantity === 0));
+  assert.equal(result.orders.length, 3);
+  assert.equal(stock.productFor({ ...jobs[0], customer: "別の得意先", note: "別の注文備考" }).id, products[0].id);
+  assert.notEqual(stock.productFor({ ...jobs[0], specLength: "23cm" }).id, products[0].id);
+  assert.notEqual(stock.productFor({ ...jobs[0], specShape: "側弯・下向" }).id, products[0].id);
+  const customWithStandardCode = stock.productFor(customJob({ productCode: "26001" }));
+  assert.notEqual(customWithStandardCode.id, stock.productFor(productJob()).id);
+  assert.equal(customWithStandardCode.custom, true);
+});
+
+test("custom Tezoe stock can be added, retried, shipped and reversed after the source job changes", () => {
+  const h = pureHarness([customJob()]);
+  const productId = h.stock.productFor(h.jobs[0]).id;
+  const request = h.input({ productId, quantity: 4, date: "2026-10-18", note: "特注品の現物確認" });
+  const received = h.mutate("opening", request);
+  assert.equal(received.snapshot.products.find(product => product.id === productId).stockQuantity, 4);
+  assert.equal(h.mutate("opening", request).retry, true);
+  h.jobs[0] = customJob({ archived: true, specShape: "特注・右向" });
+  const reloaded = h.stock.snapshot({ jobs: h.jobs, events: h.events });
+  assert.equal(reloaded.products.find(product => product.id === productId).stockQuantity, 4);
+  assert.deepEqual(copy(reloaded.issues), []);
+  const shipped = h.mutate("ship", h.input({
+    productId, quantity: 1, date: "2026-10-20", customer: "特注先", orderRef: "CUSTOM-1", purpose: "sale",
+  }));
+  assert.equal(shipped.snapshot.products.find(product => product.id === productId).stockQuantity, 3);
+  const reversed = h.mutate("reverse", h.input({ eventId: shipped.event.id, date: "2026-10-20", note: "数量訂正" }));
+  assert.equal(reversed.snapshot.products.find(product => product.id === productId).stockQuantity, 4);
+  assert.equal(h.stock.snapshot({ jobs: [], events: h.events }).products.find(product => product.id === productId).stockQuantity, 4);
+  const corrupt = copy(h.events);
+  corrupt[0].productDefinition.specShape = "別仕様";
+  assert.throws(() => h.stock.snapshot({ jobs: [], events: corrupt }), /製品|仕様/);
+});
+
+test("custom Tezoe replenishment and order shipment follow the existing stock and job safeguards", () => {
+  const h = pureHarness([customJob({ stockPlannedQuantity: 5 })]);
+  const productId = h.stock.productFor(h.jobs[0]).id;
+  assert.equal(h.stock.snapshot({ jobs: h.jobs, events: [] }).plans[0].productId, productId);
+  h.mutate("schedule", h.input({ jobId: "J-1", jobVersion: 3, orderQuantity: 5, stockQuantity: 2, shipmentMode: "split" }));
+  const received = h.mutate("receive", h.input({
+    jobId: "J-1", jobVersion: 3, quantity: 5, date: "2026-10-20", productionDate: "2026-10-19", producers: ["河"],
+  }));
+  assert.equal(received.snapshot.products.find(product => product.id === productId).stockQuantity, 5);
+  assert.throws(() => h.stock.validateJob({ ...h.jobs[0], specShape: "反対向き" }, h.jobs[0], h.events), /製品/);
+  assert.throws(() => h.mutate("receive", h.input({
+    jobId: "J-1", jobVersion: 2, quantity: 1, date: "2026-10-20", productionDate: "2026-10-19", producers: ["河"],
+  })), /別の端末/);
+  const shipped = h.mutate("ship", h.input({
+    productId, orderJobId: "J-1", jobVersion: 3, quantity: 2, date: "2026-10-20", purpose: "sale",
+  }));
+  assert.equal(shipped.snapshot.orders[0].shippedQuantity, 2);
+  assert.equal(shipped.snapshot.products.find(product => product.id === productId).stockQuantity, 3);
 });
 
 test("receipts require a ready job, immutable production facts, and cannot exceed the plan", () => {
@@ -170,6 +305,53 @@ test("idempotent retry succeeds before stale version checking and rejects change
   assert.equal(h.events.length, 1);
   assert.throws(() => h.mutate("opening", { ...request, quantity: 3 }), /同じリクエストID/);
   assert.throws(() => h.mutate("opening", { ...h.input({ productId: "26001", quantity: 1, date: "2026-10-10", note: "もう一度", expectedVersion: 0 }) }), /別の端末/);
+});
+
+test("product notes coexist with legacy movement history and leave stock, lots and forecasts alone", () => {
+  const h = pureHarness();
+  const opening = h.mutate("opening", h.input({ productId: "26001", quantity: 6, date: "2026-10-10", note: "現物確認" }));
+  const baseline = opening.snapshot;
+  const note = "検品見本は棚B\n左右の刃を確認";
+  assert.equal(baseline.products[0].note, "");
+  assert.equal(baseline.products[0].noteRevision, "");
+  const input = { productId: "26001", note, expectedRevision: "", requestId: "product-note" };
+  const { event, snapshot } = h.mutate("note", input);
+  assert.equal(snapshot.products[0].note, note);
+  assert.equal(snapshot.products[0].noteRevision, event.id);
+  assert.equal(snapshot.products[1].note, "");
+  assert.equal(snapshot.products[1].noteRevision, "");
+  const { note: savedNote, noteRevision, ...stock } = snapshot.products[0];
+  const { note: oldNote, noteRevision: oldRevision, ...oldStock } = baseline.products[0];
+  assert.deepEqual(stock, oldStock);
+  for (const key of ["history", "lots", "plans", "orders", "productions", "issues"]) assert.deepEqual(snapshot[key], baseline[key]);
+  assert.equal(h.mutate("note", input).event, null);
+  assert.throws(() => h.mutate("note", { ...input, note: "別の内容" }), /同じリクエストID/);
+  assert.throws(() => h.mutate("note", { ...input, requestId: "different-note" }), /別の端末で製品の備考/);
+  assert.throws(() => h.mutate("reverse", h.input({ eventId: event.id, date: "2026-10-20", note: "取消" })), /取消対象/);
+  assert.equal(h.events.length, 2);
+  const otherProduct = h.mutate("note", { productId: "26002", note: "別の製品", expectedRevision: "", requestId: "other-product-note" });
+  assert.equal(otherProduct.snapshot.products[1].note, "別の製品");
+  const clear = h.mutate("note", { ...input, note: "", expectedRevision: event.id, requestId: "clear-product-note" });
+  assert.equal(clear.snapshot.products[0].note, "");
+  assert.equal(clear.snapshot.products[0].noteRevision, clear.event.id);
+});
+
+test("a custom product note survives the removal of its source plan without registering stock", () => {
+  const h = pureHarness([customJob()]);
+  const productId = h.stock.productFor(h.jobs[0]).id;
+  const input = { productId, note: "特注品は分けて保管", expectedRevision: "", requestId: "custom-note" };
+  assert.throws(() => h.mutate("note", { ...input, productId: "arbitrary" }), /製品を選択/);
+  assert.throws(() => h.mutate("note", { ...input, note: "長".repeat(1001) }), /1000文字以内/);
+  assert.throws(() => h.mutate("note", { ...input, note: null }), /備考の内容/);
+  h.mutate("note", input);
+  const after = h.stock.snapshot({ jobs: [], events: h.events });
+  const custom = after.products.find(row => row.id === productId);
+  assert.equal(custom.note, input.note);
+  assert.equal(custom.stockRegistered, false);
+  assert.equal(custom.stockQuantity, 0);
+  assert.equal(custom.plannedQuantity, 0);
+  assert.equal(after.lots.length, 0);
+  assert.equal(after.history.length, 0);
 });
 
 function serverHarness(initialRole = "editor") {
@@ -237,6 +419,46 @@ test("server RPCs require editor access, lock ledger writes, and retain job stoc
   hWorker.setRole("worker");
   hWorker.context.saveJobProcess({ id: workerJob.id, version: workerJob.version, stages: { base: { status: "working", assignee: "豊" } } });
   assert.equal(hWorker.job().stockPlannedQuantity, 5);
+});
+
+test("server registers custom Tezoe from saved jobs and retains its product definition in the shared ledger", () => {
+  const h = serverHarness();
+  const saved = h.context.saveJob({ ...customJob(), version: h.job().version, requestId: "custom-save" });
+  const inventory = h.context.getFinishedStock();
+  assert.deepEqual(copy(inventory.issues), []);
+  const custom = inventory.products.find(product => product.custom);
+  assert.ok(custom);
+  assert.equal(custom.stockRegistered, false);
+  assert.equal(saved.productCode, "26031");
+  const request = { expectedVersion: 0, requestId: "custom-opening", productId: custom.id, quantity: 2, date: "2026-10-19", note: "現物を確認" };
+  h.state.failFlush = true;
+  assert.throws(() => h.context.openFinishedStock(request), /lost reply/);
+  h.context.openFinishedStock(request);
+  const reloaded = h.context.getFinishedStock();
+  assert.equal(reloaded.products.find(product => product.id === custom.id).stockQuantity, 2);
+  assert.equal(reloaded.history.length, 1);
+  assert.equal(reloaded.history[0].productDefinition.specShape, saved.specShape);
+  assert.equal(h.grids.get(h.context.APP.SHEETS.FINISHED_STOCK).length, 2);
+});
+
+test("server note saves are editor-only, reject stale revisions and retry a committed note once", () => {
+  const h = serverHarness("editor");
+  const sheet = h.context.APP.SHEETS.FINISHED_STOCK;
+  const input = { productId: "26001", note: "注意事項", expectedRevision: "", requestId: "note-save" };
+  h.state.failFlush = true;
+  assert.throws(() => h.context.saveFinishedStockNote(input), /lost reply/);
+  const saved = h.context.saveFinishedStockNote(input);
+  assert.equal(saved.products[0].note, input.note);
+  assert.equal(saved.products[0].stockQuantity, 0);
+  assert.equal(saved.history.length, 0);
+  assert.equal(h.grids.get(sheet).length, 2);
+  assert.throws(() => h.context.saveFinishedStockNote({ ...input, note: "古い下書き", requestId: "stale-note" }), /別の端末で製品の備考/);
+  assert.equal(h.context.getFinishedStock().products[0].note, input.note);
+  assert.equal(h.grids.get(sheet).length, 2);
+  for (const role of ["viewer", "worker"]) {
+    h.setRole(role);
+    assert.throws(() => h.context.saveFinishedStockNote(input), /EDITOR_REQUIRED/);
+  }
 });
 
 test("lost replies retry the committed event without duplication and stale versions recheck under the lock", () => {

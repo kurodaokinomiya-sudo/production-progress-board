@@ -91,7 +91,7 @@ function harness() {
     HTMLElement: Element, FormData, document, window: { crypto: webcrypto, google: { script: { run } } },
     localStorage: { getItem() { return null; }, setItem() {} }, setTimeout, clearTimeout,
   });
-  vm.runInContext(`${source.slice(0, source.indexOf("async function init()"))}\nglobalThis.ui = { state, api, refreshData, backgroundOperations, pendingJobMutations, failedOrderDrafts, deleteOrder, restoreDeletedOrder, openOrderDialog, openProcessDialog, closeDialog, confirmDiscardEdits, dialogHasUnsavedEdits, processEditSnapshot, savePendingDialogEdits, saveOrder, saveProcess, failedProcessDrafts, handleAccessRequired };`, context);
+  vm.runInContext(`${source.slice(0, source.indexOf("async function init()"))}\nglobalThis.ui = { state, api, refreshData, backgroundOperations, pendingJobMutations, failedOrderDrafts, deleteOrder, restoreDeletedOrder, openOrderDialog, openProcessDialog, closeDialog, confirmDiscardEdits, confirmPageUnload, dialogHasUnsavedEdits, processEditSnapshot, savePendingDialogEdits, saveOrder, saveProcess, failedProcessDrafts, handleAccessRequired };`, context);
   const ui = context.ui;
   const job = {
     id: "JOB-1", version: 2, customer: "得意先", product: "ケリソンパンチ 18cm 上向 3mm", quantity: 2,
@@ -143,6 +143,31 @@ test("工程・注文は開いた直後の自動補完を未保存の変更と�
   h.ui.closeDialog(h.orderDialog);
   assert.equal(h.orderDialog.open, false);
   assert.equal(h.discardDialog.opens, 0);
+});
+
+test("再読み込み・タブ終了は工程と注文の実入力や保存中の変更を保護する", () => {
+  const h = harness();
+  function prompts() {
+    let prevented = false;
+    h.ui.confirmPageUnload({ preventDefault() { prevented = true; } });
+    return prevented;
+  }
+  h.ui.openProcessDialog(h.job);
+  assert.equal(prompts(), false);
+  h.rows[0].assignee.value = "鈴";
+  assert.equal(prompts(), true);
+  h.rows[0].assignee.value = "豊";
+  assert.equal(prompts(), false);
+  h.ui.closeDialog(h.processDialog);
+  h.ui.openOrderDialog(h.job);
+  assert.equal(prompts(), false);
+  h.orderForm.elements.note.value = "次回も確認";
+  h.ui.closeDialog(h.orderDialog);
+  assert.equal(prompts(), true);
+  h.ui.confirmDiscardEdits();
+  assert.equal(prompts(), false);
+  h.ui.backgroundOperations.set("save", "注文を保存中");
+  assert.equal(prompts(), true);
 });
 
 test("工程の担当空白と不明な状態は表示時の正規化として扱い、未編集警告を出さない", () => {

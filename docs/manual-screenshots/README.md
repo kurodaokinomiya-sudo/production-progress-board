@@ -1,20 +1,33 @@
-# マニュアル実画面版の画像
+# HAKOBI 操作マニュアル 実画面版
 
-本物のアプリのHTML・CSS・JavaScriptを、ローカルの説明用データで動かして撮影した画面です。
-職人編は作業員、事務編は編集者の権限表示を使用しています。案件・得意先・連番・数量・単価は架空です。
-実際の注文データや認証情報は使用していません。
+2026年11月20日改訂。作業者・編集者向け、v121対応のA4縦39ページです。
+表紙と目次から、共通の工程・配布表と、編集者の注文・研磨・出荷・在庫の手順を開けます。
 
-JPEGはブラウザの画面全体を保存しています。`manifest.json`の`clip`で印刷に必要な範囲を指定し、
-PDF側で切り出します。元画像の描き替えは行っていません。番号と指示線はPDFへ追加します。
+- 配布用PDFは `output/pdf/生産工程管理_操作マニュアル_実画面版.pdf` に生成します。
+- ブラウザーで読む場合は[操作マニュアル（実画面版）](../操作マニュアル_実画面版.md)を開きます。
+- 本文の編集元は [manual-content-2026-11-20.json](../manual-content-2026-11-20.json) です。
+- 撮影画像とファイルの照合記録は [2026-11-20-v121/manifest.json](2026-11-20-v121/manifest.json) にあります。
 
-撮影ページの準備は `tools/prepare-manual-screenshots.py`、説明用データは `tools/manual-screenshots-fixture.js`です。
-長押しの撮影状態はアプリ本来の表示処理を使用しています。印刷後の確認画面はアプリ本来の確認処理を
-使用していますが、撮影時には実際のプリンターへ送信しないよう、ローカル撮影ページだけで印刷呼出しを置き換えています。
-これらの撮影ページは製品本体の配布・デプロイには含めません。
+画像は11月20日のv121配信ファイルをローカルで開き、説明用の案件・数量・アカウントで撮影しています。
+PDFでは手順に必要な箇所を拡大し、番号を操作手順とそろえています。撮影時のJPEGはそのまま保管します。
+2026年10月30日版のPDFは `output/pdf/archive/` に保管しています。
 
-PDFは `tools/build-screenshot-manual.py`で生成します。通常版の本文・目次を再利用し、
-実画面に合わせて一括反映ボタンの名称を調整しています。
+## 再生成
 
-2026年10月8日更新：研磨の発送日・戻り取消・発送数量訂正を撮り直し、取消の手順を独立したページに追加しました。
-メニスカスの自動判定と、江部・嘉代別の月額・単価の実画面も更新しています。通常版・実画面版は21ページです。
-撮影に使った戻り履歴には説明用の識別子を付け、ローカルで取消後の数量・発送日の保持・月額への反映も確認しています。
+Codexのワークスペース依存関係にあるNode.js、Python、Popplerと、Chromeを使います。
+撮影に使う配信ファイルは `output/release-2026-11-20-stock-width/deployed-version/download/` の
+`Index.html` と `Access.html` です。撮影用ブラウザー内でローカルのファイルとデータを読み込みます。
+セットアップ済みのPlaywright Chromiumで撮影する場合は `MANUAL_BROWSER_CHANNEL=chromium` を設定します。
+
+```powershell
+node tools/capture-manual-screenshots.mjs
+python tools/build-screenshot-manual.py
+$manualQa = 'tmp/pdfs/manual-2026-11-20-v121'
+pdftoppm -r 120 -png (Join-Path $manualQa '生産工程管理_操作マニュアル_実画面版.pdf') (Join-Path $manualQa 'page')
+python tools/verify-screenshot-manual.py
+# 全ページのPNGを確認した後、配布用PDFとMarkdownを所定の場所に配置
+python tools/verify-screenshot-manual.py --publish
+```
+
+検証結果は `tmp/pdfs/manual-2026-11-20-v121/verification.json` に保存します。
+配信ファイルとのハッシュ一致、PDFのページ番号・目次リンク・しおり、日本語フォントの埋め込みを確認します。

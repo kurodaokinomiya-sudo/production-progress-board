@@ -2,12 +2,16 @@
 // workbook settings. The deploying account remains the implicit owner.
 var ACCESS_CONFIG_KEY = "APP_ACCESS_CONFIG_V1";
 var ACCESS_CHALLENGE_PREFIX = "APP_ACCESS_CHALLENGE_";
+var ACCESS_MAIL_CODE_PREFIX = "APP_ACCESS_MAIL_CODE_";
 var ACCESS_GRANT_PREFIX = "APP_ACCESS_GRANT_";
 var ACCESS_DEVICE_PREFIX = "APP_ACCESS_DEVICE_";
 var ACCESS_RATE_PREFIX = "APP_ACCESS_RATE_";
 var ACCESS_DEFAULT_EMAILS = ["minnanookinomiyaika@gmail.com"];
 var ACCESS_SESSION_DAYS = 7;
-var ACCESS_CODE_MINUTES = 10;
+var ACCESS_DEVICE_DAYS = 90;
+var ACCESS_MAIL_CODE_WINDOW_MS = 86400000;
+var ACCESS_MAIL_CODE_SEND_LIMIT = 2;
+var ACCESS_MAIL_CODE_RETRY_MS = 60000;
 
 function readAccessContext_() {
   try {
@@ -76,82 +80,103 @@ function requireOwnerAccess_() {
 
 function requestAccessCode(input) {
   var email = accessNormalizeEmail_(input && input.email);
-  var activeEmail = accessNormalizeEmail_(Session.getActiveUser().getEmail());
-  if (!accessValidEmail_(email) || (activeEmail && activeEmail !== email) || !accessConfig_().users.some(function(user) { return user.email === email; }) || email === accessNormalizeEmail_(Session.getEffectiveUser().getEmail())) return { ok: true };
-  var sessionHash = accessSessionHash_();
-  if (!sessionHash) return { ok: true };
-  var delivery = accessWithLock_(function() {
-    var now = Date.now();
-    accessCleanup_(now);
-    var lockedActiveEmail = accessNormalizeEmail_(Session.getActiveUser().getEmail());
-    if ((lockedActiveEmail && lockedActiveEmail !== email) || email === accessNormalizeEmail_(Session.getEffectiveUser().getEmail()) || !accessConfig_().users.some(function(user) { return user.email === email; })) return;
-    var day = new Date(now).toISOString().slice(0, 10);
-    var rateKey = ACCESS_RATE_PREFIX + day;
-    var rates = accessReadJson_(rateKey) || { count: 0, byEmail: {}, sessions: {} };
-    var sessionCount = Number(rates.sessions[sessionHash] || 0);
-    var emailRate = rates.byEmail[email] || { sent: [] };
-    emailRate.sent = emailRate.sent.filter(function(time) { return now - Number(time) < 3600000; });
-    var priorChallenge = accessReadJson_(ACCESS_CHALLENGE_PREFIX + sessionHash);
-    if (priorChallenge && priorChallenge.email === email && now - Number(priorChallenge.sentAt) < 60000) {
-      throw new Error("確認コードは60秒後に再送できます。");
+  try {
+    if (!accessSessionHash_() || !accessEmailCodeEligible_(email)) return { ok: true };
+    var key = ACCESS_MAIL_CODE_PREFIX + accessHash_(email);
+    var delivery = accessWithLock_(function() {
+      if (!accessEmailCodeEligible_(email)) return null;
+      var now = Date.now();
+      var state = accessReadJson_(key);
+      // A delivery requested by another browser remains usable by the mailbox
+      // holder. Preserve it through the entire period charged to the recipient.
+      if (state && (state.expiresAt > now || state.retryAt > now)) return null;
+      var sent = accessRecentDeliveries_(state, now);
+      if (sent.length >= ACCESS_MAIL_CODE_SEND_LIMIT) return null;
+      var code = Utilities.getUuid().replace(/-/g, "").toLowerCase();
+      if (!/^[a-f0-9]{32}$/.test(code)) throw new Error("確認コードを作成できませんでした。");
+      var codeHash = accessHash_(code);
+      accessWriteJson_(key, { email: email, codeHash: codeHash, expiresAt: now + ACCESS_MAIL_CODE_WINDOW_MS, sent: sent.concat(now) });
+      return { code: code, codeHash: codeHash, previousDeliveries: sent };
+    });
+    if (delivery) {
+      try {
+        MailApp.sendEmail(email, "HAKOBI｜生産工程管理 確認コード", "確認画面に次のコードを貼り付けてください。\n\n" + delivery.code + "\n\nこのコードは24時間以内に1回だけ使えます。心当たりがない場合は、このメールを無視してください。");
+      } catch (error) {
+        accessWithLock_(function() {
+          var current = accessReadJson_(key);
+          if (current && current.codeHash === delivery.codeHash) {
+            accessWriteJson_(key, { email: email, sent: delivery.previousDeliveries, retryAt: Date.now() + ACCESS_MAIL_CODE_RETRY_MS });
+          }
+        });
+        throw error;
+      }
     }
-    if (emailRate.sent.length >= 5 || Number(rates.count || 0) >= 50 || sessionCount >= 5) {
-      throw new Error("確認コードの送信上限に達しました。時間をおいて再試行してください。");
-    }
-    var code = accessNewCode_();
-    var nonce = Utilities.getUuid();
-    var challenge = { email: email, codeHash: accessHash_(nonce + ":" + code), nonce: nonce, sentAt: now, expiresAt: now + ACCESS_CODE_MINUTES * 60000, attempts: 0 };
-    accessWriteJson_(ACCESS_CHALLENGE_PREFIX + sessionHash, challenge);
-    rates.count = Number(rates.count || 0) + 1;
-    rates.sessions[sessionHash] = sessionCount + 1;
-    emailRate.sent.push(now);
-    rates.byEmail[email] = emailRate;
-    accessWriteJson_(rateKey, rates);
-    return { email: email, code: code };
-  });
-  // Reserve the challenge/rate limit atomically, then release the shared mutex
-  // before sending mail so slow delivery cannot block workbook updates.
-  if (delivery) MailApp.sendEmail(delivery.email, "生産工程管理 確認コード", "確認コード: " + delivery.code + "\n\nこのコードは10分間有効です。心当たりがない場合は、このメールを無視してください。");
+  } catch (error) {
+    console.warn("Access code delivery could not be completed.");
+  }
   return { ok: true };
+}
+
+function accessEmailCodeEligible_(email) {
+  var ownerEmail = accessNormalizeEmail_(Session.getEffectiveUser().getEmail());
+  if (!ownerEmail || !accessValidEmail_(email) || email === ownerEmail) return false;
+  var activeEmail = accessNormalizeEmail_(Session.getActiveUser().getEmail());
+  return (!activeEmail || activeEmail === email) && !!accessContextForAllowlisted_(email, false);
+}
+
+function accessRecentDeliveries_(state, now) {
+  return (state && Array.isArray(state.sent) ? state.sent : []).filter(function(time) {
+    return Number.isFinite(time) && time <= now && now - time < ACCESS_MAIL_CODE_WINDOW_MS;
+  });
 }
 
 function verifyAccessCode(input) {
   var email = accessNormalizeEmail_(input && input.email);
-  var code = input && input.code !== undefined ? String(input.code).trim() : "";
-  var activeEmail = accessNormalizeEmail_(Session.getActiveUser().getEmail());
-  if (!accessValidEmail_(email) || !/^\d{8}$/.test(code) || (activeEmail && activeEmail !== email) || email === accessNormalizeEmail_(Session.getEffectiveUser().getEmail()) || !accessConfig_().users.some(function(user) { return user.email === email; })) {
+  var code = input && input.code !== undefined ? String(input.code).trim().toLowerCase() : "";
+  var legacy = /^\d{8}$/.test(code);
+  if ((!legacy && !/^[a-f0-9]{32}$/.test(code)) || !accessEmailCodeEligible_(email)) {
     throw new Error("確認コードが無効か、期限切れです。");
   }
   var sessionHash = accessSessionHash_();
   if (!sessionHash) throw new Error("確認コードが無効か、期限切れです。");
+  var key = legacy ? ACCESS_CHALLENGE_PREFIX + sessionHash : ACCESS_MAIL_CODE_PREFIX + accessHash_(email);
+  var digest = legacy ? "" : accessHash_(code);
+  // Most invalid requests do not need the shared write lock. A correct code
+  // is checked again inside the lock before it can be consumed.
+  var pending = accessReadJson_(key);
+  if (!accessCurrentCode_(pending, email, Date.now()) || (!legacy && !accessConstantTimeEqual_(pending.codeHash, digest))) {
+    throw new Error("確認コードが無効か、期限切れです。");
+  }
   var result = accessWithLock_(function() {
-    accessCleanup_(Date.now());
-    var lockedActiveEmail = accessNormalizeEmail_(Session.getActiveUser().getEmail());
-    if ((lockedActiveEmail && lockedActiveEmail !== email) || email === accessNormalizeEmail_(Session.getEffectiveUser().getEmail()) || !accessConfig_().users.some(function(user) { return user.email === email; })) {
-      throw new Error("確認コードが無効か、期限切れです。");
-    }
-    var key = ACCESS_CHALLENGE_PREFIX + sessionHash;
+    var now = Date.now();
+    if (!accessEmailCodeEligible_(email)) throw new Error("確認コードが無効か、期限切れです。");
     var challenge = accessReadJson_(key);
-    if (!challenge || challenge.email !== email || Number(challenge.expiresAt) <= Date.now()) {
-      accessDelete_(key);
+    if (!accessCurrentCode_(challenge, email, now)) {
       throw new Error("確認コードが無効か、期限切れです。");
     }
-    challenge.attempts = Number(challenge.attempts || 0) + 1;
-    var expected = challenge.codeHash;
-    var actual = accessHash_(challenge.nonce + ":" + code);
-    var matched = accessConstantTimeEqual_(expected, actual);
-    if (!matched) {
-      if (challenge.attempts >= 5) accessDelete_(key);
-      else accessWriteJson_(key, challenge);
+    var expectedDigest = legacy ? accessHash_(challenge.nonce + ":" + code) : digest;
+    if (!accessConstantTimeEqual_(challenge.codeHash, expectedDigest)) {
+      if (legacy) {
+        challenge.attempts = Number(challenge.attempts || 0) + 1;
+        if (challenge.attempts >= 5) accessDelete_(key);
+        else accessWriteJson_(key, challenge);
+      }
       throw new Error("確認コードが無効か、期限切れです。");
     }
-    accessDelete_(key);
+    accessCleanup_(now);
     var deviceToken = accessCreateDevice_(email);
-    var grant = { email: email, expiresAt: Date.now() + ACCESS_SESSION_DAYS * 86400000, deviceHash: accessHash_(deviceToken) };
+    if (legacy) accessDelete_(key);
+    else accessWriteJson_(key, { email: email, sent: accessRecentDeliveries_(challenge, now) });
+    var grant = { email: email, expiresAt: now + ACCESS_SESSION_DAYS * 86400000, deviceHash: accessHash_(deviceToken) };
     accessWriteJson_(ACCESS_GRANT_PREFIX + sessionHash, grant);
     return { ok: true, deviceToken: deviceToken, remembered: true };
   });
   return accessAppResponse_(result, input);
+}
+
+function accessCurrentCode_(record, email, now) {
+  return !!(record && record.email === email && typeof record.codeHash === "string" &&
+    Number.isSafeInteger(record.expiresAt) && record.expiresAt > now);
 }
 
 // A remembered browser can renew the short Google-session binding without
@@ -180,8 +205,9 @@ function restoreAccessSession(input) {
     var activeEmail = accessNormalizeEmail_(Session.getActiveUser().getEmail());
     var ownerEmail = accessNormalizeEmail_(Session.getEffectiveUser().getEmail());
     if (!device || !ownerEmail || device.email === ownerEmail || (activeEmail && activeEmail !== device.email) || !accessContextForAllowlisted_(device.email, false)) return { ok: false };
-    accessCleanup_(Date.now());
-    accessWriteJson_(ACCESS_GRANT_PREFIX + sessionHash, { email: device.email, expiresAt: Date.now() + ACCESS_SESSION_DAYS * 86400000, deviceHash: hash });
+    var now = Date.now();
+    accessCleanup_(now);
+    accessWriteJson_(ACCESS_GRANT_PREFIX + sessionHash, { email: device.email, expiresAt: Math.min(now + ACCESS_SESSION_DAYS * 86400000, accessDeviceExpiry_(device)), deviceHash: hash });
     return { ok: true };
   });
   return accessAppResponse_(result, input);
@@ -205,8 +231,13 @@ function accessReadDevice_(hash) {
   if (!raw) return null;
   var device;
   try { device = JSON.parse(raw); } catch (error) { return null; }
-  if (!device || device.version !== 1 || !accessValidEmail_(device.email) || device.email !== accessNormalizeEmail_(device.email) || !Number.isSafeInteger(device.createdAt) || device.createdAt <= 0 || device.createdAt > Date.now()) return null;
+  var now = Date.now();
+  if (!device || device.version !== 1 || !accessValidEmail_(device.email) || device.email !== accessNormalizeEmail_(device.email) || !Number.isSafeInteger(device.createdAt) || device.createdAt <= 0 || device.createdAt > now || accessDeviceExpiry_(device) <= now) return null;
   return device;
+}
+
+function accessDeviceExpiry_(device) {
+  return device.createdAt + ACCESS_DEVICE_DAYS * 86400000;
 }
 
 function accessCreateDevice_(email) {
@@ -226,13 +257,30 @@ function accessCreateDevice_(email) {
 
 function accessRevokeRemovedUsers_(before, after) {
   var removed = before.filter(function(user) { return !after.some(function(next) { return next.email === user.email; }); }).map(function(user) { return user.email; });
-  if (!removed.length) return;
+  accessRevokeCredentials_(removed, true);
+}
+
+function accessRevokeCredentials_(emails, includeCodes) {
+  if (!emails.length) return;
+  var prefixes = [ACCESS_DEVICE_PREFIX, ACCESS_GRANT_PREFIX];
+  if (includeCodes) prefixes.push(ACCESS_CHALLENGE_PREFIX, ACCESS_MAIL_CODE_PREFIX);
   var properties = PropertiesService.getScriptProperties().getProperties();
   Object.keys(properties).forEach(function(key) {
-    if (![ACCESS_DEVICE_PREFIX, ACCESS_GRANT_PREFIX, ACCESS_CHALLENGE_PREFIX].some(function(prefix) { return key.indexOf(prefix) === 0; })) return;
+    if (!prefixes.some(function(prefix) { return key.indexOf(prefix) === 0; })) return;
     var record;
     try { record = JSON.parse(properties[key]); } catch (error) { return; }
-    if (record && removed.indexOf(record.email) >= 0) accessDelete_(key);
+    if (record && emails.indexOf(record.email) >= 0) accessDelete_(key);
+  });
+}
+
+function revokeRememberedAccess(input) {
+  requireAdminAccess_();
+  var email = accessNormalizeEmail_(input && input.email);
+  return accessWithLock_(function() {
+    requireAdminAccess_();
+    if (!accessValidEmail_(email) || !accessContextForAllowlisted_(email, false)) throw new Error("保存済みの利用アカウントを指定してください。");
+    accessRevokeCredentials_([email], false);
+    return { ok: true };
   });
 }
 
@@ -282,8 +330,8 @@ function saveAccessSettings(input) {
       if (!previousCaller || previousCaller.role !== "admin" || !nextCaller || nextCaller.role !== "admin") throw new Error("自分自身の管理者権限は変更できません。");
     }
     var saved = { version: current.version + 1, users: normalized };
-    accessWriteJson_(ACCESS_CONFIG_KEY, saved);
     accessRevokeRemovedUsers_(current.users, normalized);
+    accessWriteJson_(ACCESS_CONFIG_KEY, saved);
     var readiness = accessMailReadiness_();
     return { users: saved.users.map(function(user) { return { email: user.email, role: user.role }; }), emails: saved.users.map(function(user) { return user.email; }), version: saved.version, adminEmail: ownerEmail, currentEmail: caller.email, isAdmin: true, emailVerificationReady: readiness.ready, emailVerificationMessage: readiness.message, emailAuthorizationUrl: caller.isOwner && !readiness.ready ? accessEmailAuthorizationUrl_() : "" };
   });
@@ -366,10 +414,6 @@ function accessConstantTimeEqual_(left, right) {
   for (var i = 0; i < length; i += 1) difference |= (left.charCodeAt(i) || 0) ^ (right.charCodeAt(i) || 0);
   return difference === 0;
 }
-function accessNewCode_() {
-  var hex = Utilities.getUuid().replace(/-/g, "").slice(0, 12);
-  return String(parseInt(hex, 16) % 100000000).padStart(8, "0");
-}
 function accessReadJson_(key) {
   var value = PropertiesService.getScriptProperties().getProperty(key);
   if (value === null || value === "") return null;
@@ -389,6 +433,10 @@ function accessCleanup_(now) {
       try { item = JSON.parse(all[key]); } catch (error) { properties.deleteProperty(key); return; }
       var expiry = item && item.expiresAt;
       if (!Number.isFinite(expiry) || Math.floor(expiry) !== expiry || expiry <= now) properties.deleteProperty(key);
+    } else if (key.indexOf(ACCESS_DEVICE_PREFIX) === 0) {
+      var device;
+      try { device = JSON.parse(all[key]); } catch (error) { properties.deleteProperty(key); return; }
+      if (!device || !Number.isSafeInteger(device.createdAt) || accessDeviceExpiry_(device) <= now) properties.deleteProperty(key);
     }
   });
 }

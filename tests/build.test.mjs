@@ -28,6 +28,13 @@ test("Tezoe受注投影をブラウザーとApps Scriptの両方に同梱する"
     const result = context.FinishedStock.snapshot({ jobs: [], events: [] });
     assert.equal(result.orders.length, 0);
     assert.equal(context.FinishedStockOrders.forecast(result, "26001", "2026-12-31").quantity, 0);
+    const deleted = { id: "archived-stock", archived: true, customer: "在庫用", product: "Tezoeスタンツェ26021", productCode: "26021", specShape: "直・上向", quantity: 4 };
+    const custom = { id: "new-tezoe", customer: "確認用", product: "Tezoe 特注側弯", productCode: "26031", specShape: "側弯・上向", quantity: 4 };
+    const customResult = context.FinishedStock.snapshot({ jobs: [deleted, custom], events: [] });
+    assert.equal(customResult.issues.length, 0, "archived jobs never appear as warnings in either distributable");
+    assert.equal(customResult.products.filter(product => product.custom).length, 1);
+    assert.equal(customResult.orders.length, 1);
+    assert.equal(customResult.orders[0].jobId, custom.id);
   }
 });
 
@@ -182,7 +189,7 @@ test("案件削除は物理削除せず、更新番号付きの非表示化と�
   assert.match(script, /label: "元に戻す"/);
   assert.match(script, /archived: false/);
   assert.match(repository, /function setJobArchived\(input\)/);
-  assert.match(repository, /job\.archived = input\.archived === true/);
+  assert.match(repository, /job\.archived = validatedJobArchive_\(input\.archived, job\.polishing\)/);
   assert.match(repository, /!isArchivedValue_\(record\.archived\)/);
   assert.match(repository, /!job\.archived && job\.sourceRef === item\.sourceRef/);
   assert.doesNotMatch(repository, /deleteRow\(/);
@@ -208,7 +215,7 @@ test("大分類・連番などをPCとタブレットで同じ操作から並び
   assert.match(script, /class="category-chip"/);
 });
 
-test("最大9件の製品ラベルを15cm×3cmでA4縦へ一括印刷できる", () => {
+test("最大9件の製品ラベルを152mm×32mmでA4縦へ一括印刷できる", () => {
   assert.match(html, /id="label-dialog"/);
   assert.match(html, /A4縦・最大9枚/);
   assert.match(html, /data-action="open-label-print"/);
@@ -219,11 +226,10 @@ test("最大9件の製品ラベルを15cm×3cmでA4縦へ一括印刷できる",
   assert.match(script, /return \[\.\.\.pendingJobs\(\)\]/);
   assert.match(script, /input:not\(\[type='hidden'\]\):not\(:disabled\)/);
   assert.match(script, /requestAnimationFrame\([\s\S]*window\.print\(\)/);
-  assert.match(css, /@page\s*\{[\s\S]*size:\s*A4 portrait;[\s\S]*margin:\s*13\.5mm 30mm;/);
-  assert.match(css, /grid-auto-rows:\s*30mm/);
-  assert.match(css, /width:\s*150mm;[\s\S]*height:\s*30mm;/);
+  assert.match(html, /横152 mm・縦32 mm/);
+  assert.match(css, /@page\s*\{[^}]*size:\s*A4 portrait;/);
+  assert.match(css, /#label-print-sheet\s*\{[^}]*grid-auto-rows:\s*32mm;[^}]*width:\s*152mm;/);
   assert.match(tokens, /--color-label-band:/);
-  assert.match(tokens, /print delta: single-order view→maximum-nine 150mm-by-30mm product labels on A4 portrait/);
 });
 
 test("取込承認後の印刷待ち・印刷済み確認・ラベル変更時の再印刷を全端末で同期する", () => {
@@ -271,8 +277,8 @@ test("TC発注書の複数品目を個別の確認候補へ分割する", () => 
   assert.match(importer, /":item:" \+ itemNumber/);
   assert.match(importer, /return \{ added: items\.length, items: items \}/);
   assert.match(importer, /intakeSubject_/);
-  assert.match(script, /result\?\.added \|\| 1/);
-  assert.match(script, /fetch\(isText \? "\/api\/local\/parse-order-text" : useAi \? "\/api\/local\/parse-order-ai" : "\/api\/local\/parse-order-pdf"/);
+  assert.match(script, /result\?\.added \?\? 1/);
+  assert.match(script, /fetch\(isText \? "\/api\/local\/parse-order-text" : useAuto \? "\/api\/local\/parse-order-auto" : useAi \? "\/api\/local\/parse-order-ai" : "\/api\/local\/parse-order-pdf"/);
   assert.match(script, /LOCAL_PDF_ENGINE_VERSION/);
   assert.match(script, /古いローカル解析サーバーが動いています/);
   assert.doesNotMatch(script, /item\.importFileName !== payload\.name/);
@@ -283,6 +289,7 @@ test("TC発注書の複数品目を個別の確認候補へ分割する", () => 
 
 test("Apps Script版へPDF.js本体とWorkerを同梱する", () => {
   assert.match(html, /data-bundle="pdfjs"/);
+  assert.match(html, /data-bundle="pdf-intake-text"[\s\S]*data-bundle="app"/);
   assert.match(html, /pdfjsLib/);
   assert.match(html, /pdfjs-ready/);
   assert.match(html, /bundledPdfWorkerSource/);

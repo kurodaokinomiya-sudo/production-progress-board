@@ -4,7 +4,7 @@
  * enrichment: none · designed-as-app: yes · context: user-approved · v1.3.0
  * pre-emit critique: purpose 5 · hierarchy 5 · elegance 4 · system 5 · restraint 5 · viability 5
  * slop test: pass 1–58 · contrast: pass · responsive: pass · honest-data boundary: pass
- * print delta: single-order view→maximum-nine 150mm-by-30mm product labels on A4 portrait
+ * print: A4 portrait, up to nine product labels
  */
 :root {
   --color-paper: oklch(97.472% 0.00513 247.88);

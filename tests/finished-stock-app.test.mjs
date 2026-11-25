@@ -54,7 +54,7 @@ test("planned excess remains separate from actual stock and preserves total manu
   assert.equal(snapshot.plans[0].dueDate, "2026-10-30");
   assert.equal(ui.finishedStockQuantitySummary(10, 5), "製造10丁 = 今回製造の注文向け5丁 + 在庫補充5丁（Tezoeのみ）");
   for (const invalid of [-1, 11, 0.5, true]) await assert.rejects(ui.api.saveJob(job({ stockPlannedQuantity: invalid })), /整数/);
-  await assert.rejects(ui.api.saveJob(job({ productCode: "UNKNOWN" })), /製品番号/);
+  await assert.rejects(ui.api.saveJob(job({ productCode: "26002" })), /製品番号|刃向き/);
 });
 
 test("actual receipts and job saves share the lock and stock retries do not duplicate lots", async () => {

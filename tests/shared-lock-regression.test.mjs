@@ -76,14 +76,12 @@ test("an update through another entry point leaves a stale version rejected unde
 test("verification mail delivery happens after releasing the workbook mutex", () => {
   const { state, context } = harness();
   context.Session = { getActiveUser: () => ({ getEmail: () => "" }), getEffectiveUser: () => ({ getEmail: () => "owner@example.com" }) };
-  context.accessConfig_ = () => ({ users: [{ email: "editor@example.com" }] });
+  context.accessConfig_ = () => ({ users: [{ email: "editor@example.com", role: "editor" }] });
   context.accessSessionHash_ = () => "synthetic-session";
-  context.accessCleanup_ = () => {};
   context.accessReadJson_ = () => null;
   context.accessWriteJson_ = () => assert.equal(state.held, true);
-  context.accessNewCode_ = () => "12345678";
   context.accessHash_ = () => "synthetic-hash";
-  context.Utilities = { getUuid: () => "synthetic-nonce" };
+  context.Utilities = { getUuid: () => "00000000-0000-4000-8000-000000000001" };
   let deliveries = 0;
   context.MailApp = { sendEmail() { assert.equal(state.held, false); deliveries += 1; } };
   context.requestAccessCode({ email: "editor@example.com" });

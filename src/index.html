@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <meta name="description" content="注文から出荷までを一画面で管理する生産工程管理アプリ">
-    <title>生産工程管理</title>
+    <meta name="description" content="HAKOBI｜生産工程管理 — 注文から出荷までを一画面で管理するアプリ">
+    <title>HAKOBI｜生産工程管理</title>
     <script>
       try {
         const savedTheme = localStorage.getItem("production-board-theme");
@@ -21,7 +21,7 @@
     <section class="startup-loading" id="startup-loading" aria-labelledby="startup-title" aria-busy="true">
       <div class="startup-card" role="status" aria-live="polite">
         <span class="activity-spinner" aria-hidden="true"></span>
-        <p class="brand-name">生産工程管理</p>
+        <p class="brand-name" translate="no">HAKOBI｜生産工程管理</p>
         <h1 id="startup-title">ロード中…</h1>
         <p id="startup-message">工程一覧と利用権限を確認しています。</p>
         <button class="button button-primary" id="startup-retry" type="button" data-action="refresh" hidden>もう一度読み込む</button>
@@ -36,7 +36,7 @@
           <svg aria-hidden="true"><use href="#icon-menu"></use></svg>
         </button>
         <div>
-          <p class="brand-name">生産工程管理</p>
+          <p class="brand-name" translate="no">HAKOBI｜生産工程管理</p>
           <p class="brand-context" id="connection-label">接続を確認中</p>
         </div>
       </div>
@@ -78,6 +78,9 @@
           <button class="nav-item" type="button" data-view="materials" data-edit-only hidden>
             <svg aria-hidden="true"><use href="#icon-package"></use></svg><span>碓井材料在庫</span>
           </button>
+          <button class="nav-item" type="button" data-view="castingStock" data-work-only hidden>
+            <svg aria-hidden="true"><use href="#icon-package"></use></svg><span>鋳物在庫</span>
+          </button>
           <button class="nav-item" type="button" data-view="finishedStock" data-edit-only hidden>
             <svg aria-hidden="true"><use href="#icon-package"></use></svg><span>Tezoe製品在庫</span>
           </button>
@@ -89,6 +92,11 @@
             <svg aria-hidden="true"><use href="#icon-settings"></use></svg><span>設定</span>
           </button>
         </nav>
+      </div>
+      <div id="view-data-notice" class="panel view-data-notice" hidden>
+        <span id="view-data-spinner" class="activity-spinner" aria-hidden="true"></span>
+        <p id="view-data-message" role="status"></p>
+        <button id="view-data-retry" class="button button-secondary" type="button" data-action="retry-view-data" hidden>再試行</button>
       </div>
       <section class="view" data-view-panel="dashboard" aria-labelledby="dashboard-title" hidden>
         <div class="page-heading">
@@ -167,7 +175,7 @@
             <div class="order-table-wrap">
               <table class="order-table" aria-label="案件一覧">
                 <caption class="sr-only">並び順は一覧上部の選択欄で変更できます。</caption>
-                <thead><tr><th>得意先</th><th>品名</th><th>大分類</th><th>納期</th><th>数量</th><th>全長</th><th>型</th><th>刃幅</th><th>連番</th><th>溶接</th><th>元作り</th><th>浮き止め～立ち上がり</th><th>厚みとり</th><th>仕上げ</th><th>研磨</th><th>備考</th><th>出荷</th><th>編集</th></tr></thead>
+                <thead><tr><th>得意先</th><th>品名</th><th>大分類</th><th>納期</th><th>数量</th><th>全長</th><th>型</th><th>刃幅</th><th>連番</th><th>溶接</th><th>元作り</th><th>浮き止め～立ち上がり</th><th>厚みとり</th><th>仕上げ</th><th>研磨</th><th>出荷</th><th>編集</th><th>備考</th></tr></thead>
                 <tbody id="dashboard-order-rows"></tbody>
               </table>
             </div>
@@ -221,7 +229,14 @@
               <label class="field"><span>納期の終了月</span><input id="distribution-end-month" type="month" min="0001-01" max="9999-12" required></label>
               <button class="button button-secondary" type="button" data-action="distribution-next-month" aria-label="表示期間を1か月後へ">翌月</button>
             </div>
-            <label class="select-field"><span class="filter-field-label">並び順</span><select id="distribution-sort"><option value="customer" selected>月→得意先→納期順</option><option value="due">月→納期順</option></select></label>
+            <label class="select-field">
+              <span class="filter-field-label">並び順</span>
+              <select id="distribution-sort">
+                <option value="customer" selected>月→得意先→納期順</option>
+                <option value="due">月→納期順</option>
+                <option value="serial">月→連番順</option>
+              </select>
+            </label>
             <label class="distribution-completed-option"><input id="distribution-include-shipped" type="checkbox">出荷完了を含める</label>
           </div>
           <details class="distribution-settings">
@@ -251,12 +266,17 @@
         <div id="material-summary" class="material-summary" aria-label="碓井材料在庫の集計"></div>
         <section id="material-unresolved" class="panel material-unresolved" aria-labelledby="material-unresolved-title" hidden>
           <div class="material-section-heading"><h2 id="material-unresolved-title">材料の確認が必要です</h2><span id="material-unresolved-count"></span></div>
-          <p>材料を特定できず、在庫に反映できていない案件があります。注文の型・製品番号を確認してください。</p>
+          <p>注文の型・製品番号を確認してください。碓井材料を使わない製品は「碓井材料を使わない」から登録できます。</p>
           <div id="material-unresolved-list"></div>
         </section>
+        <details id="material-exclusions" class="material-help" hidden>
+          <summary>碓井材料を使わない製品（<span id="material-exclusions-count"></span>）</summary>
+          <p>得意先・品名・製品番号・仕様が一致する製品に、全端末で適用します。誤って登録した場合は取り消せます。</p>
+          <div id="material-exclusions-list"></div>
+        </details>
         <section class="panel material-panel" aria-labelledby="material-stock-title">
           <div class="material-section-heading"><h2 id="material-stock-title">在庫一覧</h2><span>単位：セット（本体とカブセで1セット）</span></div>
-          <div class="material-table-wrap" tabindex="0" role="region" aria-label="材料の在庫一覧。横にスクロールできます"><table class="material-table"><thead><tr><th scope="col">材料・品番</th><th scope="col">型・仕様</th><th scope="col" class="material-number">現在庫</th><th scope="col" class="material-number">発注残</th><th scope="col">次回入庫予定</th><th scope="col">操作</th></tr></thead><tbody id="material-stock-rows"></tbody></table></div>
+          <div class="material-table-wrap" tabindex="0" role="region" aria-label="材料の在庫一覧。横にスクロールできます"><table class="material-table material-stock-table"><thead><tr><th scope="col">材料・品番</th><th scope="col">型・仕様</th><th scope="col" class="material-number">現在庫</th><th scope="col" class="material-number">発注残</th><th scope="col">次回入庫予定</th><th scope="col">操作</th><th scope="col">備考</th></tr></thead><tbody id="material-stock-rows"></tbody></table></div>
         </section>
         <section class="panel material-panel" aria-labelledby="material-orders-title">
           <div class="material-section-heading"><h2 id="material-orders-title">発注・入庫一覧</h2><span id="material-orders-count"></span></div>
@@ -266,13 +286,39 @@
           <div class="material-section-heading"><h2 id="material-history-title">入出庫・発注の履歴</h2><span id="material-history-count"></span></div>
           <div class="material-toolbar">
             <label class="select-field"><span class="filter-field-label">材料</span><select id="material-history-material"><option value="all">すべての材料</option></select></label>
-            <label class="select-field"><span class="filter-field-label">操作</span><select id="material-history-action"><option value="all">すべての操作</option><option value="opening">開始残高</option><option value="order">発注</option><option value="receive">入庫</option><option value="use">案件引当</option><option value="release">引当解除</option><option value="adjust">在庫調整</option><option value="cancel">発注取消</option></select></label>
+            <label class="select-field"><span class="filter-field-label">操作</span><select id="material-history-action"><option value="all">すべての操作</option><option value="opening">開始残高</option><option value="order">発注</option><option value="editOrder">発注変更</option><option value="receive">入庫</option><option value="use">案件引当</option><option value="release">引当解除</option><option value="adjust">在庫調整</option><option value="cancel">発注取消</option><option value="stockNote">備考更新</option></select></label>
             <label class="search-field"><span class="filter-field-label">履歴を検索</span><svg aria-hidden="true"><use href="#icon-search"></use></svg><input id="material-history-search" type="search" placeholder="製品・得意先・連番・備考" autocomplete="off"></label>
           </div>
           <p class="material-history-help">発注と、その発注の入庫・取消を1行にまとめています。入庫日・数量は同じ行の右側で確認できます。</p>
           <div class="material-table-wrap material-history-wrap" tabindex="0" role="region" aria-label="材料の操作履歴。発注と入庫は同じ行です。横にスクロールできます"><table class="material-table material-history-table"><thead><tr><th scope="col">発注日・記録日</th><th scope="col">操作・状態</th><th scope="col">材料</th><th scope="col" class="material-number">数量（セット）</th><th scope="col">入庫日・数量</th><th scope="col">関連する製品・案件</th><th scope="col">備考・記録者</th></tr></thead><tbody id="material-history-rows"></tbody></table></div>
         </section>
         <details class="material-help"><summary>碓井材料在庫の使い方</summary><p>「発注・入庫一覧」の発注行から入庫を記録します。入庫日と数量が同じ行に残り、全数入庫した後も確認できます。分けて入庫した場合は、それぞれの日付と数量を表示します。</p><p>これから確定する対象製品の注文数量を、自動で在庫から引き当てます。開始前の案件は遡って差し引きません。</p><p>Tezoeは曲がり・向きで材料を共用し、26002だけ別材料です。本体とカブセを合わせて1セットで数えます。</p><p>案件の終了・削除は、実物の材料が戻ったことを意味しません。材料を実際に戻すときや棚卸しの差は、理由を付けて「在庫調整」に記録してください。履歴は書き換えずに残します。</p><p id="material-initialized-at"></p></details>
+      </section>
+
+      <section class="view casting-stock-view" data-view-panel="castingStock" aria-labelledby="casting-stock-title" hidden>
+        <div class="page-heading material-heading">
+          <h1 id="casting-stock-title">鋳物在庫</h1>
+          <div class="material-actions">
+            <button class="button button-secondary" type="button" data-casting-action="refresh">更新</button>
+            <button class="button button-secondary" type="button" data-casting-action="history" hidden>履歴</button>
+            <button class="button button-primary" type="button" data-casting-action="start" hidden>HAKOBIで管理を開始</button>
+          </div>
+        </div>
+        <p id="casting-stock-status" class="material-status" role="status" aria-live="polite"></p>
+        <div id="casting-stock-content" hidden>
+          <div class="casting-source">
+            <p id="casting-stock-source-status"></p>
+            <a id="casting-stock-source-link" target="_blank" rel="noopener noreferrer" hidden>元の在庫表を開く<span class="sr-only">（別タブ）</span></a>
+          </div>
+          <div class="casting-filters" role="group" aria-label="鋳物在庫を絞り込む">
+            <label class="field casting-search"><span>品目を検索</span><input type="search" name="castingSearch" id="casting-search" autocomplete="off" placeholder="ヘルニア、レバー…"></label>
+            <label class="field" id="casting-status-filter" hidden><span>状態</span><select id="casting-filter" name="castingStatus" autocomplete="off"><option value="">すべて</option><option value="low">要発注・要補充</option><option value="ordered">入荷待ち</option><option value="unconfirmed">区分・数量の確認待ち</option></select></label>
+          </div>
+          <p id="casting-result-count" class="casting-result-count" role="status"></p>
+          <div class="material-table-wrap casting-table-wrap" tabindex="0" role="region" aria-label="鋳物の在庫一覧">
+            <table class="material-table casting-table" role="table"><thead id="casting-stock-head" role="rowgroup"></thead><tbody id="casting-stock-rows" role="rowgroup"></tbody></table>
+          </div>
+        </div>
       </section>
 
       <section class="view finished-stock-view" data-view-panel="finishedStock" aria-labelledby="finished-stock-title" hidden>
@@ -284,7 +330,23 @@
         <section class="panel material-panel" aria-labelledby="finished-stock-overview-title">
           <div class="material-section-heading"><h2 id="finished-stock-overview-title">種類ごとの在庫と見込</h2><span>単位：丁</span></div>
           <div class="finished-stock-toolbar"><label class="field"><span>在庫見込の基準日</span><input id="finished-stock-asof" type="date" required></label><p>確定した受注を自動表示し、現在庫は受注順に確保します。出荷後の残数と、生産・出荷予定を加味した見込を確認できます。</p></div>
-          <div class="material-table-wrap" tabindex="0" role="region" aria-label="Tezoe製品の種類別在庫と見込。横にスクロールできます"><table class="material-table finished-stock-table finished-stock-overview-table"><thead><tr><th scope="col">製品番号・品名</th><th scope="col">現在庫<small>実在庫</small></th><th scope="col">受注残</th><th scope="col">確保済<small>現在庫から</small></th><th scope="col">出荷後の残数<small>新規に使える数量</small></th><th scope="col">完成予定数<small>基準日まで</small></th><th scope="col">出荷予定数<small>基準日まで</small></th><th scope="col">使える在庫見込<small>基準日時点</small></th><th scope="col">操作</th></tr></thead><tbody id="finished-stock-rows"></tbody></table></div>
+          <div class="material-table-wrap" tabindex="0" role="region" aria-label="Tezoe製品の種類別在庫と見込。横にスクロールできます">
+            <table class="material-table finished-stock-table finished-stock-overview-table">
+              <colgroup>
+                <col class="stock-col-product">
+                <col class="stock-col-current">
+                <col class="stock-col-backlog">
+                <col class="stock-col-reserved">
+                <col class="stock-col-available">
+                <col class="stock-col-scheduled" span="2">
+                <col class="stock-col-forecast">
+                <col class="stock-col-action">
+                <col class="stock-col-note">
+              </colgroup>
+              <thead><tr><th scope="col">製品番号・品名</th><th scope="col" class="material-number">現在庫<small>実在庫</small></th><th scope="col" class="material-number">受注残</th><th scope="col" class="material-number">確保済<small>現在庫から</small></th><th scope="col" class="material-number">出荷後の<wbr>残数<small>新規に使える<wbr>数量</small></th><th scope="col" class="material-number">完成予定数<small>基準日まで</small></th><th scope="col" class="material-number">出荷予定数<small>基準日まで</small></th><th scope="col" class="material-number">使える<wbr>在庫見込<small>基準日時点</small></th><th scope="col">操作</th><th scope="col">備考</th></tr></thead>
+              <tbody id="finished-stock-rows"></tbody>
+            </table>
+          </div>
           <p class="finished-stock-footnote">残数見込＝現在庫＋基準日までの生産完了予定－基準日までの出荷予定。「使える在庫見込」は、さらに後日の受注分も確保して差し引きます。負数は不足です。出荷日未定分は差し引き、完成日未定の生産は含めません。予定日は過ぎても自動入出庫しません。</p>
         </section>
         <section id="finished-stock-issues" class="panel material-panel material-unresolved" aria-labelledby="finished-stock-issues-title" hidden>
@@ -420,12 +482,13 @@
             <p id="script-editor-unavailable">接続先を取得できません。画面を更新してください。ローカル版では .clasp.json の設定も確認してください。</p>
             <p>編集権限のあるGoogleアカウントでログインしてください。このリンクで権限が追加されることはありません。</p>
           </section>
-          <section class="panel settings-panel" data-owner-only hidden>
+          <form id="gmail-settings-form" class="panel settings-panel" data-owner-only hidden>
             <div class="settings-icon"><svg aria-hidden="true"><use href="#icon-mail"></use></svg></div>
             <div><h2>注文メールの接続</h2><p>Google Workspaceの独自ドメインは直接検索できます。それ以外のメールは、このGoogleアカウントへ自動転送して取り込みます。</p></div>
-            <label class="field"><span>接続先Gmailの検索式</span><input id="gmail-query" type="text" value="newer_than:30d (subject:(注文 OR 発注 OR 依頼))"><small>転送メールも対象にできるGmail検索式を入力します。</small></label>
-            <button class="button button-secondary" type="button" data-action="save-settings">検索条件を保存</button>
-          </section>
+            <label class="field"><span>接続先Gmailの検索式</span><input id="gmail-query" name="gmailQuery" type="text" required maxlength="1000" autocomplete="off" spellcheck="false" value="newer_than:30d (subject:(注文 OR 発注 OR 依頼))"><small>保存した検索式を「受注メールを検索」で使います。</small></label>
+            <button class="button button-secondary" type="submit" data-action="save-settings">検索条件を保存</button>
+            <p id="gmail-query-status" class="settings-save-status" role="status"></p>
+          </form>
           <section class="panel settings-panel">
             <div class="settings-icon"><svg aria-hidden="true"><use href="#icon-moon"></use></svg></div>
             <div><h2>表示モード</h2><p>この端末だけの見え方を設定します。データや他の端末の表示には影響しません。</p></div>
@@ -477,7 +540,7 @@
             <label class="field"><span>得意先 <b aria-hidden="true">必須</b></span><input name="customer" required aria-required="true"><small data-error-for="customer">注文元の名称</small></label>
             <label class="field"><span>品名 <b aria-hidden="true">必須</b></span><input name="product" required aria-required="true"><small data-error-for="product">製作する品名</small></label>
             <label class="field"><span>製品番号</span><input name="productCode" maxlength="100"><small>製品構成マスタとの照合に使用</small></label>
-            <label class="field"><span>材料表示（一覧・ラベル）</span><input name="labelKeywords" maxlength="40" placeholder="ｱﾘｼﾞ・白銅・ｳｽｲ"><small>変更を同じ製品の次回にも反映。空欄でマスタの自動表示に戻します。</small></label>
+            <label class="field"><span>材料表示（一覧・ラベル）</span><input name="labelKeywords" maxlength="40" autocomplete="off" placeholder="ｱﾘｼﾞ・白銅・ｳｽｲ・ズレピン"><small>変更を同じ製品の次回にも反映。空欄でマスタの自動表示に戻します。</small></label>
             <label class="field"><span>納期</span><input name="dueDate" type="date"><small>未確定の場合は空欄でも保存できます。</small></label>
             <label class="field"><span>数量</span><input name="quantity" type="number" min="0" step="1" inputmode="numeric"><small>製造する総数。Tezoeの在庫予定分も含めて入力</small></label>
             <label class="field"><span>うち在庫予定（Tezoe）</span><input name="stockPlannedQuantity" type="number" min="0" step="1" inputmode="numeric" value="0"><small id="order-stock-summary">数量に製造総数を入力し、在庫に回す数を指定します。</small></label>
@@ -490,7 +553,7 @@
             <label class="field"><span>全長</span><input name="specLength"><small>例：18cm</small></label>
             <label class="field"><span>型</span><input name="specShape"><small>例：上曲・左</small></label>
             <label class="field"><span>刃幅</span><input name="bladeWidth"><small>例：2mm</small></label>
-            <label class="field"><span>備考</span><input name="note"><small>材料・販売用番号など</small></label>
+            <label class="field order-note-field"><span>備考</span><textarea name="note" rows="6" autocomplete="off"></textarea><small>材料・販売用番号など</small></label>
           </div></section>
         </div>
         <footer class="dialog-footer"><div class="dialog-leading-actions"><button class="button button-danger" id="order-delete-action" type="button" data-action="delete-order" hidden><span>案件を削除</span></button><button class="button button-quiet" type="button" data-action="close-order-dialog">閉じる</button></div><div class="dialog-actions"><button class="button button-primary" type="submit" value="save"><span>注文情報を保存</span></button></div></footer>
@@ -551,7 +614,7 @@
             <button class="text-button label-clear" type="button" data-action="clear-label-selection">選択をすべて解除</button>
           </section>
           <section class="label-preview-pane" aria-labelledby="label-preview-title">
-            <div class="label-section-head"><div><h3 id="label-preview-title">印刷プレビュー</h3><p>横15cm・縦3cm。品名のマーカーは納期月で色分けします。</p></div></div>
+            <div class="label-section-head"><div><h3 id="label-preview-title">印刷プレビュー</h3><p>横152 mm・縦32 mm。品名のマーカーは納期月で色分けします。</p></div></div>
             <div class="label-preview-list" id="label-preview-list"></div>
             <div class="label-print-note"><svg aria-hidden="true"><use href="#icon-alert"></use></svg><p>印刷画面では倍率を100％にし、ヘッダーとフッターをオフにしてください。</p></div>
           </section>
@@ -567,8 +630,8 @@
       <div class="dialog-shell">
         <header class="dialog-header"><div><p class="dialog-kicker">取込</p><h2 id="import-dialog-title">注文を読み込む</h2></div><button class="icon-button" type="button" data-action="close-import-dialog" aria-label="取込画面を閉じる"><svg aria-hidden="true"><use href="#icon-close"></use></svg></button></header>
         <div class="dialog-body">
-          <label class="field" id="file-import-engine-field"><span>読取方法</span><select id="import-engine"><option value="ai">AIで読む（複数社の書式に対応）</option><option value="legacy" selected>従来の読取（AIを使わない）</option></select><small id="ai-import-status" role="status">AI設定を確認しています。</small></label>
-          <p id="file-import-notice">AIを選ぶと注文書・対象メールをGoogleへ送信します。原本と結果を確認してください。AIのメール検索は1通ずつ処理します。</p>
+          <label class="field" id="file-import-engine-field"><span>読取方法</span><select id="import-engine"><option value="auto" selected>自動（覚えた製品を優先・必要なときだけAI）</option><option value="ai">AIで読む（複数社の書式に対応）</option><option value="legacy">従来の読取（AIを使わない）</option></select><small id="ai-import-status" role="status" aria-live="polite">AI設定を確認しています。</small></label>
+          <p id="file-import-notice">自動では、得意先・製品仕様が一致し、全明細の数量・納期を読めた注文に製品記録を使います。未登録・不明な書式や添付付きメールはAIへ送信します。写真は先に文字を読み取ります。メール検索は1通ずつ処理します。</p>
           <details data-owner-only hidden><summary>AIで読み取れないとき</summary><p>注文書・メールは送らず、固定のテスト文で接続と回答形式を確認します。最大2回のAI利用として日次上限に数えます。失敗した段階で停止します。</p><button class="button button-secondary" type="button" data-action="diagnose-ai">注文書を送らず接続診断</button><p id="ai-diagnostic-result" role="status" hidden></p></details>
           <div class="import-tabs" role="tablist" aria-label="取込方法">
             <button role="tab" aria-selected="true" aria-controls="import-image-panel" id="import-image-tab" type="button" data-import-tab="image" tabindex="0">PDF・画像</button>
@@ -591,8 +654,8 @@
             <form id="text-import-form">
               <label class="field"><span>件名（任意）</span><input id="text-import-subject" name="subject" maxlength="200" autocomplete="off" placeholder="例：11月納入分の注文"></label>
               <label class="field"><span>メール本文（30,000文字まで）</span><textarea id="text-import-body" name="body" rows="10" maxlength="30000" required placeholder="注文メールの本文をここに貼り付けてください"></textarea></label>
-              <label class="field"><span>本文の読取方法</span><select id="text-import-engine"><option value="legacy" selected>AIを使わず読み取る</option><option value="ai">AIで読み取る（設定が必要）</option></select></label>
-              <p>AIなしの読取は書式によって抜けが出ます。品名・数量・納期が判別しづらい場合は、下の例のように整えてください。AIを選ぶ場合、貼り付けた本文・件名をGoogleへ送信します。</p>
+              <label class="field"><span>本文の読取方法</span><select id="text-import-engine"><option value="auto" selected>自動（覚えた製品を優先・必要なときだけAI）</option><option value="legacy">AIを使わず読み取る</option><option value="ai">AIで読み取る（設定が必要）</option></select></label>
+              <p>自動では、記録した製品と一致し、全明細の数量・納期を読めたときはAIを使いません。未登録・不明な書式は本文・件名をAIへ送信します。下の例のように整えるとAIなしで読み取りやすくなります。</p>
               <details><summary>読み取りやすい書き方の例</summary><pre>得意先: 田中
 品名: ケリソン 18cm 上向 3mm
 数量: 10
@@ -606,14 +669,14 @@
             <div class="email-import-copy"><svg aria-hidden="true"><use href="#icon-mail"></use></svg><div><strong>接続先の注文メールを確認します</strong><p>独自ドメインから転送されたメールも対象です。メール自体の削除・移動・既読化は行いません。</p></div></div>
             <button class="button button-primary button-full" type="button" data-action="scan-email">受注メールを検索</button>
           </section>
-          <div class="intake-learning-tools"><button class="button button-quiet" type="button" data-edit-only hidden data-action="open-intake-learning">覚えた製品の補完</button><small>取込候補の確認時に保存した製品共通の補完内容を確認・解除できます。</small></div>
+          <div class="intake-learning-tools"><button class="button button-quiet" type="button" data-edit-only hidden data-action="open-intake-learning">覚えた製品の補完</button><small>確定した製品と修正内容を確認・解除できます。記録は全端末で共有します。</small></div>
         </div>
       </div>
     </dialog>
 
     <dialog class="app-dialog intake-learning-dialog" id="intake-learning-dialog" aria-labelledby="intake-learning-title">
       <div class="dialog-shell">
-        <header class="dialog-header"><div><h2 id="intake-learning-title">覚えた製品の補完</h2><p>得意先ごとに製品の補完を保存します。数量・納期・連番は毎回の注文から読み取ります。</p></div><button class="icon-button" type="button" data-action="close-intake-learning" aria-label="補完一覧を閉じる"><svg aria-hidden="true"><use href="#icon-close"></use></svg></button></header>
+        <header class="dialog-header"><div><h2 id="intake-learning-title">覚えた製品の補完</h2><p>確定した品名・仕様と修正内容を得意先ごとに記録します。数量・納期・連番は毎回の注文から読み取ります。</p></div><button class="icon-button" type="button" data-action="close-intake-learning" aria-label="補完一覧を閉じる"><svg aria-hidden="true"><use href="#icon-close"></use></svg></button></header>
         <div class="dialog-body"><p id="intake-learning-list-status" role="status" aria-live="polite"></p><div id="intake-learning-list"></div></div>
         <footer class="dialog-footer"><button class="button button-quiet" type="button" data-action="close-intake-learning">閉じる</button></footer>
       </div>
@@ -626,7 +689,7 @@
       <form method="dialog" class="dialog-shell" id="intake-form">
         <header class="dialog-header"><div><p class="dialog-kicker">読取結果</p><h2 id="intake-dialog-title">内容を確認</h2></div><button class="icon-button" type="button" data-action="close-intake-dialog" aria-label="確認画面を閉じる"><svg aria-hidden="true"><use href="#icon-close"></use></svg></button></header>
         <div class="dialog-body"><input type="hidden" name="intakeId"><div class="source-preview" id="intake-source-preview"></div><div class="intake-learning-feedback" id="intake-learning-feedback" role="status" hidden></div><div class="form-grid" id="intake-fields"></div><div id="intake-duplicate-warning" aria-live="polite"></div>
-          <fieldset class="intake-learning-options"><legend>次回の取込に使う</legend><label class="bulk-check"><input type="checkbox" name="learnProduct" checked>この製品の修正を次回にも使う</label><p>品名・製品番号・全長・型・刃幅・大分類を製品ごとに補完します。</p><label class="bulk-check"><input type="checkbox" name="learnNote">備考の追記も製品共通の内容として覚える</label></fieldset>
+          <fieldset class="intake-learning-options"><legend>次回の取込に使う</legend><label class="bulk-check"><input type="checkbox" name="learnProduct" checked>この製品の修正を次回にも使う</label><p>修正がなくても、確認した品名・製品番号・全長・型・刃幅・大分類を記録します。次回の自動読取で一致すればAIを省略します。数量・納期・連番は記憶しません。</p><label class="bulk-check"><input type="checkbox" name="learnNote">備考の追記も製品共通の内容として覚える</label></fieldset>
           <div class="intake-delete-confirm" data-intake-delete-confirm hidden><p role="status"></p><div class="dialog-actions"><button class="button button-quiet" type="button" data-action="cancel-intake-delete">キャンセル</button><button class="button button-danger" type="button" data-action="confirm-intake-delete">削除する</button></div></div>
         </div>
         <footer class="dialog-footer"><button class="button button-danger" type="button" data-action="reject-intake">この品目を削除</button><button class="button button-primary" type="submit" value="approve">確認して案件へ反映</button></footer>
@@ -639,7 +702,7 @@
         <div class="dialog-body bulk-intake-body">
           <div class="bulk-intake-toolbar"><label class="bulk-check"><input type="checkbox" id="bulk-intake-all">すべて選択</label><span id="bulk-intake-count"></span><button class="button button-danger" id="bulk-intake-delete" type="button" data-action="delete-selected-intakes">選択した品目を削除</button></div>
           <p class="bulk-intake-help">得意先・品名・数量は必須です。選択を外した品目は確認待ちに残ります。1回の反映は100件まで。</p>
-          <fieldset class="intake-learning-options"><legend>次回の取込に使う</legend><label class="bulk-check"><input type="checkbox" id="bulk-intake-learn-product" checked>この製品の修正を次回にも使う</label><p>品名・製品番号・全長・型・刃幅・大分類を製品ごとに補完します。</p><label class="bulk-check"><input type="checkbox" id="bulk-intake-learn-note" disabled>備考の追記も製品共通の内容として覚える</label></fieldset>
+          <fieldset class="intake-learning-options"><legend>次回の取込に使う</legend><label class="bulk-check"><input type="checkbox" id="bulk-intake-learn-product" checked>この製品の修正を次回にも使う</label><p>修正がなくても、確認した品名・製品番号・全長・型・刃幅・大分類を記録します。次回の自動読取で一致すればAIを省略します。数量・納期・連番は記憶しません。</p><label class="bulk-check"><input type="checkbox" id="bulk-intake-learn-note" disabled>備考の追記も製品共通の内容として覚える</label></fieldset>
           <section class="customer-command" aria-labelledby="customer-command-title">
             <div class="bulk-intake-toolbar"><h3 id="customer-command-title">言葉で得意先を修正</h3><button class="button button-quiet" type="button" data-action="open-customer-rules">得意先の読取ルール</button></div>
             <p class="bulk-intake-help">対象はチェックした品目だけです。例：得意先をミズホにして</p>
@@ -680,17 +743,26 @@
         <header class="dialog-header"><div><p class="dialog-kicker">碓井材料在庫・単位 セット</p><h2 id="material-dialog-title">材料を発注</h2></div><button class="icon-button" type="button" data-material-action="close" aria-label="材料の入力画面を閉じる"><svg aria-hidden="true"><use href="#icon-close"></use></svg></button></header>
         <div class="dialog-body">
           <p id="material-dialog-summary" class="material-dialog-summary"></p>
-          <div class="form-grid material-form-grid">
+          <p id="material-exclusion-help" hidden></p>
+          <div class="form-grid material-form-grid" id="material-fields">
             <label class="field material-field-wide" id="material-field-material"><span>材料 <b>必須</b></span><select id="material-form-material" name="materialId" required></select></label>
-            <label class="field"><span id="material-date-label">発注日</span><input name="date" type="date" required></label>
+            <label class="field" id="material-field-date"><span id="material-date-label">発注日</span><input name="date" type="date" required></label>
             <label class="field" id="material-field-quantity"><span id="material-quantity-label">数量（セット）</span><input name="quantity" type="number" inputmode="numeric" step="1" min="1" required><small id="material-quantity-help"></small></label>
             <label class="field" id="material-field-expected"><span>入庫予定日 <b>必須</b></span><input name="expectedDate" type="date" required></label>
-            <label class="field material-field-wide"><span id="material-note-label">備考（任意）</span><textarea name="note" rows="3" maxlength="1000"></textarea></label>
+            <label class="field material-field-wide" id="material-field-note"><span id="material-note-label">備考（任意）</span><textarea name="note" rows="3" maxlength="1000"></textarea></label>
           </div>
           <p id="material-form-status" class="material-status" role="status" aria-live="polite"></p>
         </div>
         <footer class="dialog-footer"><button class="button button-quiet" type="button" data-material-action="close">閉じる</button><button class="button button-primary" id="material-submit" type="submit">発注を記録</button></footer>
       </form>
+    </dialog>
+
+    <dialog class="app-dialog discard-dialog" id="revoke-access-dialog" aria-labelledby="revoke-access-title" aria-describedby="revoke-access-description">
+      <div class="dialog-shell">
+        <header class="dialog-header"><h2 id="revoke-access-title">端末認証を解除</h2></header>
+        <div class="dialog-body"><p id="revoke-access-email" translate="no"></p><p id="revoke-access-description">このアカウントの保存済み端末をすべて解除します。メールで認証した端末には、次回アクセス時に本人確認が必要です。</p></div>
+        <footer class="dialog-footer"><button class="button button-secondary" type="button" data-action="close-revoke-access">キャンセル</button><button class="button button-danger" type="button" data-action="confirm-revoke-access">端末認証を解除</button></footer>
+      </div>
     </dialog>
 
     <dialog class="app-dialog discard-dialog" id="discard-dialog" aria-labelledby="discard-dialog-title">
@@ -734,6 +806,7 @@
 
     <script src="intake-duplicates.js" defer data-inline="intake-duplicates"></script>
     <script src="intake-learning.js" defer data-inline="intake-learning"></script>
+    <script src="pdf-intake-text.js" defer data-inline="pdf-intake-text"></script>
     <dialog class="app-dialog finished-stock-dialog" id="finished-stock-dialog" aria-labelledby="finished-stock-dialog-title">
       <form class="dialog-shell" id="finished-stock-form">
         <header class="dialog-header"><div><p class="dialog-kicker" id="finished-stock-dialog-kicker">Tezoe 製品在庫</p><h2 id="finished-stock-dialog-title">在庫を記録</h2></div><button class="icon-button" type="button" data-stock-close aria-label="在庫の入力を閉じる"><svg aria-hidden="true"><use href="#icon-close"></use></svg></button></header>
@@ -741,11 +814,20 @@
         <footer class="dialog-footer"><button class="button button-quiet" type="button" data-stock-close>閉じる</button><button class="button button-primary" type="submit" id="finished-stock-submit">記録する</button></footer>
       </form>
     </dialog>
+    <dialog class="app-dialog casting-stock-dialog" id="casting-stock-dialog" aria-labelledby="casting-dialog-title">
+      <form class="dialog-shell" id="casting-stock-form" autocomplete="off">
+        <header class="dialog-header"><div><h2 id="casting-dialog-title">鋳物在庫</h2></div><button class="icon-button" type="button" data-casting-action="close" aria-label="鋳物在庫の画面を閉じる"><svg aria-hidden="true"><use href="#icon-close"></use></svg></button></header>
+        <div class="dialog-body"><div id="casting-dialog-content"></div><p id="casting-dialog-status" class="material-status" role="status" aria-live="polite"></p></div>
+        <footer class="dialog-footer"><button class="button button-quiet" type="button" data-casting-action="close">閉じる</button><button class="button button-primary" type="submit" id="casting-submit" hidden>記録する</button></footer>
+      </form>
+    </dialog>
     <script src="finished-stock.js" defer data-inline="finished-stock"></script>
     <script src="finished-stock-orders.js" defer data-inline="finished-stock-orders"></script>
     <script src="finished-stock-ui.js" defer data-inline="finished-stock-ui"></script>
     <script src="materials.js" defer data-inline="materials"></script>
     <script src="materials-ui.js" defer data-inline="materials-ui"></script>
+    <script src="casting-stock.js" defer data-inline="casting-stock"></script>
+    <script src="casting-stock-ui.js" defer data-inline="casting-stock-ui"></script>
     <script src="access-session.js" defer data-inline="access-session"></script>
     <script src="app.js" defer data-inline="script"></script>
   </body>

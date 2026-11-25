@@ -54,7 +54,7 @@ function harness(initial = stock()) {
   dialog.querySelectorAll = () => [buttons.get("close")];
   const calls = { read: 0, mutations: [], errors: [], snapshots: [], jobs: [] };
   const api = { async getMaterialInventory() { calls.read += 1; return initial; } };
-  for (const operation of ["saveMaterialOrder", "receiveMaterialOrder", "adjustMaterialStock", "cancelMaterialOrder"]) api[operation] = async (payload) => { calls.mutations.push({ operation, payload }); return initial; };
+  for (const operation of ["saveMaterialOrder", "updateMaterialOrder", "receiveMaterialOrder", "adjustMaterialStock", "cancelMaterialOrder", "saveMaterialStockNote", "saveMaterialExclusion"]) api[operation] = async (payload) => { calls.mutations.push({ operation, payload }); return initial; };
   const context = vm.createContext({ document: { readyState: "complete", querySelector: get }, crypto: { randomUUID: (() => { let count = 0; return () => `request-${++count}`; })() } });
   vm.runInContext(source, context);
   const ui = context.MaterialInventoryUI.create({ api, canEdit: () => editable, today: () => "2026-10-20", onSnapshot: (value) => calls.snapshots.push(value), onError: (message) => calls.errors.push(message), onJob: (id) => calls.jobs.push(id) });
@@ -62,6 +62,7 @@ function harness(initial = stock()) {
   return {
     ui, api, get, calls, dialog, form, inputs, buttons, setEditable(value) { editable = value; },
     async click(action, attributes = {}) { const button = { ...node(), dataset: { materialAction: action, ...attributes } }; const target = { closest: () => button }; await (action === "close" ? dialog : panel).fire("click", { target }); },
+    inputStockNote: (id, value) => panel.fire("input", { target: { dataset: { materialStockNote: id }, value } }),
     submit: () => form.fire("submit"),
   };
 }
@@ -80,7 +81,7 @@ test("materials UI loads without a DOM, fetches only when asked, and keeps domai
   await h.ui.refresh();
   assert.equal(h.calls.read, 1);
   assert.equal(h.calls.snapshots.length, 1);
-  assert.doesNotMatch(source, /CK00128|TEZOE26002|mapJob|localStorage|shippingStatus|productCode/);
+  assert.doesNotMatch(source, /CK00128|TEZOE26002|mapJob|localStorage|shippingStatus/);
 });
 
 test("dashboard distinguishes negative stock, zero stock, on-order quantities, next delivery and unresolved mappings", () => {
@@ -131,8 +132,10 @@ test("purchase rows retain full receipts and cancellations and show only the lin
   assert.match(rowFor("未入庫の発注"), /予定日を過ぎています/);
   assert.match(rowFor("未入庫取消"), /入庫なし[\s\S]*取消 5 セット/);
   assert.match(rowFor("分納後取消"), /2026-10-19<\/span><span>4 セット[\s\S]*入庫済・残数取消[\s\S]*取消 6 セット/);
-  for (const note of ["全数入庫済み", "未入庫取消", "分納後取消"]) {
-    assert.doesNotMatch(rowFor(note), /data-material-action="(?:receive|cancel)"|予定日を過ぎています/);
+  assert.match(rowFor("全数入庫済み"), /追加で入庫[\s\S]*発注を編集/);
+  assert.doesNotMatch(rowFor("全数入庫済み"), /残数を取消|予定日を過ぎています/);
+  for (const note of ["未入庫取消", "分納後取消"]) {
+    assert.doesNotMatch(rowFor(note), /data-material-action="(?:receive|cancel|editOrder)"|予定日を過ぎています/);
   }
   assert.match(rowFor("分納中"), /data-material-action="receive"/);
   assert.doesNotMatch(h.get("#material-order-rows").innerHTML, /999 セット|2026-10-25/);
@@ -155,7 +158,7 @@ test("legacy received totals without date history are marked unknown and never u
 test("all dynamic names, identifiers, notes and history are escaped and history offers no mutation control", async () => {
   const attack = '\"><img src=x onerror=alert(1)>';
   const h = harness(stock({
-    materials: [{ id: attack, name: attack, code: attack, shape: attack, specification: attack, stockQuantity: 2 }],
+    materials: [{ id: attack, name: attack, code: attack, shape: attack, specification: attack, stockQuantity: 2, note: "</textarea>" + attack }],
     orders: [{ id: attack, materialId: attack, note: attack, remainingQuantity: 1 }],
     unresolved: [{ id: attack, product: attack, specShape: attack, reason: attack }],
     history: [{ id: attack, materialId: attack, action: attack, date: attack, quantity: 1, product: attack, customer: attack, serialNo: attack, note: attack, actor: attack, jobId: attack }],
@@ -165,6 +168,7 @@ test("all dynamic names, identifiers, notes and history are escaped and history 
     assert.match(h.get(selector).innerHTML, /&lt;img/);
   }
   assert.doesNotMatch(h.get("#material-history-rows").innerHTML, /data-material-action="(?:adjust|cancel|receive|delete|edit)"/);
+  assert.match(h.get("#material-stock-rows").innerHTML, /&lt;\/textarea&gt;/);
   await h.click("order");
   assert.doesNotMatch(h.get("#material-form-material").innerHTML, /<img/);
   assert.match(h.get("#material-form-material").innerHTML, /&lt;img/);
@@ -333,24 +337,74 @@ test("purchase input survives background snapshots and records order and expecte
   assert.equal(h.calls.snapshots.length, 1);
 });
 
-test("partial receipts require positive integer quantities within outstanding and a receipt date", async () => {
+test("receipts require a positive integer and date but accept quantities above the outstanding amount", async () => {
   const h = harness();
   await h.click("receive", { materialOrder: "purchase-1" });
   assert.equal(h.inputs.quantity.value, "7");
-  assert.equal(h.inputs.quantity.max, "7");
-  h.inputs.quantity.value = "8";
-  await h.submit();
-  assert.equal(h.calls.mutations.length, 0);
-  assert.match(h.get("#material-form-status").textContent, /7 セット以内/);
+  assert.equal(h.inputs.quantity.max, "");
   h.inputs.quantity.value = "2.5";
   await h.submit();
   assert.equal(h.calls.mutations.length, 0);
-  h.inputs.quantity.value = "2";
+  h.inputs.quantity.value = "8";
   h.inputs.date.value = "2026-10-22";
   await h.submit();
   assert.equal(h.calls.mutations[0].operation, "receiveMaterialOrder");
-  assert.equal(h.calls.mutations[0].payload.quantity, 2);
+  assert.equal(h.calls.mutations[0].payload.quantity, 8);
   assert.equal(h.calls.mutations[0].payload.date, "2026-10-22");
+});
+
+test("order editing prefills the latest order and sends only the edited fields and base revision", async () => {
+  const initial = stock();
+  initial.orders[0].revision = "first-version";
+  const h = harness(initial);
+  await h.click("editOrder", { materialOrder: "purchase-1" });
+  assert.equal(h.get("#material-field-date").hidden, true);
+  assert.equal(h.get("#material-field-note").hidden, true);
+  assert.equal(h.get("#material-field-expected").hidden, false);
+  assert.equal(h.inputs.expectedDate.value, "2026-10-24");
+  assert.equal(h.inputs.quantity.value, "10");
+  h.inputs.quantity.value = "12";
+  h.inputs.expectedDate.value = "2026-10-19";
+  await h.submit();
+  assert.match(h.get("#material-form-status").textContent, /発注日以降/);
+  assert.equal(h.calls.mutations.length, 0);
+  h.inputs.expectedDate.value = "2026-11-03";
+  await h.submit();
+  assert.equal(h.calls.mutations[0].operation, "updateMaterialOrder");
+  assert.deepEqual(JSON.parse(JSON.stringify(h.calls.mutations[0].payload)), {
+    orderId: "purchase-1", quantity: 12, expectedDate: "2026-11-03", expectedRevision: "first-version", requestId: "material-request-1",
+  });
+  assert.equal(h.dialog.open, false);
+});
+
+test("inline stock notes preserve multiline drafts and retry identity across snapshot changes", async () => {
+  const initial = stock();
+  initial.materials[0].note = "保管棚A";
+  initial.materials[0].noteRevision = "first-note";
+  const h = harness(initial);
+  assert.match(h.get("#material-stock-rows").innerHTML, /aria-label="CK00128の備考">保管棚A/);
+  const requests = [];
+  const note = "上 12、下 11\n下1個は次回入荷";
+  h.api.saveMaterialStockNote = async (payload) => {
+    requests.push(payload);
+    if (requests.length === 1) throw new TypeError("Network error");
+    return updated;
+  };
+  const updated = stock({ materials: [{ ...initial.materials[0], note, noteRevision: "new-note" }, initial.materials[1]] });
+  await h.inputStockNote("straight", note);
+  assert.equal(h.ui.hasUnsavedNotes(), true);
+  await h.click("stockNote", { materialId: "straight" });
+  assert.match(h.get("#material-status").textContent, /入力を変えずに再試行/);
+  h.ui.setSnapshot(updated);
+  await h.click("stockNote", { materialId: "straight" });
+  assert.deepEqual(requests, [requests[0], requests[0]]);
+  assert.equal(requests[0].note, note);
+  assert.equal(requests[0].expectedRevision, "first-note");
+  assert.equal(h.ui.hasUnsavedNotes(), false);
+  await h.inputStockNote("straight", "");
+  await h.click("stockNote", { materialId: "straight" });
+  assert.equal(requests[2].note, "");
+  assert.equal(requests[2].expectedRevision, "new-note");
 });
 
 test("signed adjustments and outstanding cancellation require a reason, without inventing inventory movements", async () => {
@@ -366,7 +420,7 @@ test("signed adjustments and outstanding cancellation require a reason, without 
   assert.equal(h.calls.mutations[0].operation, "adjustMaterialStock");
   await h.click("cancel", { materialOrder: "purchase-1" });
   assert.equal(h.get("#material-field-quantity").hidden, true);
-  assert.match(h.get("#material-dialog-summary").textContent, /未入庫 7 セット/);
+  assert.match(h.get("#material-dialog-summary").textContent, /発注残 7 セット/);
   await h.submit();
   assert.equal(h.calls.mutations.length, 1);
   h.inputs.note.value = "発注先と取消確認済み";
@@ -508,4 +562,115 @@ test("materials navigation, native dialog, script order and tablet overflow are 
   assert.match(css, /\.material-stock-negative[^}]*var\(--color-danger\)/);
   assert.match(css, /\.material-stock-zero[^}]*var\(--color-warning\)/);
   assert.doesNotMatch(source, /onclick\s*=/);
+});
+
+const unresolvedProduct = { id: "job-exclude", productKey: "a".repeat(64), customer: "確認用", product: "Tezoe 確認用製品", productCode: "26099", specShape: "直・上向", quantity: 4 };
+const excludedProduct = { ...unresolvedProduct, id: "rule-exclude", key: unresolvedProduct.productKey, at: "2026-11-10T00:00:00Z" };
+
+test("non-use registration confirms product and scope before saving and then offers revocation", async () => {
+  const initial = stock({ unresolved: [unresolvedProduct] });
+  const h = harness(initial);
+  assert.match(h.get("#material-unresolved-list").innerHTML, /碓井材料を使わない/);
+  await h.click("exclude", { materialJob: unresolvedProduct.id });
+  assert.equal(h.dialog.open, true);
+  assert.equal(h.calls.mutations.length, 0);
+  assert.equal(h.get("#material-fields").hidden, true);
+  assert.match(h.get("#material-dialog-summary").textContent, /Tezoe 確認用製品.*確認用.*26099/);
+  assert.match(h.get("#material-exclusion-help").textContent, /今後の注文.*現在庫と過去の材料履歴は変更しません/);
+  h.api.saveMaterialExclusion = async (payload) => {
+    h.calls.mutations.push({ operation: "saveMaterialExclusion", payload });
+    return { ...initial, unresolved: [], excludedProducts: [excludedProduct] };
+  };
+  await h.submit();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.calls.mutations[0].payload)), { action: "exclude", productKey: unresolvedProduct.productKey, jobId: unresolvedProduct.id, requestId: "material-request-1" });
+  assert.equal(h.dialog.open, false);
+  assert.equal(h.get("#material-unresolved").hidden, true);
+  assert.equal(h.get("#material-exclusions").hidden, false);
+  assert.match(h.get("#material-exclusions-list").innerHTML, /登録を取り消す/);
+  await h.click("order", { materialId: "straight" });
+  assert.equal(h.get("#material-fields").hidden, false);
+  assert.equal(h.get("#material-exclusion-help").hidden, true);
+  assert.equal(h.inputs.quantity.disabled, false);
+});
+
+test("revoking a non-use registration requires confirmation and returns unresolved products", async () => {
+  const h = harness(stock({ unresolved: [], excludedProducts: [excludedProduct] }));
+  await h.click("restore", { materialRule: excludedProduct.id });
+  assert.equal(h.calls.mutations.length, 0);
+  assert.match(h.get("#material-exclusion-help").textContent, /再び材料の確認対象/);
+  h.api.saveMaterialExclusion = async (payload) => {
+    h.calls.mutations.push({ payload });
+    return stock({ unresolved: [unresolvedProduct], excludedProducts: [] });
+  };
+  await h.submit();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.calls.mutations[0].payload)), { action: "restore", productKey: excludedProduct.key, ruleId: excludedProduct.id, requestId: "material-request-1" });
+  assert.equal(h.get("#material-exclusions").hidden, true);
+  assert.equal(h.get("#material-unresolved").hidden, false);
+});
+
+test("non-use save failures retain identity and reuse their request after closing and reopening", async () => {
+  const h = harness(stock({ unresolved: [unresolvedProduct] })), payloads = [];
+  h.api.saveMaterialExclusion = async (payload) => {
+    payloads.push(payload);
+    if (payloads.length === 1) throw new TypeError("通信結果が不明");
+    return stock({ unresolved: [], excludedProducts: [excludedProduct] });
+  };
+  await h.click("exclude", { materialJob: unresolvedProduct.id });
+  await h.submit();
+  assert.equal(h.dialog.open, true);
+  assert.match(h.get("#material-form-status").textContent, /反映済みの可能性/);
+  await h.click("close");
+  await h.ui.refresh();
+  await h.click("exclude", { materialJob: unresolvedProduct.id });
+  assert.match(h.get("#material-submit").textContent, /再試行/);
+  await h.submit();
+  assert.deepEqual(payloads[0], payloads[1]);
+  assert.equal(h.dialog.open, false);
+});
+
+test("after a product change and refresh an exclusion uses the current product and a new request", async () => {
+  const before = { ...unresolvedProduct, productCode: "CK099" };
+  const current = { ...before, productKey: "b".repeat(64), productCode: "CK098" };
+  const h = harness(stock({ unresolved: [before] }));
+  const payloads = [];
+  h.api.saveMaterialExclusion = async (payload) => {
+    payloads.push(payload);
+    if (payloads.length === 1) throw new Error("製品の内容が変更されました。在庫を更新してください。");
+    return stock({ unresolved: [] });
+  };
+
+  await h.click("exclude", { materialJob: before.id });
+  await h.submit();
+  await h.click("close");
+  h.api.getMaterialInventory = async () => stock({ unresolved: [current] });
+  await h.ui.refresh();
+
+  await h.click("exclude", { materialJob: current.id });
+  assert.match(h.get("#material-dialog-summary").textContent, /CK098/);
+  assert.equal(h.get("#material-submit").textContent, "使わない製品として登録");
+  assert.equal(h.get("#material-form-status").textContent, "");
+  await h.submit();
+  assert.equal(payloads[1].jobId, current.id);
+  assert.equal(payloads[1].productKey, current.productKey);
+  assert.notEqual(payloads[1].requestId, payloads[0].requestId);
+  assert.equal(h.dialog.open, false);
+});
+
+test("registered product output escapes metadata and is cleared on permission revocation during a save", async () => {
+  const attack = '\"><img src=x onerror=alert(1)>';
+  const h = harness(stock({ unresolved: [unresolvedProduct], excludedProducts: [{ ...excludedProduct, product: attack, customer: attack, productCode: attack }] }));
+  assert.doesNotMatch(h.get("#material-exclusions-list").innerHTML, /<img/);
+  assert.match(h.get("#material-exclusions-list").innerHTML, /&lt;img/);
+  let rejectSave;
+  h.api.saveMaterialExclusion = () => new Promise((_, reject) => { rejectSave = reject; });
+  await h.click("exclude", { materialJob: unresolvedProduct.id });
+  const save = h.submit();
+  h.setEditable(false);
+  h.ui.render();
+  rejectSave(new TypeError("network failed"));
+  await save;
+  assert.equal(h.dialog.open, false);
+  assert.equal(h.get("#material-exclusions-list").innerHTML, "");
+  assert.equal(h.get("#material-exclusions").hidden, true);
+  assert.equal(h.get("#material-dialog-summary").textContent, "");
 });

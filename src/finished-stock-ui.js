@@ -9,8 +9,8 @@
   const errorMessage = (error) => String(error?.message || error).replace(/FINISHED_STOCK_INVALID:\s*/g, "");
   const empty = (n, value) => `<tr><td colspan="${n}" class="material-empty">${escape(value)}</td></tr>`;
   const button = (action, label, attributes = "") => `<button class="button button-secondary material-row-button" type="button" data-stock-action="${action}" ${attributes}>${label}</button>`;
-  const ACTIONS = { opening: "手元の在庫追加", receive: "製造分の入庫", ship: "在庫から出荷", reverse: "記録の取消", schedule: "出荷予定を設定", completion: "完成予定日を設定" };
-  const APIS = { opening: "openFinishedStock", receive: "receiveFinishedStock", ship: "shipFinishedStock", reverse: "reverseFinishedStock", schedule: "saveFinishedStockSchedule", completion: "saveFinishedStockSchedule" };
+  const ACTIONS = { opening: "手元の在庫追加", receive: "製造分の入庫", ship: "在庫から出荷", reverse: "記録の取消", schedule: "出荷予定を設定", completion: "完成予定日を設定", note: "製品の備考を編集" };
+  const APIS = { opening: "openFinishedStock", receive: "receiveFinishedStock", ship: "shipFinishedStock", reverse: "reverseFinishedStock", schedule: "saveFinishedStockSchedule", completion: "saveFinishedStockSchedule", note: "saveFinishedStockNote" };
 
   function create(options = {}) {
     const doc = root.document;
@@ -19,6 +19,7 @@
     const dialog = q("#finished-stock-dialog"), form = q("#finished-stock-form");
     let bound = false, snapshot = null, dirty = true, pending = false, reading = null, revision = 0, queued = false;
     let draft = null, attempt = null, overviewSignature = "", clearRevision = 0;
+    let paintedSnapshot = null, paintedDay = "", paintSignature = "";
     const savedDrafts = new Map();
     const permitted = () => options.canEdit?.() === true;
     const today = () => options.today?.() || new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Tokyo" }).format(new Date());
@@ -30,19 +31,20 @@
     const asof = () => q("#finished-stock-asof")?.value || today();
     const forecast = (id, until = asof()) => root.FinishedStockOrders.forecast(snapshot, id, until);
     const orderFor = (id) => snapshot?.orders?.find((entry) => entry.jobId === id);
-    const nameFor = (id) => { const p = product(id); return p ? `${p.code} ${p.name}` : id; };
-    const usable = () => permitted() && snapshot && !dirty && !pending && !reading;
+    const nameFor = (id) => { const p = product(id); return p ? `${p.code || "品番なし"} ${p.name}` : id; };
+    const loading = () => Boolean(reading && !reading.passive);
+    const usable = () => permitted() && snapshot && !dirty && !pending && !loading();
     const unresolvedShipment = (productId) => [...savedDrafts.values()].find((saved) => saved.draft?.action === "ship" && saved.attempt?.unconfirmed && saved.values.productId === productId);
 
     function controls() {
       panel?.querySelectorAll("[data-stock-action]").forEach((el) => {
         if (el.dataset.stockAction === "job") { el.disabled = !permitted(); return; }
-        if (el.dataset.stockAction === "refresh") el.disabled = !permitted() || pending || Boolean(reading);
+        if (el.dataset.stockAction === "refresh") el.disabled = !permitted() || pending || loading();
         else el.disabled = !usable() || el.dataset.stockUnavailable === "true" && !(el.dataset.stockAction === "ship" && unresolvedShipment(el.dataset.productId));
       });
       form?.querySelectorAll("input, select, textarea, button").forEach((el) => { el.disabled = pending || !permitted() || Boolean(attempt?.unconfirmed && el.name); });
       form?.setAttribute("aria-busy", String(pending));
-      text("#finished-stock-submit", pending ? "記録しています…" : attempt?.unconfirmed ? "前回の記録を確認する" : draft?.action === "reverse" ? "理由を残して取り消す" : "記録する");
+      text("#finished-stock-submit", draft?.action === "note" ? pending ? "保存中…" : "備考を保存" : pending ? "記録しています…" : attempt?.unconfirmed ? "前回の記録を確認する" : draft?.action === "reverse" ? "理由を残して取り消す" : "記録する");
     }
 
     function updateForecast() {
@@ -51,7 +53,7 @@
         if (!row) continue;
         const value = forecast(p.id);
         row.querySelector("[data-stock-add]").textContent = `＋${count(value.incomingQuantity)}`;
-        row.querySelector("[data-stock-outgoing]").textContent = `−${count(value.outgoingQuantity)}${value.undatedOrderQuantity ? `（未定${count(value.undatedOrderQuantity)}）` : ""}`;
+        row.querySelector("[data-stock-outgoing]").innerHTML = `−${count(value.outgoingQuantity)}${value.undatedOrderQuantity ? `<small>未定 ${count(value.undatedOrderQuantity)}</small>` : ""}`;
         const result = row.querySelector("[data-stock-forecast]");
         result.innerHTML = `${count(value.availableQuantity)}${value.futureReservedQuantity ? `<small>残数見込 ${count(value.quantity)} / 後日出荷分 ${count(value.futureReservedQuantity)}を確保</small>` : ""}`;
         result.classList.toggle("finished-stock-shortage", value.availableQuantity < 0);
@@ -62,9 +64,13 @@
       const signature = JSON.stringify([snapshot?.products, snapshot?.productions, snapshot?.orders]);
       if (signature !== overviewSignature) {
         overviewSignature = signature;
-        q("#finished-stock-rows").innerHTML = (snapshot?.products || []).map((p) => {
-          return `<tr data-stock-product="${escape(p.id)}"><th scope="row"><strong>${escape(p.code)}</strong><small>${escape(p.name.replace(/^Tezoe\s*/i, ""))}</small></th><td><strong class="finished-stock-number">${count(p.stockQuantity)}</strong>${p.stockRegistered ? "" : '<small class="finished-stock-warning">開始在庫未登録</small>'}</td><td>${count(p.orderQuantity)}</td><td>${count(p.reservedQuantity)}</td><td class="finished-stock-number">${count(p.availableQuantity)}</td><td data-stock-add class="finished-stock-addition"></td><td data-stock-outgoing></td><td data-stock-forecast class="finished-stock-number"></td><td>${button("ship", "在庫から出荷", `data-product-id="${escape(p.id)}" data-stock-unavailable="${number(p.stockQuantity) <= 0}"`)}</td></tr>`;
-        }).join("") || empty(9, "製品を読み込んでいます。");
+        q("#finished-stock-rows").innerHTML = (snapshot?.products || []).filter((p) => !p.custom || p.stockRegistered || p.note || number(p.stockQuantity) > 0 || number(p.plannedQuantity) > 0).map((p) => {
+          const id = escape(p.id);
+          const noteId = `finished-stock-note-${id}`;
+          const noteLabel = `${escape(nameFor(p.id))}の備考を${p.note ? "編集" : "入力"}`;
+          const noteButton = `<button class="button button-secondary material-row-button finished-stock-note-button" type="button" data-stock-action="note" data-product-id="${id}" aria-label="${noteLabel}"${p.note ? ` aria-describedby="${noteId}"` : ""}><span id="${noteId}">${escape(p.note || "備考を入力")}</span></button>`;
+          return `<tr data-stock-product="${id}"><th scope="row"><strong>${escape(p.code || "品番なし")}</strong><small>${escape(p.name.replace(/^Tezoe\s*/i, ""))}</small>${p.identityIssue ? `<small class="finished-stock-warning">${escape(p.identityIssue)} 訂正するには履歴から関連する入出庫を取り消してください。</small>` : ""}</th><td class="material-number"><strong class="finished-stock-number">${count(p.stockQuantity)}</strong>${p.stockRegistered ? "" : '<small class="finished-stock-warning">開始在庫未登録</small>'}</td><td class="material-number">${count(p.orderQuantity)}</td><td class="material-number">${count(p.reservedQuantity)}</td><td class="material-number finished-stock-number">${count(p.availableQuantity)}</td><td data-stock-add class="material-number finished-stock-addition"></td><td data-stock-outgoing class="material-number"></td><td data-stock-forecast class="material-number finished-stock-number"></td><td>${button("ship", "在庫から出荷", `data-product-id="${id}" data-stock-unavailable="${Boolean(p.identityIssue) || number(p.stockQuantity) <= 0}"`)}</td><td class="finished-stock-note-cell">${noteButton}</td></tr>`;
+        }).join("") || empty(10, "製品を読み込んでいます。");
       }
       updateForecast();
     }
@@ -97,55 +103,92 @@
     function paintLots() {
       const all = q("#finished-stock-exhausted")?.checked;
       const lots = (snapshot?.lots || []).filter((entry) => all || number(entry.remainingQuantity) > 0);
-      q("#finished-stock-lot-rows").innerHTML = lots.map((entry) => `<tr><td><strong>${escape(entry.productId)}</strong><small>${escape(product(entry.productId)?.name || "")}</small></td><td>${escape(entry.lotNo || entry.id)}${entry.serialNo ? `<small>${escape(entry.serialNo)}</small>` : ""}${entry.jobId ? button("job", "製造案件", `data-job-id="${escape(entry.jobId)}"`) : ""}${entry.note ? `<small>${escape(entry.note)}</small>` : ""}</td><td>${escape(date(entry.productionDate))}</td><td>${escape(names(entry.producers) || "不明")}${!entry.productionDate || !names(entry.producers) ? '<small class="finished-stock-badge">製造元の情報不明</small>' : ""}${Object.keys(entry.stageAssignees || {}).length ? `<details><summary>工程ごとの担当</summary>${Object.entries(entry.stageAssignees).map(([key, value]) => `<p>${escape(({ welding: "溶接", base: "元作り", grinding: "浮き止め～立ち上がり", heat: "厚みとり", finish: "仕上げ" })[key] || key)}：${escape(typeof value === "object" ? value.assignee || "不明" : value || "不明")}</p>`).join("")}</details>` : ""}</td><td>${escape(date(entry.date))}</td><td>${count(entry.quantity)}</td><td class="finished-stock-number">${count(entry.remainingQuantity)}</td><td>${button("ship", "このロットから出荷", `data-product-id="${escape(entry.productId)}" data-lot-id="${escape(entry.id)}" data-stock-unavailable="${entry.remainingQuantity <= 0}"`)}</td></tr>`).join("") || empty(8, "在庫のあるロットはありません。");
+      q("#finished-stock-lot-rows").innerHTML = lots.map((entry) => `<tr><td><strong>${escape(product(entry.productId)?.code || "品番なし")}</strong><small>${escape(product(entry.productId)?.name || "")}</small></td><td>${escape(entry.lotNo || entry.id)}${entry.serialNo ? `<small>${escape(entry.serialNo)}</small>` : ""}${entry.jobId ? button("job", "製造案件", `data-job-id="${escape(entry.jobId)}"`) : ""}${entry.note ? `<small>${escape(entry.note)}</small>` : ""}</td><td>${escape(date(entry.productionDate))}</td><td>${escape(names(entry.producers) || "不明")}${!entry.productionDate || !names(entry.producers) ? '<small class="finished-stock-badge">製造元の情報不明</small>' : ""}${Object.keys(entry.stageAssignees || {}).length ? `<details><summary>工程ごとの担当</summary>${Object.entries(entry.stageAssignees).map(([key, value]) => `<p>${escape(({ welding: "溶接", base: "元作り", grinding: "浮き止め～立ち上がり", heat: "厚みとり", finish: "仕上げ" })[key] || key)}：${escape(typeof value === "object" ? value.assignee || "不明" : value || "不明")}</p>`).join("")}</details>` : ""}</td><td>${escape(date(entry.date))}</td><td>${count(entry.quantity)}</td><td class="finished-stock-number">${count(entry.remainingQuantity)}</td><td>${button("ship", "このロットから出荷", `data-product-id="${escape(entry.productId)}" data-lot-id="${escape(entry.id)}" data-stock-unavailable="${Boolean(product(entry.productId)?.identityIssue) || entry.remainingQuantity <= 0}"`)}</td></tr>`).join("") || empty(8, "在庫のあるロットはありません。");
     }
 
     function paintHistory() {
-      const selected = q("#finished-stock-product-filter").value;
+      const filter = q("#finished-stock-product-filter");
+      const selected = snapshot.products.some((p) => p.id === filter.value) ? filter.value : "all";
+      filter.innerHTML = '<option value="all">すべて</option>' + snapshot.products.map((p) => `<option value="${escape(p.id)}">${escape(nameFor(p.id))}</option>`).join("");
+      filter.value = selected;
       const search = q("#finished-stock-history-search").value.trim().toLocaleLowerCase();
       const events = [...(snapshot?.history || [])].sort((a, b) => String(b.at).localeCompare(String(a.at))).filter((entry) => (selected === "all" || entry.productId === selected) && (!search || JSON.stringify([entry, (entry.allocations || []).map((a) => lot(a.lotId))]).toLocaleLowerCase().includes(search)));
       const reversed = new Set((snapshot?.history || []).filter((entry) => entry.action === "reverse").map((entry) => entry.eventId || entry.reverseOf));
       text("#finished-stock-history-count", `${events.length}件`);
       q("#finished-stock-history-rows").innerHTML = events.map((entry) => {
-        const sourceLots = entry.action === "schedule" ? `出荷予定 ${escape(entry.shipDate || "未定")}<small>${entry.shipmentMode === "together" ? "不足分と一緒に出荷" : "在庫分を先に出荷"} / 在庫から ${count(entry.stockQuantity)}丁</small><small>完成予定 ${escape(entry.completionDate || "納期を使用")}</small>` : entry.action === "ship" ? (entry.allocations || []).map((a) => traceMarkup(lot(a.lotId) || a, a.quantity)).join("") : ["opening", "receive"].includes(entry.action) ? traceMarkup(lot(entry.id) || entry) : `元の記録 ${escape(entry.eventId || entry.reverseOf || "")}`;
-        return `<tr><td>${escape(date(entry.date))}<small>${escape(ACTIONS[entry.action] || entry.action)}${entry.purpose === "demo" ? "・デモ用" : entry.purpose === "sale" ? "・販売用" : ""}</small>${reversed.has(entry.id) ? '<small class="finished-stock-warning">取消済</small>' : ""}</td><td><strong>${escape(entry.productId)}</strong><small>${count(entry.quantity)}丁</small></td><td>${escape(entry.customer || "—")}<small>${escape(entry.orderRef || entry.serialNo || "")}</small></td><td>${sourceLots}</td><td>${escape(entry.note || "—")}<small>記録者 ${escape(entry.actor || "不明")}</small><small>${escape(recordedAt(entry.at))}</small></td><td>${["opening", "receive", "ship"].includes(entry.action) && !reversed.has(entry.id) ? button("reverse", "訂正のため取り消す", `data-event-id="${escape(entry.id)}"`) : "—"}</td></tr>`;
+        const sourceLots = entry.completionOnly === true ? `完成予定 ${escape(entry.completionDate || "納期を使用")}` : entry.action === "schedule" ? `出荷予定 ${escape(entry.shipDate || "未定")}<small>${entry.shipmentMode === "together" ? "不足分と一緒に出荷" : "在庫分を先に出荷"} / 在庫から ${count(entry.stockQuantity)}丁</small><small>完成予定 ${escape(entry.completionDate || "納期を使用")}</small>` : entry.action === "ship" ? (entry.allocations || []).map((a) => traceMarkup(lot(a.lotId) || a, a.quantity)).join("") : ["opening", "receive"].includes(entry.action) ? traceMarkup(lot(entry.id) || entry) : `元の記録 ${escape(entry.eventId || entry.reverseOf || "")}`;
+        return `<tr><td>${escape(date(entry.date))}<small>${escape(ACTIONS[entry.completionOnly === true ? "completion" : entry.action] || entry.action)}${entry.purpose === "demo" ? "・デモ用" : entry.purpose === "sale" ? "・販売用" : ""}</small>${reversed.has(entry.id) ? '<small class="finished-stock-warning">取消済</small>' : ""}</td><td><strong>${escape(nameFor(entry.productId))}</strong>${entry.completionOnly === true ? "" : `<small>${count(entry.quantity)}丁</small>`}</td><td>${escape(entry.customer || "—")}<small>${escape(entry.orderRef || entry.serialNo || "")}</small></td><td>${sourceLots}</td><td>${escape(entry.note || "—")}<small>記録者 ${escape(entry.actor || "不明")}</small><small>${escape(recordedAt(entry.at))}</small></td><td>${["opening", "receive", "ship"].includes(entry.action) && !reversed.has(entry.id) ? button("reverse", "訂正のため取り消す", `data-event-id="${escape(entry.id)}"`) : "—"}</td></tr>`;
       }).join("") || empty(6, "条件に一致する履歴はありません。");
     }
 
     function paint() {
-      if (!permitted() || !snapshot) { controls(); return; }
-      paintOverview(); paintOrders(); paintPlans(); paintLots(); paintHistory(); controls();
+      if (permitted() && snapshot) {
+        const day = today();
+        if (snapshot !== paintedSnapshot || day !== paintedDay) {
+          const signature = JSON.stringify([day, snapshot]);
+          if (signature !== paintSignature) {
+            paintOverview(); paintOrders(); paintPlans(); paintLots(); paintHistory();
+            paintSignature = signature;
+          }
+          paintedSnapshot = snapshot;
+          paintedDay = day;
+        }
+      }
+      controls();
     }
 
-    async function refresh() {
-      if (!permitted()) { clear(); return; }
-      if (pending) { queued = true; return; }
-      if (reading) { queued = true; return reading; }
-      const captured = revision;
+    function showLoading() {
       status("#finished-stock-status", "在庫と製造予定を読み込んでいます…", "pending");
-      reading = Promise.resolve().then(() => options.api.getFinishedStock()).then((result) => {
-        if (!permitted() || captured !== revision) { queued = permitted(); return; }
+    }
+
+    async function refresh({ passive = false } = {}) {
+      if (!permitted()) { clear(); return; }
+      if (pending) { if (!passive) queued = true; return; }
+      if (reading) {
+        if (!passive && reading.revision !== revision) queued = true;
+        else if (!passive && reading.passive) {
+          reading.passive = false;
+          showLoading();
+          controls();
+        }
+        return reading.promise;
+      }
+      queued = false;
+      const read = { revision, passive: Boolean(passive && snapshot && !dirty), promise: null };
+      reading = read;
+      if (!read.passive) showLoading();
+      read.promise = Promise.resolve().then(() => options.api.getFinishedStock()).then((result) => {
+        if (!permitted() || read.revision !== revision || pending) return;
+        if (!Array.isArray(result?.products) || !Array.isArray(result.history)) throw new Error("在庫データを確認できませんでした。");
+        const hadHistory = Boolean(snapshot?.history.length);
         snapshot = result; dirty = false;
-        status("#finished-stock-status", snapshot.history.length ? "在庫は入出庫の記録から集計しています。" : "開始在庫は未登録です。現物を確認し「手元の在庫を追加」から登録してください。", snapshot.history.length ? "" : "warning");
+        const hasHistory = Boolean(snapshot.history.length);
+        const previousTone = q("#finished-stock-status")?.dataset.tone;
+        if (!read.passive || (hadHistory !== hasHistory && previousTone === (hadHistory ? "" : "warning"))) {
+          status("#finished-stock-status", hasHistory ? "在庫は入出庫の記録から集計しています。" : "開始在庫は未登録です。現物を確認し「手元の在庫を追加」から登録してください。", hasHistory ? "" : "warning");
+        }
         paint();
       }).catch((error) => {
-        if (captured !== revision || !permitted()) return;
+        if (read.passive || read.revision !== revision || !permitted()) return;
         dirty = true; status("#finished-stock-status", `読み込めませんでした。「更新」で再試行できます。${errorMessage(error)}`, "error");
       }).finally(() => {
         reading = null; controls();
-        if (queued && permitted()) { queued = false; void refresh(); }
+        if (queued && !pending && permitted()) return refresh();
       });
       controls();
-      return reading;
+      return read.promise;
     }
 
     const inputField = (name, label, value = "", attributes = "", helper = "") => `<label class="field"><span>${label}</span><input name="${name}" value="${escape(value)}" ${attributes}>${helper ? `<small>${helper}</small>` : ""}</label>`;
-    const productField = (id) => `<label class="field"><span>製品</span><select name="productId" required>${snapshot.products.map((p) => `<option value="${escape(p.id)}" ${p.id === id ? "selected" : ""}>${escape(`${p.code} ${p.name}`)}</option>`).join("")}</select></label>`;
+    const productField = (id) => `<label class="field"><span>製品</span><select name="productId" required>${snapshot.products.filter((p) => !p.identityIssue).map((p) => `<option value="${escape(p.id)}" ${p.id === id ? "selected" : ""}>${escape(nameFor(p.id))}</option>`).join("")}</select></label>`;
     const values = () => Object.fromEntries(Array.from(form.elements).filter((element) => element.name).map((element) => [element.name, element.value]));
     const draftKey = (d) => `${d.action}:${d.jobId || d.eventId || d.orderJobId || d.lotId || d.productId || "all"}`;
 
     function remember() {
-      if (draft) savedDrafts.set(draftKey(draft), { draft: { ...draft }, values: values(), attempt });
+      if (!draft) return;
+      const current = values();
+      if (draft.action === "note" && !attempt && current.note === draft.originalNote) savedDrafts.delete(draftKey(draft));
+      else savedDrafts.set(draftKey(draft), { draft: { ...draft }, values: current, attempt });
     }
     function close({ force = false, keepDraft = true } = {}) {
       if (pending && !force) return false;
@@ -155,6 +198,8 @@
     }
     function open(action, data = {}) {
       if (!usable()) return;
+      const noteProduct = action === "note" ? product(data.productId) : null;
+      if (action === "note" && !noteProduct) return;
       let restored = action === "ship" ? unresolvedShipment(data.productId) : null;
       if (restored) data = { ...restored.draft };
       if (!restored && action === "ship" && !data.orderJobId && number(product(data.productId)?.availableQuantity) <= 0) {
@@ -163,6 +208,14 @@
       }
       draft = { action, ...data }; attempt = null;
       restored ||= savedDrafts.get(draftKey(draft));
+      if (noteProduct) {
+        draft.noteRevision = noteProduct.noteRevision || "";
+        draft.originalNote = noteProduct.note || "";
+        if (restored?.attempt?.noteConflict && restored.draft.noteRevision !== draft.noteRevision) {
+          savedDrafts.delete(draftKey(draft));
+          restored = null;
+        }
+      }
       const p = snapshot.plans.find((entry) => entry.jobId === data.jobId);
       const o = orderFor(data.jobId || data.orderJobId);
       const production = (snapshot.productions || []).find((entry) => entry.jobId === data.jobId);
@@ -172,24 +225,25 @@
       const existingLot = lot(data.lotId);
       const qty = receipt ? p?.quantity : action === "ship" ? number(o ? Math.min(o.allocatedQuantity, existingLot?.remainingQuantity ?? o.allocatedQuantity) : Math.min(1, number(existingLot?.remainingQuantity ?? product(data.productId)?.availableQuantity))) : "";
       draft.jobVersion = scheduling ? o?.jobVersion : completing ? production?.jobVersion : p?.jobVersion;
-      if (completing) draft.scheduleDefaults = o ? { orderQuantity: o.quantity, stockQuantity: number(o.stockTargetQuantity) + number(o.shippedQuantity), shipmentMode: o.shipmentMode || "split", shipDate: o.shipDate || "" } : { orderQuantity: 0, stockQuantity: 0, shipmentMode: "split", shipDate: "" };
       draft.shipVersions = Object.fromEntries((snapshot.orders || []).map((entry) => [entry.jobId, entry.jobVersion]));
       text("#finished-stock-dialog-title", ACTIONS[action]);
-      text("#finished-stock-dialog-kicker", receipt ? `${nameFor(p.productId)} / ${p.serialNo || p.jobId}` : scheduling ? `${nameFor(o.productId)} / ${o.customer} / ${o.serialNo || o.jobId}` : action === "reverse" ? "原記録と取消理由を保存します" : "Tezoe 製品在庫");
-      text("#finished-stock-form-description", action === "opening" ? "現物を数えて、追加する数量を入力してください。入力した数だけ現在庫に加算します。製造日や担当が分からない場合は空欄にできます。" : receipt ? "実際に製造が完了した在庫分を入庫します。製造日・製造担当はこのロットの記録に残ります。" : scheduling ? "実際の注文数量を保存します。在庫から出す数量は出荷済分を含めた累計です。製造数量は自動変更しないため、保存後に製造計画を調整してください。" : action === "ship" ? "実際に出荷する在庫分を記録します。受注を選ぶと、その受注の確保分から出庫します。出荷待ち一覧の出荷完了は別に記録してください。" : "取消を記録し、在庫数を元に戻します。出荷に使った入庫は、その出荷の取消後に取り消せます。");
+      text("#finished-stock-dialog-kicker", noteProduct ? nameFor(noteProduct.id) : receipt ? `${nameFor(p.productId)} / ${p.serialNo || p.jobId}` : scheduling ? `${nameFor(o.productId)} / ${o.customer} / ${o.serialNo || o.jobId}` : action === "reverse" ? "原記録と取消理由を保存します" : "Tezoe 製品在庫");
+      text("#finished-stock-form-description", noteProduct ? "" : action === "opening" ? "現物を数えて、追加する数量を入力してください。入力した数だけ現在庫に加算します。製造日や担当が分からない場合は空欄にできます。" : receipt ? "実際に製造が完了した在庫分を入庫します。製造日・製造担当はこのロットの記録に残ります。" : scheduling ? "実際の注文数量を保存します。在庫から出す数量は出荷済分を含めた累計です。製造数量は自動変更しないため、保存後に製造計画を調整してください。" : action === "ship" ? "実際に出荷する在庫分を記録します。受注を選ぶと、その受注の確保分から出庫します。出荷待ち一覧の出荷完了は別に記録してください。" : "取消を記録し、在庫数を元に戻します。出荷に使った入庫は、その出荷の取消後に取り消せます。");
       if (completing) {
         text("#finished-stock-dialog-kicker", `${nameFor(production.productId)} / ${production.customer} / ${production.serialNo || production.jobId}`);
         text("#finished-stock-form-description", "在庫補充を含む製造の完成予定日を保存します。空欄の場合は案件の納期を使用します。");
       }
       const dateField = inputField("date", action === "ship" ? "出荷日" : action === "reverse" ? "取消日" : "入庫日", today(), `type="date" max="${today()}" required`);
       let html;
-      if (completing) {
-        html = inputField("completionDate", "製造の完成予定日", production.dueDate || "", 'type="date"');
+      if (noteProduct) {
+        html = '<label class="field finished-stock-note-field"><span>備考</span><textarea name="note" rows="5" maxlength="1000" autocomplete="off"></textarea></label>';
+      } else if (completing) {
+        html = inputField("completionDate", "製造の完成予定日", production.completionDateOverride || "", 'type="date"');
       } else if (scheduling) {
-        html = `${inputField("orderQuantity", "実際の注文数量（丁）", o.quantity, `type="number" min="${o.shippedQuantity}" max="1000000" step="1" required`)}${inputField("stockQuantity", "在庫から出す累計数量（丁）", o.hasSchedule ? number(o.stockTargetQuantity) + number(o.shippedQuantity) : number(o.allocatedQuantity) + number(o.shippedQuantity), `type="number" min="${o.shippedQuantity}" max="${o.quantity}" step="1" required`, `在庫から出荷済 ${count(o.shippedQuantity)}丁。0にすると現在庫を使わず製造します。`)}<label class="field"><span>出荷方法</span><select name="shipmentMode"><option value="split" ${o.shipmentMode !== "together" ? "selected" : ""}>在庫分を先に出荷</option><option value="together" ${o.shipmentMode === "together" ? "selected" : ""}>不足分の完成後に一緒に出荷</option></select></label>${inputField("shipDate", "在庫分の出荷予定日", o.shipDate || "", 'type="date"', "未定の場合は空欄。在庫見込では未定分も先に差し引きます。")}${inputField("completionDate", "製造の完成予定日", o.hasSchedule ? o.completionDate || "" : "", 'type="date"', `空欄の場合は納期 ${escape(o.dueDate || "未定")} を使います。在庫補充分にも同じ完成予定日を適用します。`)}`;
+        html = `${inputField("orderQuantity", "実際の注文数量（丁）", o.quantity, `type="number" min="${o.shippedQuantity}" max="1000000" step="1" required`)}${inputField("stockQuantity", "在庫から出す累計数量（丁）", o.hasSchedule ? number(o.stockTargetQuantity) + number(o.shippedQuantity) : number(o.allocatedQuantity) + number(o.shippedQuantity), `type="number" min="${o.shippedQuantity}" max="${o.quantity}" step="1" required`, `在庫から出荷済 ${count(o.shippedQuantity)}丁。0にすると現在庫を使わず製造します。`)}<label class="field"><span>出荷方法</span><select name="shipmentMode"><option value="split" ${o.shipmentMode !== "together" ? "selected" : ""}>在庫分を先に出荷</option><option value="together" ${o.shipmentMode === "together" ? "selected" : ""}>不足分の完成後に一緒に出荷</option></select></label>${inputField("shipDate", "在庫分の出荷予定日", o.shipDate || "", 'type="date"', "未定の場合は空欄。在庫見込では未定分も先に差し引きます。")}${inputField("completionDate", "製造の完成予定日", o.completionDateOverride || "", 'type="date"', `空欄の場合は納期 ${escape(o.dueDate || "未定")} を使います。在庫補充分にも同じ完成予定日を適用します。`)}`;
       } else if (action === "reverse") {
         const entry = snapshot.history.find((e) => e.id === data.eventId);
-        html = `<div class="field"><span>取り消す記録</span><strong>${escape(date(entry?.date))} / ${escape(ACTIONS[entry?.action])} / ${escape(entry?.productId)} / ${count(entry?.quantity)}丁</strong><small>${escape(entry?.customer || entry?.lotNo || "")}</small></div>${dateField}`;
+        html = `<div class="field"><span>取り消す記録</span><strong>${escape(date(entry?.date))} / ${escape(ACTIONS[entry?.action])} / ${escape(nameFor(entry?.productId))} / ${count(entry?.quantity)}丁</strong><small>${escape(entry?.customer || entry?.lotNo || "")}</small></div>${dateField}`;
       } else {
         html = `${receipt ? `<p>${escape(nameFor(p.productId))}・在庫追加残 ${count(p.quantity)}丁</p>` : productField(data.productId)}${inputField("quantity", action === "ship" ? "出荷数量（丁）" : "追加する在庫数量（丁）", qty, `type="number" min="${action === "opening" ? 0 : 1}" step="1" inputmode="numeric" required ${receipt ? `max="${p.quantity}"` : ""}`)}${dateField}`;
         if (action === "ship") {
@@ -205,8 +259,9 @@
           html += `${inputField("lotNo", "ロット番号（任意）", "", 'maxlength="120"', "空欄の場合は自動採番します。")}${inputField("productionDate", "製造日", receipt ? today() : "", `type="date" max="${today()}" ${receipt ? "required" : ""}`)}${inputField("producers", "製造担当", receipt ? names(p?.producers) : "", `maxlength="240" ${receipt ? "required" : ""}`, receipt ? "複数の場合は「・」で区切って入力できます。" : "不明な場合は空欄にします。")}`;
         }
       }
-      html += `<label class="field"><span>${action === "reverse" ? "取消理由" : "備考・登録理由"}</span><textarea name="note" rows="2" maxlength="800" ${["opening", "reverse"].includes(action) ? "required" : ""}></textarea></label>`;
+      if (!noteProduct) html += `<label class="field"><span>${action === "reverse" ? "取消理由" : "備考・登録理由"}</span><textarea name="note" rows="2" maxlength="800" ${["opening", "reverse"].includes(action) ? "required" : ""}></textarea></label>`;
       q("#finished-stock-form-fields").innerHTML = html;
+      if (noteProduct) field("note").value = draft.originalNote;
       if (restored) {
         for (const [name, value] of Object.entries(restored.values)) if (field(name)) field(name).value = value;
         attempt = restored.attempt;
@@ -227,30 +282,40 @@
         if (data.orderJobId) data.jobVersion = draft.shipVersions[data.orderJobId];
         else delete data.orderJobId;
       }
-      const payload = attempt?.unconfirmed ? { ...attempt.payload } : { ...(draft.scheduleDefaults || {}), ...data, ...(draft.jobId ? { jobId: draft.jobId, jobVersion: draft.jobVersion } : {}), ...(draft.eventId ? { eventId: draft.eventId } : {}) };
+      const savingNote = draft.action === "note";
+      const payload = savingNote ? { productId: draft.productId, note: data.note, expectedRevision: draft.noteRevision }
+        : attempt?.unconfirmed ? { ...attempt.payload } : { ...(draft.action === "completion" ? { completionOnly: true } : {}), ...data, ...(draft.jobId ? { jobId: draft.jobId, jobVersion: draft.jobVersion } : {}), ...(draft.eventId ? { eventId: draft.eventId } : {}) };
       const fingerprint = JSON.stringify([draft.action, payload]);
       if (!attempt || attempt.fingerprint !== fingerprint) attempt = { fingerprint, payload: { ...payload }, requestId: root.crypto.randomUUID(), expectedVersion: snapshot.version };
-      payload.requestId = attempt.requestId; payload.expectedVersion = attempt.expectedVersion;
+      payload.requestId = attempt.requestId;
+      if (!savingNote) payload.expectedVersion = attempt.expectedVersion;
       pending = true; revision += 1; controls();
       const capturedClear = clearRevision;
-      status("#finished-stock-form-status", "記録しています…", "pending");
-      status("#finished-stock-status", "在庫の記録を反映しています…", "pending");
+      status("#finished-stock-form-status", savingNote ? "備考を保存しています…" : "記録しています…", "pending");
+      status("#finished-stock-status", savingNote ? "備考を保存しています…" : "在庫の記録を反映しています…", "pending");
       try {
         const result = await options.api[APIS[draft.action]](payload);
         if (!permitted() || capturedClear !== clearRevision) return;
         snapshot = result; dirty = false; overviewSignature = "";
         savedDrafts.delete(draftKey(draft));
-        close({ force: true, keepDraft: false }); draft = null; attempt = null;
-        status("#finished-stock-status", "在庫と履歴に反映しました。", "success");
+        status("#finished-stock-status", savingNote ? "備考を保存しました。" : "在庫と履歴に反映しました。", "success");
         paint();
-        options.onMutation?.();
+        if (savingNote) {
+          const selector = `[data-stock-action="note"][data-product-id="${root.CSS?.escape?.(payload.productId) ?? payload.productId}"]`;
+          options.setReturnFocus?.(dialog, panel?.querySelector(selector));
+        }
+        close({ force: true, keepDraft: false }); draft = null; attempt = null;
+        if (!savingNote) options.onMutation?.();
       } catch (error) {
         if (!permitted() || capturedClear !== clearRevision) return;
         // A validation rejection is known not to have written. A transport
         // failure must resolve the exact request before accepting another ship.
         attempt.unconfirmed = draft.action === "ship" && error?.code !== "FINISHED_STOCK_INVALID" && !String(error?.message || error).includes("FINISHED_STOCK_INVALID:");
-        status("#finished-stock-form-status", `記録を確認できませんでした。入力を保持しています。${attempt.unconfirmed ? "「前回の記録を確認する」で同じ出荷の結果を確認してください。" : ""}${errorMessage(error)}`, "error");
-        status("#finished-stock-status", "記録が未確認です。入力画面から再試行できます。", "error");
+        const detail = errorMessage(error);
+        attempt.noteConflict = savingNote && detail.includes("別の端末で製品の備考が更新");
+        const message = attempt.noteConflict ? "別の端末で備考が更新されました。必要な入力を控え、備考を開き直すと最新の内容を確認できます。" : `${savingNote ? "備考の保存" : "記録"}を確認できませんでした。入力を保持しています。${attempt.unconfirmed ? "「前回の記録を確認する」で同じ出荷の結果を確認してください。" : ""}${detail}`;
+        status("#finished-stock-form-status", message, "error");
+        status("#finished-stock-status", savingNote ? "備考の保存が未確認です。" : "記録が未確認です。入力画面から再試行できます。", "error");
         remember();
         // Refresh the inventory but retain the request id/version: a lost reply
         // must be retried verbatim so a committed event cannot be duplicated.
@@ -275,6 +340,7 @@
 
     function clear() {
       revision += 1; clearRevision += 1; snapshot = null; dirty = true; queued = false; draft = null; attempt = null; savedDrafts.clear(); overviewSignature = "";
+      paintedSnapshot = null; paintedDay = ""; paintSignature = "";
       close({ force: true, keepDraft: false });
       for (const id of ["rows", "order-rows", "issue-list", "plan-rows", "lot-rows", "history-rows", "form-fields"]) { const element = q(`#finished-stock-${id}`); if (element) element.replaceChildren(); }
       status("#finished-stock-status", ""); controls();
@@ -283,14 +349,14 @@
       if (bound || !panel || !dialog || !form) return;
       bound = true;
       q("#finished-stock-asof").value = (() => { const d = new Date(`${today()}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 30); return d.toISOString().slice(0, 10); })();
-      q("#finished-stock-product-filter").innerHTML = '<option value="all">すべて</option>' + (root.FinishedStock?.CATALOG || []).map((p) => `<option value="${escape(p.id)}">${escape(`${p.code} ${p.name}`)}</option>`).join("");
+      q("#finished-stock-product-filter").innerHTML = '<option value="all">すべて</option>';
       panel.addEventListener("click", (event) => {
         const el = event.target.closest("[data-stock-action]"); if (!el || el.disabled || !permitted()) return;
         const action = el.dataset.stockAction;
         if (action === "refresh") { void refresh(); return; }
         if (action === "job") { options.onJob?.(el.dataset.jobId); return; }
         if (action === "fulfill") {
-          pending = true; controls();
+          pending = true; revision += 1; controls();
           status("#finished-stock-status", "受注履行完了を記録しています…", "pending");
           Promise.resolve().then(() => options.onFulfill?.(el.dataset.jobId)).then(() => {
             status("#finished-stock-status", "受注履行完了を記録しました。", "success");
@@ -311,6 +377,12 @@
       dialog.addEventListener("click", (event) => { if (event.target === dialog) close(); });
       dialog.addEventListener("cancel", (event) => { event.preventDefault(); close(); });
       form.addEventListener("submit", submit);
+      root.addEventListener?.("beforeunload", (event) => {
+        if (dialog.open && draft?.action === "note" && field("note")?.value !== draft.originalNote) {
+          event.preventDefault();
+          event.returnValue = "";
+        }
+      });
       form.addEventListener("input", (event) => {
         if (draft?.action === "schedule" && event.target.name === "orderQuantity" && field("stockQuantity")) field("stockQuantity").max = field("orderQuantity").value;
       });
@@ -332,11 +404,15 @@
       bind();
       if (!permitted()) { clear(); return; }
       paint();
-      if (dirty && !reading && !pending) void refresh();
+      if (dirty && !pending) return refresh();
+      return reading?.promise;
     }
     function invalidate({ refresh: shouldRefresh = false, passive = false } = {}) {
       if (!permitted()) { clear(); return; }
-      if (passive && (reading || pending)) return;
+      if (passive) {
+        if (shouldRefresh && !reading && !pending) void refresh({ passive: true });
+        return;
+      }
       revision += 1; dirty = true; controls();
       if (shouldRefresh) void refresh();
     }

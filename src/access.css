@@ -81,7 +81,7 @@ form + form {
   font: inherit;
 }
 
-#code { max-width: 13rem; letter-spacing: 0.14em; font-variant-numeric: tabular-nums; }
+#code { font-variant-numeric: tabular-nums; }
 
 .access-field-row input:focus-visible, .button:focus-visible, .open-app:focus-visible {
   outline: 3px solid var(--color-focus);
@@ -132,7 +132,7 @@ form + form {
 
 @media (max-width: 34rem) {
   .access-field-row { flex-direction: column; }
-  .access-field-row input, #code { width: 100%; max-width: none; }
+  .access-field-row input { width: 100%; }
   .access-field-row .button { width: 100%; }
 }
 

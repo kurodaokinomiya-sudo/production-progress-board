@@ -20,6 +20,7 @@ try {
   const jobsBefore = await page.evaluate(() => JSON.parse(localStorage.getItem("production-board-demo-v2")).jobs.length);
   await page.locator("[data-action='open-import']").first().click();
   await page.locator("#import-text-tab").click();
+  await page.locator("#text-import-engine").selectOption("legacy");
   assert.equal(await page.locator("#text-import-engine").inputValue(), "legacy");
   assert.equal(await page.locator("#file-import-engine-field").isVisible(), false);
   await page.locator("#text-import-subject").fill("検証用の注文");

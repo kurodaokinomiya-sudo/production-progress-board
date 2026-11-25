@@ -126,7 +126,8 @@ test("approval learns only opt-in stable corrections and stores no quantity, dat
   const rule = h.learningRules()[0];
   assert.deepEqual([...rule.fields], ["category"]);
   assert.equal(rule.note, undefined);
-  const serialized = JSON.stringify(rule);
+  // The audit timestamp may legitimately fall on the order's due date.
+  const serialized = JSON.stringify(rule, (name, value) => name === "updatedAt" ? undefined : value);
   assert.equal(serialized.includes("SER-PRIVATE-777"), false);
   assert.equal(serialized.includes("2026-11-10"), false);
   assert.equal(serialized.includes('"quantity"'), false);
@@ -288,4 +289,44 @@ test("job save failure cannot create a learning rule", () => {
   assert.equal(h.learningRows().length, 1);
   assert.equal(h.calls.statusWrites, 0);
   assert.equal(h.context.readIntake_()[0].status, "pending");
+});
+
+test("unchanged approved readings establish a product memory only after job persistence", () => {
+  const h = harness(), parsed = baseParsed();
+  const candidate = h.addCandidate("confirmed-without-edit", parsed);
+  const result = approve(h, candidate, validOrder(parsed), { learnProduct: true });
+  assert.equal(result.errors.length, 0);
+  assert.equal(h.learningRules().length, 1);
+  assert.equal(h.learningRules()[0].confirmed, true);
+  assert.deepEqual([...h.learningRules()[0].fields], []);
+  assert.doesNotMatch(JSON.stringify(h.learningRules(), (name, value) => name === "updatedAt" ? undefined : value), /quantity|dueDate|serialNo|SER-PRIVATE|2026-11-10/);
+  assert.ok(h.writes.filter(write => write.sheet === h.context.APP.SHEETS.LEARNING && write.row > 1).every(write => write.locked));
+});
+
+test("unchanged memory storage failure is repaired once using the already saved authoritative job", () => {
+  const h = harness(), parsed = baseParsed();
+  const candidate = h.addCandidate("unchanged-memory-retry", parsed);
+  h.failNextLearningWrite();
+  const first = approve(h, candidate, validOrder(parsed), { learnProduct: true });
+  assert.equal(first.errors.length, 1);
+  assert.equal(h.learningRules().length, 0);
+  const result = approve(h, candidate, {}, { learnProduct: true });
+  assert.equal(result.errors.length, 0);
+  assert.equal(h.tables.get(h.context.APP.SHEETS.JOBS).length, 2);
+  assert.equal(h.learningRules().length, 1);
+  assert.equal(h.learningRules()[0].confirmed, true);
+  const writes = h.writes.length;
+  assert.equal(approve(h, candidate, {}, { learnProduct: true }).errors.length, 0);
+  assert.equal(h.writes.length, writes);
+});
+
+test("an unchanged older candidate cannot overwrite a newer confirmed product specification", () => {
+  const h = harness(), parsed = baseParsed();
+  const rule = h.context.IntakeLearning.remember({ rules: [], parsed, order: validOrder(parsed, { specLength: "21cm" }), intakeId: "newer-spec" }).rule;
+  h.context.withDocumentLock_(() => h.context.writeIntakeLearningRule_(rule));
+  const candidate = h.addCandidate("older-unchanged", parsed);
+  const result = approve(h, candidate, validOrder(parsed), { learnProduct: true });
+  assert.equal(result.errors.length, 0);
+  assert.equal(h.learningRules()[0].target.specLength, "21cm");
+  assert.equal(h.learningRules()[0].intakeId, "newer-spec");
 });

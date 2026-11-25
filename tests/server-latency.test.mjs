@@ -6,6 +6,7 @@ import vm from "node:vm";
 const sources = await Promise.all(["Config.gs", "Parser.gs", "Repository.gs", "Polishing.gs", "Code.gs"].map(
   name => readFile(new URL(`../apps-script/${name}`, import.meta.url), "utf8"),
 ));
+const productMasterSource = await readFile(new URL("../apps-script/ProductMaster.gs", import.meta.url), "utf8");
 const timestamp = "2026-10-15T00:00:00.000Z";
 
 function harness() {
@@ -62,8 +63,8 @@ function harness() {
     getSheetByName: sheet,
     insertSheet(name) { grids.set(name, []); return sheet(name); },
   };
-  const access = () => ({ role: state.role, isOwner: state.role === "owner", isAdmin: state.role === "owner",
-    canEdit: ["owner", "editor"].includes(state.role), canWork: ["owner", "editor", "worker"].includes(state.role) });
+  const access = () => ({ role: state.role, isOwner: state.role === "owner", isAdmin: ["owner", "admin"].includes(state.role),
+    canEdit: ["owner", "admin", "editor"].includes(state.role), canWork: ["owner", "admin", "editor", "worker"].includes(state.role) });
   const requireRole = key => {
     const context = access();
     if (state.role === "unauthenticated" || key && !context[key]) throw new Error("ACCESS_DENIED");
@@ -157,6 +158,190 @@ test("startup includes newly initialized defaults without rereading settings", (
   assert.equal(h.grids.get(h.app.SHEETS.SETTINGS).filter(row => row[0] === "syncIntervalSeconds").length, 1);
 });
 
+test("worker snapshots and save responses preserve ledger data with scoped polishing details", () => {
+  const h = harness();
+  vm.runInContext(productMasterSource, h.context);
+  const dispatchAt = "2026-10-17T15:00:00.000Z";
+  const polishing = { sentQuantity: 10, returnedQuantity: 4, history: [
+    { requestId: "sent-first", action: "send", quantity: 4, at: timestamp },
+    { requestId: "sent-last", action: "send", quantity: 6, at: dispatchAt, dateEdits: [
+      { requestId: "corrected", date: "2026-10-18", previousAt: "2026-10-18T15:00:00.000Z", at: "2026-10-20T00:00:00.000Z" },
+    ] },
+    { requestId: "returned-first", action: "return", quantity: 4, at: "2026-10-19T15:00:00.000Z" },
+    { requestId: "returned-second", action: "return", quantity: 1, at: "2026-10-19T15:00:00.000Z" },
+    { requestId: "undone", action: "undo-return", quantity: 1, at: "2026-10-20T00:00:00.000Z", returnRequestId: "returned-second" },
+  ] };
+  const job = h.job("ACTIVE", { polishing });
+  const ready = h.job("READY", { polishing: returnedPolishing() });
+  ready.stages.finish.status = "done";
+  h.seed([job, ready]);
+  const master = [{ productCode: job.productCode, customer: job.customer, product: job.product, material: "試験材料" }];
+  h.context.loadProductMaster_ = () => master;
+  const key = h.context.productMasterKey_(job, null, master);
+  const rates = JSON.stringify({ "2026-10": { A: 1200 } });
+  const rules = JSON.stringify({ [key]: { classCode: "自由設定", customRates: { 江部: 800, 嘉代: 2400 } } });
+  h.grids.get(h.app.SHEETS.SETTINGS).push(["polishingRates", rates], ["polishingProductRules", rules]);
+
+  function checkWorkerJob(response) {
+    assert.equal(response.productMaster.productCode, job.productCode);
+    assert.equal(response.productMaster.displayProduct, job.product);
+    assert.equal(response.productMaster.material, "試験材料");
+    assert.equal(Object.hasOwn(response.productMaster, "customRates"), false);
+    assert.equal(response.shippingStatus, job.shippingStatus);
+    assert.deepEqual(JSON.parse(JSON.stringify(response.polishing)), {
+      sentQuantity: 10, returnedQuantity: 4, history: [{ action: "send", at: dispatchAt }],
+    });
+  }
+
+  h.state.role = "worker";
+  for (const request of [undefined, { includeMaterials: true }, { scope: "jobs" }, { scope: "orders" }]) {
+    const snapshot = h.context.getSnapshot(request);
+    for (const key of ["polishingRates", "polishingProductRules"]) assert.equal(Object.hasOwn(snapshot.settings, key), false);
+    assert.equal(snapshot.settings.syncIntervalSeconds, "20");
+    checkWorkerJob(snapshot.jobs[0]);
+    assert.equal(snapshot.jobs[1].stages.finish.status, "done");
+    assert.equal(snapshot.jobs[1].polishing.sentQuantity, ready.quantity);
+    assert.equal(snapshot.jobs[1].polishing.returnedQuantity, ready.quantity);
+  }
+  const process = { id: job.id, version: job.version, requestId: "save-stage", stages: { welding: { status: "done", assignee: "豊" } } };
+  const edited = h.context.saveJobProcess(process);
+  checkWorkerJob(edited);
+  assert.equal(edited.stages.welding.status, "done");
+  h.reset();
+  const retried = h.context.saveJobProcess(process);
+  checkWorkerJob(retried);
+  assert.equal(retried.version, edited.version);
+  assert.equal(h.calls.writes.length, 0);
+  const assigned = h.context.setDistributionAssignee({ id: job.id, version: edited.version, assignee: "望" });
+  checkWorkerJob(assigned);
+  assert.equal(assigned.distributionAssignee, "望");
+  h.reset();
+  checkWorkerJob(h.context.setDistributionAssignee({ id: job.id, version: assigned.version, assignee: "望" }));
+  assert.equal(h.calls.writes.length, 0);
+
+  for (const role of ["viewer", "editor", "admin", "owner"]) {
+    h.state.role = role;
+    const snapshot = h.context.getSnapshot({ scope: "jobs" });
+    assert.equal(snapshot.settings.polishingRates, rates);
+    assert.equal(snapshot.settings.polishingProductRules, rules);
+    assert.deepEqual(JSON.parse(JSON.stringify(snapshot.jobs[0].polishing)), polishing);
+    assert.equal(snapshot.jobs[0].productMaster.customRates["江部"], 800);
+  }
+  h.state.role = "editor";
+  const editorEdit = h.context.saveJobProcess({ id: job.id, version: assigned.version, stages: { welding: { status: "working", assignee: "豊" } } });
+  assert.deepEqual(JSON.parse(JSON.stringify(editorEdit.polishing)), polishing);
+  assert.equal(editorEdit.productMaster.customRates["嘉代"], 2400);
+});
+
+test("ledger snapshots skip the material history and its lock while retaining live jobs and pending intake", () => {
+  const h = harness();
+  h.seed([h.job("A")]);
+  let materialReads = 0;
+  h.context.MaterialInventory = { normalizeState: () => ({}) };
+  h.context.materialInventorySnapshotUnlocked_ = (_access, jobs) => {
+    assert.equal(h.lock.held, true);
+    assert.equal(jobs[0].id, "A");
+    materialReads += 1;
+    return { materials: [], history: [] };
+  };
+  h.context.readIntake_ = options => {
+    assert.equal(options.pendingOnly, true);
+    return [{ id: "pending-1", status: "pending" }];
+  };
+  h.state.onLock = () => { throw new Error("ledger must not wait for the inventory lock"); };
+  const ledger = h.context.getSnapshot({ includeMaterials: false });
+  assert.equal(ledger.jobs[0].id, "A");
+  assert.equal(ledger.intake[0].id, "pending-1");
+  assert.equal(ledger.materialInventory, null);
+  assert.equal(materialReads, 0);
+  h.state.onLock = null;
+
+  for (const request of [{ includeMaterials: true }, {}]) {
+    const full = h.context.getSnapshot(request);
+    assert.ok(full.materialInventory);
+  }
+  assert.equal(materialReads, 2, "materials view and older clients retain the full read");
+  h.state.role = "worker";
+  assert.equal(h.context.getSnapshot({ includeMaterials: true }).intake.length, 0);
+  assert.equal(materialReads, 2, "request options never grant inventory permissions");
+  h.state.role = "unauthenticated";
+  assert.throws(() => h.context.getSnapshot({ includeMaterials: false }), /ACCESS_DENIED/);
+});
+
+test("orders scope prepares only the jobs and settings sheets and skips closed job parsing", () => {
+  const h = harness();
+  const shipping = h.job("READY", { polishing: returnedPolishing() });
+  shipping.stages.finish.status = "done";
+  h.seed([h.job("ACTIVE"), shipping, h.job("SHIPPED", { shippingStatus: "shipped" }), h.job("ARCHIVED", { archived: true })]);
+  const rows = h.grids.get(h.app.SHEETS.JOBS);
+  const polishingColumn = h.app.JOB_HEADERS.indexOf("polishingJson");
+  rows[3][polishingColumn] = rows[4][polishingColumn] = "invalid historical record";
+  rows[4][h.app.JOB_HEADERS.indexOf("archived")] = "TRUE";
+  h.properties.set(h.context.POLISHING_MIRROR_REPAIR_PROPERTY, "true");
+  h.state.onLock = () => { throw new Error("first paint must not acquire the document lock"); };
+  h.context.readIntake_ = h.context.getAiImportStatus = h.context.getAccessSettings = () => {
+    assert.fail("first paint must not fetch deferred resources");
+  };
+
+  const snapshot = h.context.getSnapshot({ scope: "orders", includeMaterials: true });
+  assert.deepEqual(Array.from(snapshot.jobs, job => job.id), ["ACTIVE", "READY"]);
+  assert.deepEqual(Array.from(h.calls.decorated[0]), ["ACTIVE", "READY"]);
+  assert.deepEqual(new Set(h.calls.reads.map(({ name }) => name)), new Set([h.app.SHEETS.JOBS, h.app.SHEETS.SETTINGS]));
+  assert.equal(h.dataReads(h.app.SHEETS.JOBS).length, 1);
+  assert.equal(h.properties.get(h.context.POLISHING_MIRROR_REPAIR_PROPERTY), "true");
+  assert.equal(snapshot.settings.syncIntervalSeconds, "20");
+  assert.equal(snapshot.materialInventory, null);
+  for (const field of ["intake", "aiImport", "accessSettings"]) assert.equal(Object.hasOwn(snapshot, field), false);
+});
+
+test("jobs scope includes historical jobs, retries polishing mirror repair, and only loads opted-in inventory", () => {
+  const h = harness();
+  h.seed([h.job("ACTIVE"), h.job("SHIPPED", { shippingStatus: "shipped" }), h.job("ARCHIVED", { archived: true })]);
+  h.properties.set(h.context.POLISHING_MIRROR_REPAIR_PROPERTY, "true");
+  h.context.readIntake_ = h.context.getAiImportStatus = h.context.getAccessSettings = () => {
+    assert.fail("job sync must not fetch deferred resources");
+  };
+  let materialReads = 0;
+  h.context.MaterialInventory = { normalizeState: () => ({}) };
+  h.context.materialInventorySnapshotUnlocked_ = (_access, jobs) => {
+    assert.equal(h.lock.held, true);
+    assert.equal(jobs.length, 3);
+    materialReads += 1;
+    return { materials: [] };
+  };
+
+  const snapshot = h.context.getSnapshot({ scope: "jobs", since: timestamp });
+  assert.deepEqual(Array.from(snapshot.jobs, job => job.id), ["ACTIVE", "SHIPPED", "ARCHIVED"]);
+  assert.equal(snapshot.requestedSince, timestamp);
+  assert.equal(h.properties.has(h.context.POLISHING_MIRROR_REPAIR_PROPERTY), false);
+  assert.equal(h.calls.reads.some(({ name }) => name === h.app.SHEETS.INTAKE), false);
+  assert.equal(materialReads, 0);
+  for (const field of ["intake", "aiImport", "accessSettings"]) assert.equal(Object.hasOwn(snapshot, field), false);
+
+  assert.ok(h.context.getSnapshot({ scope: "jobs", includeMaterials: true }).materialInventory);
+  assert.equal(materialReads, 1);
+  h.state.role = "worker";
+  assert.equal(h.context.getSnapshot({ scope: "jobs", includeMaterials: true }).materialInventory, null);
+  assert.equal(materialReads, 1);
+});
+
+test("deferred intake snapshot reads pending entries and AI status only for editors", () => {
+  const h = harness();
+  const row = (id, status) => h.app.INTAKE_HEADERS.map(field => ({ id, status })[field] || "");
+  h.grids.get(h.app.SHEETS.INTAKE).push(row("waiting", "pending"), row("done", "approved"));
+  h.context.getAiImportStatus = () => ({ configured: true, ready: true });
+  h.state.role = "editor";
+  const snapshot = h.context.getIntakeSnapshot();
+  assert.deepEqual(Array.from(snapshot.intake, item => item.id), ["waiting"]);
+  assert.equal(snapshot.aiImport.ready, true);
+  assert.deepEqual(new Set(h.calls.reads.map(({ name }) => name)), new Set([h.app.SHEETS.INTAKE]));
+
+  h.reset();
+  h.state.role = "worker";
+  assert.throws(() => h.context.getIntakeSnapshot(), /ACCESS_DENIED/);
+  assert.equal(h.calls.reads.length, 0);
+});
+
 test("process saves read canonical rows once under the lock and skip unrelated polishing rewrites", () => {
   const h = harness();
   const original = h.job("A", { polishing: returnedPolishing() });
@@ -235,6 +420,38 @@ test("archive skips an unrelated mirror but removes returned jobs and clears onl
   assert.equal(h.grids.get(h.app.SHEETS.POLISHING)[2][0], "");
   assert.deepEqual(h.calls.clears.map(({ row, height }) => ({ row, height })), [{ row: 3, height: 1 }]);
   assert.ok(h.calls.clears.every(call => call.locked));
+});
+
+test("editor archive paths use the polishing balance read after lock acquisition", () => {
+  for (const method of ["saveJob", "setJobArchived"]) {
+    const h = harness();
+    h.state.role = "editor";
+    const job = h.job("A", { polishing: returnedPolishing() });
+    h.seed([job]);
+    const before = h.context.readJobs_()[0];
+    const rows = h.grids.get(h.app.SHEETS.JOBS);
+    const polishingColumn = h.app.JOB_HEADERS.indexOf("polishingJson");
+    const open = { sentQuantity: 10, returnedQuantity: 0, history: [job.polishing.history[0]] };
+    h.state.onLock = () => { rows[1][polishingColumn] = JSON.stringify(open); };
+    h.reset();
+    assert.throws(() => h.context[method]({ ...before, archived: true }), /研磨から未返却/);
+    assert.ok(h.dataReads(h.app.SHEETS.JOBS).every(call => call.locked));
+    assert.equal(h.calls.writes.length, 0);
+    assert.equal(h.calls.logs.length, 0);
+    assert.equal(h.lock.held, false);
+    h.state.onLock = null;
+
+    const active = h.context.readJobs_()[0];
+    assert.equal(active.archived, false);
+    const unchanged = h.context.saveJob({ ...active, note: "納期を確認", archived: false });
+    assert.equal(unchanged.note, "納期を確認");
+    rows[1][polishingColumn] = JSON.stringify(job.polishing);
+    const archived = h.context[method]({ ...unchanged, archived: true });
+    assert.equal(archived.archived, true);
+    assert.equal(archived.polishing.returnedQuantity, job.quantity);
+    const restored = h.context.setJobArchived({ id: job.id, version: archived.version, archived: false });
+    assert.equal(restored.archived, false);
+  }
 });
 
 test("failed mirror writes preserve the previous readable rows and retain repair recovery", () => {
