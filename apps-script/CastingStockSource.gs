@@ -34,6 +34,7 @@ var CASTING_SOURCE_CATALOG_ = [
   { id: "gruewald", name: "グリワルト", raw: 100, processed: 5 },
   { id: "gruewald-lever", name: "グリワルトレバー", single: 50, asIs: true },
   { id: "small-forceps", name: "小小鉗子", raw: 100, processed: 5 },
+  { id: "legacy--5jUghc0ifJkDHKDawwaH7TodaDPNgDqKytiya8t474", name: "TAレバー", raw: null, processed: null },
   { id: "small-forceps-lever", name: "小小鉗子レバー", single: 50, asIs: true },
   { id: "meniscus-lever", name: "メニスカスレバー", single: 50, asIs: true },
   { id: "meniscus-ratchet", name: "メニスカスラチェット", single: 50, asIs: true },

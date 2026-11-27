@@ -10,9 +10,6 @@ const pairs = [
   ["color-ink-2", "color-surface", 4.5],
   ["color-neutral", "color-surface", 4.5],
   ["color-muted", "color-surface", 4.5],
-  ["color-ink", "color-row-hover", 4.5],
-  ["color-neutral", "color-row-hover", 4.5],
-  ["color-muted", "color-row-hover", 4.5],
   ["color-accent", "color-surface", 4.5],
   ["color-accent", "color-accent-soft", 4.5],
   ["color-accent-ink", "color-accent", 4.5],
@@ -29,11 +26,6 @@ const pairs = [
   ["color-focus-outer", "color-accent", 3],
   ["color-section-ink", "color-section-band", 4.5],
   ["color-working-ink", "color-working", 4.5],
-  ["color-ink", "color-row-alt", 4.5],
-  ["color-neutral", "color-row-alt", 4.5],
-  ["color-muted", "color-row-alt", 4.5],
-  ["color-success", "color-row-alt", 4.5],
-  ["color-danger", "color-row-alt", 4.5],
   ["color-label-ink", "color-label-paper", 4.5],
   ...Array.from({ length: 12 }, (_, index) => ["color-label-ink", `color-label-month-${String(index + 1).padStart(2, "0")}`, 4.5]),
   ["color-label-band-ink", "color-label-band", 4.5],
@@ -44,9 +36,6 @@ const pairs = [
   ["color-dark-ink-2", "color-dark-surface", 4.5],
   ["color-dark-neutral", "color-dark-surface", 4.5],
   ["color-dark-muted", "color-dark-surface", 4.5],
-  ["color-dark-ink", "color-dark-row-hover", 4.5],
-  ["color-dark-neutral", "color-dark-row-hover", 4.5],
-  ["color-dark-muted", "color-dark-row-hover", 4.5],
   ["color-dark-accent", "color-dark-surface", 4.5],
   ["color-dark-accent", "color-dark-accent-soft", 4.5],
   ["color-dark-accent-ink", "color-dark-accent", 4.5],
@@ -61,12 +50,19 @@ const pairs = [
   ["color-dark-focus-outer", "color-dark-accent", 3],
   ["color-dark-section-ink", "color-dark-section-band", 4.5],
   ["color-dark-working-ink", "color-dark-working", 4.5],
-  ["color-dark-ink", "color-dark-row-alt", 4.5],
-  ["color-dark-neutral", "color-dark-row-alt", 4.5],
-  ["color-dark-muted", "color-dark-row-alt", 4.5],
-  ["color-dark-success", "color-dark-row-alt", 4.5],
-  ["color-dark-danger", "color-dark-row-alt", 4.5],
 ];
+
+const themes = [
+  { prefix: "color-", stripeDistance: 0.035 },
+  { prefix: "color-dark-", stripeDistance: 0.055 },
+];
+const rowText = ["ink", "ink-2", "neutral", "muted", "accent", "success", "warning", "danger"];
+for (const { prefix } of themes) {
+  for (const background of ["row-alt", "row-hover"]) {
+    pairs.push(...rowText.map((foreground) => [prefix + foreground, prefix + background, 4.5]));
+    pairs.push([prefix + "focus", prefix + background, 3]);
+  }
+}
 
 function parseOklch(value) {
   const match = value.match(/oklch\(\s*([\d.]+)%?\s+([\d.]+)\s+([\d.]+)/i);
@@ -96,6 +92,16 @@ function ratio(foreground, background) {
   return (values[0] + 0.05) / (values[1] + 0.05);
 }
 
+function oklabDistance(first, second) {
+  const a = parseOklch(first);
+  const b = parseOklch(second);
+  return Math.hypot(
+    a.lightness - b.lightness,
+    a.chroma * Math.cos(a.hue) - b.chroma * Math.cos(b.hue),
+    a.chroma * Math.sin(a.hue) - b.chroma * Math.sin(b.hue)
+  );
+}
+
 let failed = false;
 for (const [foreground, background, minimum] of pairs) {
   const result = ratio(tokens[foreground], tokens[background]);
@@ -104,20 +110,19 @@ for (const [foreground, background, minimum] of pairs) {
   console.log(`${passed ? "PASS" : "FAIL"} ${foreground}/${background}: ${result.toFixed(2)} (min ${minimum})`);
 }
 
-// Project-specific OKLab distance guard: text can pass contrast while a hovered
-// row is still indistinguishable from the table's alternating stripe.
-for (const background of ["color-surface", "color-row-alt"]) {
-  const first = parseOklch(tokens["color-row-hover"]);
-  const second = parseOklch(tokens[background]);
-  const distance = Math.hypot(
-    first.lightness - second.lightness,
-    first.chroma * Math.cos(first.hue) - second.chroma * Math.cos(second.hue),
-    first.chroma * Math.sin(first.hue) - second.chroma * Math.sin(second.hue)
-  );
-  const minimum = 0.08;
-  const passed = distance >= minimum;
-  failed ||= !passed;
-  console.log(`${passed ? "PASS" : "FAIL"} light row highlight/${background}: OKLab distance ${distance.toFixed(3)} (project min ${minimum})`);
+// Project thresholds keep row states distinguishable independently of text contrast.
+for (const { prefix, stripeDistance } of themes) {
+  const rowPairs = [
+    ["row-alt", "surface", stripeDistance],
+    ["row-hover", "surface", 0.08],
+    ["row-hover", "row-alt", 0.08],
+  ];
+  for (const [first, second, minimum] of rowPairs) {
+    const distance = oklabDistance(tokens[prefix + first], tokens[prefix + second]);
+    const passed = distance >= minimum;
+    failed ||= !passed;
+    console.log(`${passed ? "PASS" : "FAIL"} ${prefix + first}/${prefix + second}: OKLab distance ${distance.toFixed(3)} (project min ${minimum})`);
+  }
 }
 
 if (failed) process.exitCode = 1;

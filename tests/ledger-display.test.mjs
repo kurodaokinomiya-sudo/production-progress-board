@@ -381,7 +381,7 @@ test("the production ledger omits shipping and finished-list tables retain their
 test("background refresh renders only the active view and switching sees current job data", () => {
   const { ui, context } = harness();
   const rendered = [];
-  for (const name of ["renderMetrics", "renderDashboardOrders", "renderOrdersWorkspace", "renderCompletedWorkspace", "renderDistributionWorkspace", "renderPolishingWorkspace", "renderIntake", "renderSettings"]) {
+  for (const name of ["renderMetrics", "renderDashboardCharts", "renderOrdersWorkspace", "renderCompletedWorkspace", "renderDistributionWorkspace", "renderPolishingWorkspace", "renderIntake", "renderSettings"]) {
     context[name] = () => rendered.push([name, ui.state.jobs[0]?.version]);
   }
   context.renderHeader = () => {};
@@ -398,7 +398,7 @@ test("background refresh renders only the active view and switching sees current
   assert.deepEqual(rendered.at(-1), ["renderCompletedWorkspace", 2]);
   ui.state.activeView = "dashboard";
   ui.renderActiveView();
-  assert.deepEqual(rendered.slice(-2), [["renderMetrics", 2], ["renderDashboardOrders", 2]]);
+  assert.deepEqual(rendered.slice(-2), [["renderMetrics", 2], ["renderDashboardCharts", 2]]);
 });
 
 test("rapid zoom events share one animation frame, accumulate wheel steps and measure overflow once", () => {

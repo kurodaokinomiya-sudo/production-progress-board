@@ -114,15 +114,13 @@ test("完成品リストに出荷待ちと出荷済みを表示し、出荷待�
 });
 
 test("仕様と5工程を省略せず、各工程から直接更新できる一覧を表示する", () => {
-  assert.match(sourceHtml, /<th>全長<\/th><th>型<\/th><th>刃幅<\/th>/);
+  for (const field of ["全長／製品番号", "型", "刃幅"]) assert.ok(script.includes(field));
   for (const field of ["specShape", "bladeWidth", "note"]) assert.ok(script.includes(`escapeHtml(job.${field} || "—")`));
   assert.match(script, /const length = ledgerLengthValue\(job\)/);
   assert.match(script, /class="cell-length" title="\$\{escapeHtml\(length\)\}"/);
   assert.match(script, /STAGES\.map\(\(stage\) => .*<td class="cell-stage">\$\{stageCellButton\(job, stage\)\}/);
   assert.match(script, /class="cell-polishing">\$\{polishingCell\(job, completed\)\}/);
   assert.match(script, /data-stage-key="\$\{stage.key\}"/);
-  assert.match(script, /class="order-specs"/);
-  assert.match(script, /class="order-stage-grid"/);
 });
 
 test("状況台帳は重複一覧を持たず、対象案件の一覧へ直接つながる", () => {
@@ -132,7 +130,8 @@ test("状況台帳は重複一覧を持たず、対象案件の一覧へ直接�
   assert.match(html, /data-action="show-shipping-orders"/);
   assert.match(html, /id="orders-attention-filter"/);
   assert.match(script, /showOrders\(\{ attention: "due" \}\)/);
-  assert.match(script, /allJobs\.length > jobs\.length/);
+  for (const chart of ["stages", "deadlines", "shipments"]) assert.ok(sourceHtml.includes(`id="dashboard-${chart}"`));
+  assert.doesNotMatch(sourceHtml, /id="dashboard-order-(rows|cards)"/);
   assert.doesNotMatch(html, /id="urgent-title"/);
   assert.doesNotMatch(script, /function renderUrgent/);
   assert.doesNotMatch(css, /\.urgent-panel|\.urgent-list|\.urgent-item/);
@@ -196,7 +195,6 @@ test("案件削除は物理削除せず、更新番号付きの非表示化と�
 });
 
 test("大分類・連番などをPCとタブレットで同じ操作から並び替えられる", () => {
-  assert.match(html, /id="dashboard-sort"/);
   assert.match(html, /id="orders-sort"/);
   assert.match(html, /id="completed-sort"/);
   assert.match(html, /<option value="category">大分類<\/option>/);

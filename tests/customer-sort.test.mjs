@@ -48,7 +48,7 @@ test("default customer order is Tanaka first, reverse natural order next, and st
 
 test("customer remains the default while shortcuts preserve user-selected sort hierarchy", () => {
   const { ui, element } = harness();
-  for (const scope of ["dashboard", "orders", "completed"]) assert.equal(ui.state.filters[scope].sort, "customer");
+  for (const scope of ["shipping", "orders", "completed"]) assert.equal(ui.state.filters[scope].sort, "customer");
   assert.equal(ui.state.distributionSort, "customer");
   Object.assign(ui.state.filters.orders, { sort: "productCode", sortDirection: "asc", sort2: "due", sort2Direction: "desc", sort3: "quantity", sort3Direction: "asc" });
   ui.showOrders({ attention: "shipping" });
@@ -59,7 +59,7 @@ test("customer remains the default while shortcuts preserve user-selected sort h
   ui.showCompleted("all");
   assert.deepEqual([ui.state.filters.completed.sort, ui.state.filters.completed.sortDirection, ui.state.filters.completed.sort2, ui.state.filters.completed.sort2Direction, ui.state.filters.completed.sort3, ui.state.filters.completed.sort3Direction], ["updated", "asc", "quantity", "desc", "due", "asc"]);
   assert.equal(element("#completed-sort").value, "updated");
-  for (const id of ["dashboard", "orders", "completed", "distribution"]) {
+  for (const id of ["shipping", "orders", "completed", "distribution"]) {
     const select = html.match(new RegExp(`<select id="${id}-sort">([\\s\\S]*?)</select>`))[1];
     assert.match(select, /^\s*<option value="customer" selected>/);
   }

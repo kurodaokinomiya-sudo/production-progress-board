@@ -102,7 +102,7 @@
         <div class="page-heading">
           <div>
             <p class="date-line" id="today-label">—</p>
-            <h1 id="dashboard-title">生産状況</h1>
+            <h1 id="dashboard-title">生産ダッシュボード</h1>
           </div>
         </div>
 
@@ -115,7 +115,7 @@
           <button class="summary-item summary-item-danger summary-item-action" type="button" data-action="show-due-orders" aria-label="納期注意の案件を見る">
             <div class="summary-icon"><svg aria-hidden="true"><use href="#icon-clock"></use></svg></div>
             <div><p>納期注意</p><strong id="metric-due">—</strong><span>件</span></div>
-            <small>期限超過～あと2日</small>
+            <small>製作中・期限超過～あと2日</small>
           </button>
           <button class="summary-item summary-item-success summary-item-action" type="button" data-action="show-current-completed" aria-label="今月完了した案件を見る">
             <div class="summary-icon"><svg aria-hidden="true"><use href="#icon-check"></use></svg></div>
@@ -134,58 +134,31 @@
           </button>
         </section>
 
-        <div class="dashboard-grid">
-          <section class="panel orders-panel" aria-labelledby="recent-title">
-            <div class="panel-heading panel-heading-controls">
-              <div class="panel-heading-copy">
-                <div><h2 id="recent-title">案件一覧</h2><p id="result-summary">—</p></div>
-                <button class="text-button" type="button" data-action="show-all-orders">未出荷案件をすべて見る</button>
+        <div class="production-charts">
+          <section class="panel production-chart" aria-labelledby="stage-chart-title">
+            <header class="chart-heading">
+              <h2 id="stage-chart-title">工程別の製作状況</h2>
+              <p>製作中の案件を現在工程ごとに集計</p>
+              <div class="chart-unit" role="group" aria-label="工程別グラフの単位">
+                <button type="button" data-action="set-stage-unit" data-unit="count" aria-pressed="true">件数</button>
+                <button type="button" data-action="set-stage-unit" data-unit="quantity" aria-pressed="false">丁数</button>
               </div>
-              <div class="filter-row">
-                <label class="search-field">
-                  <span class="filter-field-label">検索</span>
-                  <svg aria-hidden="true"><use href="#icon-search"></use></svg>
-                  <input id="dashboard-search" type="search" placeholder="得意先・品名・分類・連番・担当" autocomplete="off">
-                </label>
-                <label class="select-field">
-                  <span class="filter-field-label">工程</span>
-                  <select id="dashboard-stage-filter">
-                    <option value="all">すべての工程</option>
-                    <option value="welding">溶接</option>
-                    <option value="base">元作り</option>
-                    <option value="grinding">浮き止め～立ち上がり</option>
-                    <option value="heat">厚みとり</option>
-                    <option value="finish">仕上げ</option>
-                    <option value="shipping">出荷待ち</option>
-                  </select>
-                </label>
-                <label class="select-field sort-field">
-                  <span class="filter-field-label">並び順</span>
-                  <select id="dashboard-sort">
-                    <option value="customer" selected>得意先（逆順）</option>
-                    <option value="priority">優先・納期・残工程順</option>
-                    <option value="category">大分類</option>
-                    <option value="serial">連番</option>
-                    <option value="due">納期</option>
-                    <option value="updated">更新が新しい順</option>
-                  </select>
-                </label>
-              </div>
-            </div>
-            <div class="order-table-wrap">
-              <table class="order-table" aria-label="案件一覧">
-                <caption class="sr-only">並び順は一覧上部の選択欄で変更できます。</caption>
-                <thead><tr><th>得意先</th><th>品名</th><th>大分類</th><th>納期</th><th>数量</th><th>全長</th><th>型</th><th>刃幅</th><th>連番</th><th>溶接</th><th>元作り</th><th>浮き止め～立ち上がり</th><th>厚みとり</th><th>仕上げ</th><th>研磨</th><th>出荷</th><th>編集</th><th>備考</th></tr></thead>
-                <tbody id="dashboard-order-rows"></tbody>
-              </table>
-            </div>
-            <div class="order-card-list" id="dashboard-order-cards"></div>
-            <div class="empty-state" id="dashboard-empty" hidden>
-              <svg aria-hidden="true"><use href="#icon-search"></use></svg>
-              <h3>条件に合う案件がありません</h3>
-              <p>検索語か工程フィルターを変更してください。</p>
-              <button class="button button-secondary" type="button" data-action="clear-filters">絞り込みを解除</button>
-            </div>
+            </header>
+            <div id="dashboard-stages"></div>
+          </section>
+          <section class="panel production-chart" aria-labelledby="deadline-chart-title">
+            <header class="chart-heading">
+              <h2 id="deadline-chart-title">納期の内訳</h2>
+              <p>製作中と出荷待ちを合わせた未出荷案件</p>
+            </header>
+            <div id="dashboard-deadlines"></div>
+          </section>
+          <section class="panel production-chart shipment-chart" aria-labelledby="shipment-chart-title">
+            <header class="chart-heading">
+              <h2 id="shipment-chart-title">月別の出荷完了件数</h2>
+              <p>直近6か月・今月は今日まで。在庫からの受注履行を含む</p>
+            </header>
+            <div id="dashboard-shipments"></div>
           </section>
         </div>
       </section>
@@ -202,7 +175,7 @@
           <details class="ledger-filters"><summary>検索・絞り込み・並び順</summary>
           <div class="filter-row filter-row-wide">
             <label class="search-field"><span class="filter-field-label">検索</span><svg aria-hidden="true"><use href="#icon-search"></use></svg><input id="orders-search" type="search" placeholder="得意先・品名・分類・連番・担当" autocomplete="off"></label>
-            <label class="select-field"><span class="filter-field-label">工程</span><select id="orders-stage-filter"><option value="all">すべての工程</option><option value="welding">溶接</option><option value="base">元作り</option><option value="grinding">浮き止め～立ち上がり</option><option value="heat">厚みとり</option><option value="finish">仕上げ</option></select></label>
+            <label class="select-field"><span class="filter-field-label">工程</span><select id="orders-stage-filter"><option value="all">すべての工程</option><option value="welding">溶接</option><option value="base">元作り</option><option value="grinding">浮き止め～立ち上がり</option><option value="heat">厚みとり</option><option value="finish">仕上げ</option><option value="polishing">研磨中</option></select></label>
             <label class="select-field"><span class="filter-field-label">状況</span><select id="orders-attention-filter"><option value="all">すべての状況</option><option value="production">製作中</option><option value="due">納期注意</option></select></label>
             <fieldset class="workspace-sort"><legend>並び順（第1 → 第2 → 第3条件）</legend><div class="workspace-sort-grid">
               <div class="workspace-sort-level"><label class="select-field"><span class="filter-field-label">第1条件</span><select id="orders-sort"><option value="customer" selected>得意先</option><option value="product">品名</option><option value="productCode">製品番号</option><option value="serial">連番</option><option value="due">納期</option><option value="quantity">数量</option><option value="updated">更新日</option><option value="priority">優先・納期・残工程順</option><option value="category">大分類</option></select></label><label class="select-field"><span class="filter-field-label">向き</span><select id="orders-sort-direction" aria-label="第1条件の向き"><option value="asc">昇順</option><option value="desc" selected>降順</option></select></label></div>
@@ -300,16 +273,13 @@
           <h1 id="casting-stock-title">鋳物在庫</h1>
           <div class="material-actions">
             <button class="button button-secondary" type="button" data-casting-action="refresh">更新</button>
-            <button class="button button-secondary" type="button" data-casting-action="history" hidden>履歴</button>
+            <button class="button button-secondary" type="button" data-casting-action="history" hidden>全体の履歴</button>
             <button class="button button-primary" type="button" data-casting-action="start" hidden>HAKOBIで管理を開始</button>
           </div>
         </div>
         <p id="casting-stock-status" class="material-status" role="status" aria-live="polite"></p>
         <div id="casting-stock-content" hidden>
-          <div class="casting-source">
-            <p id="casting-stock-source-status"></p>
-            <a id="casting-stock-source-link" target="_blank" rel="noopener noreferrer" hidden>元の在庫表を開く<span class="sr-only">（別タブ）</span></a>
-          </div>
+          <p id="casting-stock-source-status" class="casting-source"></p>
           <div class="casting-filters" role="group" aria-label="鋳物在庫を絞り込む">
             <label class="field casting-search"><span>品目を検索</span><input type="search" name="castingSearch" id="casting-search" autocomplete="off" placeholder="ヘルニア、レバー…"></label>
             <label class="field" id="casting-status-filter" hidden><span>状態</span><select id="casting-filter" name="castingStatus" autocomplete="off"><option value="">すべて</option><option value="low">要発注・要補充</option><option value="ordered">入荷待ち</option><option value="unconfirmed">区分・数量の確認待ち</option></select></label>

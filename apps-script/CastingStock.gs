@@ -28,6 +28,12 @@ function getCastingInventory() {
   });
 }
 
+function getCastingInventoryHistory(partId) {
+  requireWorkerAccess_();
+  var ledger = readCastingLedger_();
+  return ledger ? CastingStock.historyForPart(ledger.seed, ledger.events, partId) : [];
+}
+
 function startCastingInventory(input) {
   requireOwnerAccess_();
   return withDocumentLock_(function () {

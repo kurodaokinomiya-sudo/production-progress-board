@@ -69,6 +69,7 @@ const state = {
   distributionEndMonth: "",
   distributionFilter: "all",
   distributionSort: "customer",
+  dashboardStageUnit: "count",
   distributionIncludeShipped: false,
   distributionAssigneeSettingsDirty: false,
   distributionAssigneeSettingsSaving: false,
@@ -100,7 +101,6 @@ const state = {
   ledgerDisplay: readStoredLedgerDisplay(),
   theme: readStoredTheme(),
   filters: {
-    dashboard: { query: "", stage: "all", sort: "customer" },
     orders: { query: "", stage: "all", attention: "all", ...readStoredJobSort("orders") },
     shipping: { query: "", stage: "all", ...readStoredJobSort("shipping") },
     completed: { query: "", stage: "all", period: "current", ...readStoredJobSort("completed") },
@@ -286,6 +286,7 @@ class AppsScriptApi {
   refreshProductMaster() { return this.call("refreshProductMaster"); }
   getMaterialInventory() { return this.call("getMaterialInventory"); }
   getCastingInventory() { return this.call("getCastingInventory"); }
+  getCastingInventoryHistory(partId) { return this.call("getCastingInventoryHistory", partId); }
   startCastingInventory(payload) { return this.call("startCastingInventory", payload); }
   saveCastingInventoryChange(payload) { return this.call("saveCastingInventoryChange", payload); }
   getFinishedStock() { return this.call("getFinishedStock"); }
@@ -446,6 +447,12 @@ class MockApi {
     const preview = CastingStock.project({ ...source, initializedAt: new Date().toISOString(), fixedStorageFrom: 0 }, []);
     return { ...preview, initialized: false, initializedAt: "", sourceRevision: source.sourceRevision,
       openingOrders: preview.orders, orders: [], revision: 0 };
+  }
+
+  async getCastingInventoryHistory(partId) {
+    if (!canWork() || state.accessRevoked) throw new Error("作業権限が必要です。");
+    const saved = this.read().castingInventory;
+    return saved ? CastingStock.historyForPart(this.castingLedgerSeed(saved), saved.events, partId) : [];
   }
 
   castingLedgerSeed({ seed, events }) {
@@ -1153,6 +1160,7 @@ function renderCastingStockWorkspace() {
     castingStockUi = CastingStockUI.create({
       api, today: todayIso, canEdit: () => canWork() && !state.accessRevoked,
       canStart: () => isOwnerUser() && !state.accessRevoked, openDialog, closeDialog,
+      activate: () => switchView("castingStock"), notify: showToast,
     });
   }
   castingStockUi.render();
@@ -1415,10 +1423,8 @@ function stageFilterLabel(stage) {
 }
 
 function updateStageFilterLabels() {
-  ["#dashboard-stage-filter", "#orders-stage-filter"].forEach((selector) => {
-    const option = qs(`${selector} option[value="heat"]`);
-    if (option) option.textContent = stageFilterLabel(STAGES.find((stage) => stage.key === "heat"));
-  });
+  const option = qs('#orders-stage-filter option[value="heat"]');
+  if (option) option.textContent = stageFilterLabel(STAGES.find((stage) => stage.key === "heat"));
 }
 
 function persistLedgerDisplay() {
@@ -1731,7 +1737,7 @@ function ledgerTotalsText(jobs) {
 }
 
 function openLedgerDetails(job) {
-  qs("#ledger-detail-title").textContent = productDisplayName(job);
+  qs("#ledger-detail-title").innerHTML = zurepinMarkup(productDisplayName(job));
   const values = [["得意先", job.customer], ["大分類", jobCategory(job)], ["納期", job.dueDate], ["数量", job.quantity], ["全長", job.specLength], ["型", job.specShape], ["刃幅", job.bladeWidth], ["連番", job.serialNo], ...STAGES.map((stage) => [stageForJob(stage, job).label, `${stageAssignee(job, stage.key) || "担当未定"}・${statusLabel(stageStatus(job, stage.key))}`]), ["出荷", job.shippingStatus === "shipped" ? "出荷完了" : "未出荷"], ["備考", job.note]];
   if (job.shippingStatus === "shipped") values.splice(values.length - 1, 0, ["出荷完了日時", shipmentDateLabel(job, true)]);
   qs("#ledger-detail-body").innerHTML = `<dl class="ledger-detail-fields">${values.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value ?? "") || "—"}</dd></div>`).join("")}</dl>${canWorkOnJob(job) ? `<button class="button button-primary" type="button" data-work-only data-action="open-process" data-order-id="${escapeHtml(job.id)}">工程と担当を編集</button>` : ""}`;
@@ -1861,6 +1867,23 @@ function matchesCompletedPeriod(job, period) {
   if (period === "undated") return !date;
   if (period === "current") return date.startsWith(todayIso().slice(0, 7));
   return /^\d{4}(?:-(0[1-9]|1[0-2]))?$/.test(period) && Boolean(date) && date.startsWith(period);
+}
+
+function dashboardShipments(jobs = state.jobs, today = todayIso()) {
+  const [year, month] = today.split("-").map(Number);
+  const groups = new Map();
+  for (let offset = -5; offset <= 0; offset += 1) {
+    const first = new Date(Date.UTC(year, month - 1 + offset, 1));
+    groups.set(first.toISOString().slice(0, 7), []);
+  }
+  for (const job of jobs) {
+    if (!matchesJobScope(job, "completed")) continue;
+    const date = shipmentDateKey(job);
+    if (date && date <= today) groups.get(date.slice(0, 7))?.push(job);
+  }
+  return Array.from(groups, ([key, group]) => ({
+    key, label: `${Number(key.slice(5))}月`, ...ledgerTotals(group),
+  }));
 }
 
 function renderCompletedPeriods() {
@@ -2230,10 +2253,6 @@ function showToast(message, options = {}) {
   }
 }
 
-function renderSkeletons() {
-  qs("#dashboard-order-cards").innerHTML = `<div class="skeleton"></div><div class="skeleton"></div>`;
-}
-
 function updateAutoSyncTimer() {
   if (!autoSyncStarted) return;
   const value = state.settings?.syncIntervalSeconds;
@@ -2499,7 +2518,7 @@ function renderActiveView() {
   if (state.mode === "loading") return;
   if (renderViewDataNotice()) return;
   const renderers = {
-    dashboard() { renderMetrics(); renderDashboardOrders(); },
+    dashboard() { renderMetrics(); renderDashboardCharts(); },
     orders: renderOrdersWorkspace,
     shipping: renderFinishedWorkspace,
     completed: renderFinishedWorkspace,
@@ -3007,7 +3026,7 @@ function renderPolishingWorkspace() {
       const draft = state.polishingSelection.get(job.id);
       const busy = state.polishingSaving.has(job.id) || pendingProcessSaves.has(job.id);
       const changed = draft && draft.version !== Number(job.version);
-      return `<tr data-polishing-row="${escapeHtml(job.id)}" aria-busy="${busy}"><td>${canEdit() && counts.outstanding ? `<input type="checkbox" data-polishing-select-id="${escapeHtml(job.id)}" aria-label="${escapeHtml(productDisplayName(job))}・${escapeHtml(job.serialNo || job.id)}の戻りを選択" ${draft ? "checked" : ""} ${busy ? "disabled" : ""}>` : ""}</td><td>${escapeHtml(job.customer)}</td><td><strong>${escapeHtml(productDisplayName(job))}</strong><small>製品番号 ${escapeHtml(job.productMaster?.productCode || job.productCode || "未登録")}</small><small>${escapeHtml(job.serialNo || "連番未設定")}</small>${job.shippingStatus === "shipped" ? "<small>出荷完了</small>" : ""}</td><td class="polishing-class-cell">${polishingClassControl(job, busy)}</td><td>${escapeHtml(formatDate(job.dueDate))}</td><td class="polishing-date-cell">${polishingSentDateMarkup(job)}</td><td>${orderQuantity(job)}</td><td><strong class="polishing-outstanding">${counts.outstanding}</strong></td><td>${counts.returned}</td><td>${draft ? `<strong>${counts.outstanding}丁</strong>${changed ? '<small class="polishing-error">更新あり・選択し直す</small>' : ""}` : "—"}</td><td>${counts.returned && canEdit() && job.shippingStatus !== "shipped" ? `<button class="button button-quiet polishing-finish-button" type="button" data-action="open-process" data-order-id="${escapeHtml(job.id)}" data-stage-key="finish" ${busy ? "disabled" : ""}>${polishingFinishLabel(job)}</button>` : polishingFinishLabel(job)}</td><td>${polishingHistoryMarkup(job, busy)}</td></tr>`;
+      return `<tr data-polishing-row="${escapeHtml(job.id)}" aria-busy="${busy}"><td>${canEdit() && counts.outstanding ? `<input type="checkbox" data-polishing-select-id="${escapeHtml(job.id)}" aria-label="${escapeHtml(productDisplayName(job))}・${escapeHtml(job.serialNo || job.id)}の戻りを選択" ${draft ? "checked" : ""} ${busy ? "disabled" : ""}>` : ""}</td><td>${escapeHtml(job.customer)}</td><td><strong>${zurepinMarkup(productDisplayName(job))}</strong><small>製品番号 ${escapeHtml(job.productMaster?.productCode || job.productCode || "未登録")}</small><small>${escapeHtml(job.serialNo || "連番未設定")}</small>${job.shippingStatus === "shipped" ? "<small>出荷完了</small>" : ""}</td><td class="polishing-class-cell">${polishingClassControl(job, busy)}</td><td>${escapeHtml(formatDate(job.dueDate))}</td><td class="polishing-date-cell">${polishingSentDateMarkup(job)}</td><td>${orderQuantity(job)}</td><td><strong class="polishing-outstanding">${counts.outstanding}</strong></td><td>${counts.returned}</td><td>${draft ? `<strong>${counts.outstanding}丁</strong>${changed ? '<small class="polishing-error">更新あり・選択し直す</small>' : ""}` : "—"}</td><td>${counts.returned && canEdit() && job.shippingStatus !== "shipped" ? `<button class="button button-quiet polishing-finish-button" type="button" data-action="open-process" data-order-id="${escapeHtml(job.id)}" data-stage-key="finish" ${busy ? "disabled" : ""}>${polishingFinishLabel(job)}</button>` : polishingFinishLabel(job)}</td><td>${polishingHistoryMarkup(job, busy)}</td></tr>`;
     }).join("")}</tbody></table></div>` : '<div class="empty-state"><h3>対象の製品はありません</h3></div>';
     const selectAll = qs("#polishing-select-all");
     if (selectAll) selectAll.indeterminate = selectedVisible > 0 && selectedVisible < selectable.length;
@@ -3085,7 +3104,7 @@ function openPolishingDialog(id, action = "send", eventRequestId = "") {
   qs("#polishing-dialog-kicker").textContent = editingDate ? "研磨履歴の日付訂正" : action === "send" ? "研磨屋へ発送" : "研磨への発送取り消し";
   qs("#polishing-action-summary").textContent = editingDate ? `${polishingEventDateLabel(entry)}の${entry.action === "return" ? "戻り" : "発送"} ${entry.quantity}丁の日付を変更します。${entry.action === "return" ? "月別の研磨代にも反映されます。" : ""}` : action === "send" ? "未発送分をすべて研磨に出します。" : "研磨屋にある全数の発送を取り消します。";
   qs("#polishing-submit-button").textContent = title;
-  qs("#polishing-product").textContent = `${productDisplayName(job)} · ${job.customer} · ${job.serialNo || "連番未設定"}`;
+  qs("#polishing-product").innerHTML = `${zurepinMarkup(productDisplayName(job))} · ${escapeHtml(job.customer)} · ${escapeHtml(job.serialNo || "連番未設定")}`;
   qs("#polishing-job-summary").textContent = `全数 ${job.quantity}丁 · 研磨屋 ${counts.outstanding}丁 · 戻り ${counts.returned}丁`;
   qs("#polishing-dialog-status").hidden = true;
   qsa("input, button", form).forEach((control) => { control.disabled = false; });
@@ -3355,7 +3374,7 @@ function renderDistributionWorkspace() {
       const current = job.distributionAssignee || "";
       return `<tr data-distribution-row="${escapeHtml(job.id)}" aria-busy="${saving}" tabindex="-1">
         <td class="distribution-customer" data-column="得意先">${escapeHtml(job.customer || "—")}</td>
-        <td class="distribution-product" data-column="製品名"><strong>${escapeHtml(productDisplayName(job))}</strong>${job.shippingStatus === "shipped" ? "<small>出荷完了</small>" : ""}</td>
+        <td class="distribution-product" data-column="製品名"><strong>${zurepinMarkup(productDisplayName(job))}</strong>${job.shippingStatus === "shipped" ? "<small>出荷完了</small>" : ""}</td>
         <td class="distribution-serial" data-column="連番">${escapeHtml(job.serialNo || "—")}</td>
         <td data-column="納期">${escapeHtml(formatDate(job.dueDate))}</td>
         <td data-column="数量">${escapeHtml(job.quantity === "" || job.quantity == null ? "—" : String(job.quantity))}</td>
@@ -3527,6 +3546,53 @@ function renderIntakeBadge() {
   count.hidden = pending === 0;
 }
 
+function dashboardDeadlineKey(dueDate, today, weekEnd) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) return "undated";
+  const date = new Date(`${dueDate}T00:00:00Z`);
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== dueDate) return "undated";
+  if (dueDate < today) return "overdue";
+  if (dueDate === today) return "today";
+  return dueDate <= weekEnd ? "week" : "later";
+}
+
+function dashboardMetrics(jobs = state.jobs, today = todayIso()) {
+  const stages = [
+    ...STAGES.map((stage) => ({ key: stage.key, label: stage.key === "finish" ? "仕上げ・最終仕上げ" : stageFilterLabel(stage) })),
+    { key: "polishing", label: "研磨中" },
+  ];
+  const deadlines = [
+    { key: "overdue", label: "納期超過" },
+    { key: "today", label: "本日" },
+    { key: "week", label: "明日〜7日後" },
+    { key: "later", label: "8日後以降" },
+    { key: "undated", label: "納期未設定" },
+  ];
+  const weekEndDate = new Date(`${today}T00:00:00Z`);
+  weekEndDate.setUTCDate(weekEndDate.getUTCDate() + 7);
+  const weekEnd = weekEndDate.toISOString().slice(0, 10);
+  const stageJobs = new Map(stages.map(({ key }) => [key, []]));
+  const dueJobs = new Map(deadlines.map(({ key }) => [key, []]));
+  const pending = jobs.filter((job) => matchesJobScope(job, "dashboard"));
+  const active = [];
+  const shipping = [];
+  for (const job of pending) {
+    dueJobs.get(dashboardDeadlineKey(job.dueDate, today, weekEnd)).push(job);
+    const stage = currentStage(job);
+    if (stage.key === "shipping") shipping.push(job);
+    else {
+      active.push(job);
+      stageJobs.get(stage.key).push(job);
+    }
+  }
+  return {
+    active: ledgerTotals(active),
+    shipping: ledgerTotals(shipping),
+    pending: ledgerTotals(pending),
+    stages: stages.map((stage) => ({ ...stage, ...ledgerTotals(stageJobs.get(stage.key)) })),
+    deadlines: deadlines.map((bucket) => ({ ...bucket, ...ledgerTotals(dueJobs.get(bucket.key)) })),
+  };
+}
+
 function renderMetrics() {
   const pending = pendingJobs();
   const active = pending.filter((job) => !isDone(job));
@@ -3583,7 +3649,9 @@ function orderTableRows(jobs, options = {}) {
     const due = dueInfo(job);
     const length = ledgerLengthValue(job);
     const shippedSummary = completed && progressOnly ? `<small class="ledger-shipped-date" title="${escapeHtml(shipmentDateLabel(job, true))}">出荷 ${escapeHtml(shipmentDateLabel(job))}</small>` : "";
-    const product = `<td class="cell-product"><button class="ledger-product" type="button" data-action="view-order" data-order-id="${escapeHtml(job.id)}" title="${escapeHtml(productDisplayName(job))}" aria-label="${escapeHtml(productDisplayName(job))}の詳細を表示">${escapeHtml(productDisplayName(job))}</button>${shippedSummary}</td>`;
+    const name = productDisplayName(job);
+    const escapedName = escapeHtml(name);
+    const product = `<td class="cell-product"><button class="ledger-product" type="button" data-action="view-order" data-order-id="${escapeHtml(job.id)}" title="${escapedName}" aria-label="${escapedName}の詳細を表示">${zurepinMarkup(name)}</button>${shippedSummary}</td>`;
     const serial = `<td class="cell-serial" title="${escapeHtml(job.serialNo || "—")}">${escapeHtml(job.serialNo || "—")}</td>`;
     const shippedDate = completed ? `<td class="cell-completed-date" title="${escapeHtml(shipmentDateLabel(job, true))}">${shipmentDateKey(job) ? `<time datetime="${escapeHtml(job.completedAt)}">${escapeHtml(shipmentDateLabel(job))}</time>` : "未記録"}</td>` : "";
     const scrollSpace = ledger ? '<td class="ledger-scroll-space" aria-hidden="true"></td>' : "";
@@ -3604,25 +3672,9 @@ function orderTableRows(jobs, options = {}) {
       <td class="cell-polishing">${polishingCell(job, completed)}</td>
       ${shippingAction}
       ${compact ? "" : `<td class="cell-edit">${canEdit() ? `<button class="row-action" type="button" data-action="edit-order" data-order-id="${escapeHtml(job.id)}" aria-label="${escapeHtml(job.product || "案件")}の注文情報を編集">${icon("edit")}</button>` : ""}</td>
-      <td class="cell-note" title="${escapeHtml(job.note || "—")}"><button class="ledger-note" type="button" data-action="view-order" data-order-id="${escapeHtml(job.id)}" aria-label="${escapeHtml(productDisplayName(job))}の備考と詳細を表示">${escapeHtml(job.note || "—")}</button></td>`}
+      <td class="cell-note" title="${escapeHtml(job.note || "—")}"><button class="ledger-note" type="button" data-action="view-order" data-order-id="${escapeHtml(job.id)}" aria-label="${escapedName}の備考と詳細を表示">${escapeHtml(job.note || "—")}</button></td>`}
       ${scrollSpace}
     </tr>`;
-  }).join("");
-}
-
-function orderCards(jobs, { completed = false } = {}) {
-  return jobs.map((job) => {
-    const due = dueInfo(job);
-    const category = jobCategory(job);
-    return `<article class="order-card" data-order-id="${escapeHtml(job.id)}">
-      <span class="order-main"><span class="order-copy"><strong>${escapeHtml(productDisplayName(job))}</strong><span>${escapeHtml(job.customer || "得意先未設定")}</span></span><span class="status-chip" data-tone="${due.tone}">${escapeHtml(due.label)}</span></span>
-      <span class="order-meta"><span class="category-chip" data-category="${escapeHtml(category || "unclassified")}">${escapeHtml(category || "未分類")}</span><span>連番 ${escapeHtml(job.serialNo || "—")}</span></span>
-      <dl class="order-specs">${[["数量", orderQuantity(job)], ["全長／製品番号", escapeHtml(ledgerLengthValue(job))], ["型", escapeHtml(job.specShape || "—")], ["刃幅", escapeHtml(job.bladeWidth || "—")], ["納期", escapeHtml(job.dueDate ? formatDate(job.dueDate) : "—")]].map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`).join("")}</dl>
-      <div class="order-stage-grid">${STAGES.map((stage) => `<div><span class="stage-column-label">${stageForJob(stage, job).label}</span>${stageCellButton(job, stage)}</div>`).join("")}</div>
-      <div class="order-polishing-line"><span>研磨</span>${polishingCell(job, completed)}</div>
-      ${job.note ? `<p class="order-note"><span>備考</span> ${escapeHtml(job.note)}</p>` : ""}
-      <div class="order-card-actions">${shippingCell(job, completed)}${canEdit() ? `<button class="row-action" type="button" data-action="edit-order" data-order-id="${escapeHtml(job.id)}" aria-label="${escapeHtml(job.product || "案件")}の注文情報を編集">${icon("edit")}</button>` : ""}</div>
-    </article>`;
   }).join("");
 }
 
@@ -3672,16 +3724,49 @@ function renderWorkspaceSortControls(scope) {
   });
 }
 
-function renderDashboardOrders() {
-  updateStageFilterLabels();
-  const allJobs = sortedJobs("dashboard");
-  const jobs = allJobs.slice(0, 8);
-  qs("#dashboard-order-rows").closest("table").innerHTML = `${orderTableHeader()}<tbody id="dashboard-order-rows">${orderTableRows(jobs)}</tbody>`;
-  qs("#dashboard-order-cards").innerHTML = orderCards(jobs);
-  qs("#dashboard-empty").hidden = jobs.length > 0;
-  const prefix = state.filters.dashboard.sort === "priority" ? "優先" : "先頭";
-  qs("#result-summary").textContent = allJobs.length > jobs.length ? `${prefix}${jobs.length}件／全${allJobs.length}件` : `${allJobs.length}件を表示`;
-  renderSortState(qs("#dashboard-order-rows").closest("table"), "dashboard");
+function renderStageChart({ stages, active }) {
+  const byQuantity = state.dashboardStageUnit === "quantity";
+  const unit = byQuantity ? "丁" : "件";
+  const value = (stage) => stage[state.dashboardStageUnit];
+  const maximum = Math.max(1, ...stages.map(value));
+  const container = qs("#dashboard-stages");
+  const focusedStage = container.contains(document.activeElement) && document.activeElement.dataset.stageKey;
+  const bars = stages.map((stage) => {
+    const amount = value(stage).toLocaleString("ja-JP");
+    const missing = byQuantity && stage.unknownQuantity ? `（数量未設定${stage.unknownQuantity}件）` : "";
+    return `<li><button type="button" class="stage-chart-row" data-action="show-stage-orders" data-stage-key="${stage.key}" aria-label="${stage.label} ${amount}${unit}${missing}の案件を見る">
+      <span class="stage-chart-label">${stage.label}</span>
+      <span class="stage-track" aria-hidden="true"><i style="width:${value(stage) / maximum * 100}%"></i></span>
+      <span class="stage-chart-value">${amount}<small>${unit}</small></span>${icon("chevron")}
+      ${missing ? `<small class="stage-missing">${missing}</small>` : ""}
+    </button></li>`;
+  }).join("");
+  container.innerHTML = active.count ? `<ul class="stage-bars">${bars}</ul>` : '<p class="chart-empty">現在、製作中の案件はありません。</p>';
+  if (focusedStage) container.querySelector(`[data-stage-key="${focusedStage}"]`)?.focus({ preventScroll: true });
+}
+
+function renderDashboardCharts() {
+  const metrics = dashboardMetrics();
+  renderStageChart(metrics);
+  const { deadlines, pending } = metrics;
+  let position = 0;
+  const segments = deadlines.filter((row) => row.count).map((row) => {
+    const start = position;
+    position += row.count / pending.count * 100;
+    return `var(--due-${row.key}) ${start}% ${position}%`;
+  });
+  const ringStyle = segments.length ? `style="background:conic-gradient(${segments.join(",")})"` : "";
+  qs("#dashboard-deadlines").innerHTML = `<div class="deadline-chart-body">
+    <div class="deadline-ring" ${ringStyle} aria-hidden="true"><div><strong>${pending.count.toLocaleString("ja-JP")}</strong><span>未出荷件数</span></div></div>
+    <dl class="deadline-legend" aria-label="未出荷${pending.count}件の納期内訳">${deadlines.map((row) => `<div><dt><i style="background:var(--due-${row.key})" aria-hidden="true"></i>${row.label}</dt><dd>${row.count.toLocaleString("ja-JP")}<small>件</small></dd></div>`).join("")}</dl>
+  </div>`;
+  const months = dashboardShipments();
+  const maximum = Math.max(1, ...months.map((month) => month.count));
+  qs("#dashboard-shipments").innerHTML = `<ol class="shipment-columns">${months.map((month) => `<li>
+    <span class="shipment-month"><time datetime="${month.key}">${month.label}</time></span>
+    <span class="shipment-plot"><span class="shipment-value">${month.count.toLocaleString("ja-JP")}<small>件</small></span>
+    <i style="height:${month.count / maximum * 100}%" aria-hidden="true"></i></span>
+  </li>`).join("")}</ol>`;
 }
 
 function ledgerFilterSummary(scope, visibleCount) {
@@ -3691,7 +3776,8 @@ function ledgerFilterSummary(scope, visibleCount) {
   if (query) conditions.push(`検索「${query}」`);
   if (filters.stage && filters.stage !== "all") {
     const stage = STAGES.find((item) => item.key === filters.stage);
-    conditions.push(`工程：${stage ? stageFilterLabel(stage) : filters.stage === "shipping" ? "出荷待ち" : filters.stage}`);
+    const extraLabels = { polishing: "研磨中", shipping: "出荷待ち" };
+    conditions.push(`工程：${stage ? stageFilterLabel(stage) : extraLabels[filters.stage] || filters.stage}`);
   }
   if (filters.attention && filters.attention !== "all") {
     const labels = { production: "製作中", due: "納期注意", shipping: "出荷待ち" };
@@ -3732,7 +3818,7 @@ function clearWorkspaceFilters(scope) {
     const control = qs(selector);
     if (control) control.value = filters[key];
   });
-  ({ dashboard: renderDashboardOrders, orders: renderOrdersWorkspace, shipping: renderShippingWorkspace, completed: renderCompletedWorkspace })[scope]?.();
+  ({ orders: renderOrdersWorkspace, shipping: renderShippingWorkspace, completed: renderCompletedWorkspace })[scope]?.();
   announce("絞り込みを解除しました");
 }
 
@@ -3839,6 +3925,14 @@ function productLabelKeywords(value) {
   return PRODUCT_LABEL_KEYWORDS.filter((keyword) => text.includes(keyword.normalize("NFKC")));
 }
 
+function zurepinMarkup(text) {
+  return escapeHtml(text).replaceAll("ズレピン", '<span class="material-zurepin">ズレピン</span>');
+}
+
+function updateMaterialLabelColor(input) {
+  input.classList.toggle("material-zurepin", normalizeProductText(input.value) === "ズレピン");
+}
+
 function labelTitle(job) {
   const product = productDisplayName(job);
   const shape = normalizeProductText(job.specShape);
@@ -3883,7 +3977,7 @@ function productLabelMarkup(job) {
     ["納期", formatLabelDate(job.dueDate), "is-due"],
   ];
   return `<article class="product-label" data-label-month="${dueMonth}" aria-label="${escapeHtml(`${customer} ${title}の製品ラベル`)}">
-    <div class="label-primary-row"><strong class="label-customer ${labelTextSizeClass(customer)}">${escapeHtml(customer)}</strong><strong class="label-product-name" style="--label-text-width-em: ${titleLength}"><span>${escapeHtml(title)}</span></strong></div>
+    <div class="label-primary-row"><strong class="label-customer ${labelTextSizeClass(customer)}">${escapeHtml(customer)}</strong><strong class="label-product-name" style="--label-text-width-em: ${titleLength}"><span>${zurepinMarkup(title)}</span></strong></div>
     <div class="label-spec-grid">${specs.map(([name, value, tone = ""]) => `<div class="label-spec-cell ${tone}"><span class="label-spec-name">${name}</span><strong class="label-spec-value">${escapeHtml(value)}</strong></div>`).join("")}</div>
   </article>`;
 }
@@ -3909,7 +4003,7 @@ function renderLabelJobList() {
     const printedNote = printStatus.status === "printed" && job.labelPrintedAt ? ` · ${formatDateTime(job.labelPrintedAt)}` : "";
     return `<label class="label-job-option ${selected ? "is-selected" : ""} ${disabled ? "is-disabled" : ""}">
       <input type="checkbox" data-label-job-id="${escapeHtml(job.id)}" ${selected ? "checked" : ""} ${disabled ? "disabled" : ""} aria-label="${escapeHtml(`${job.customer || "得意先未設定"} ${job.product || "品名未設定"}を印刷${disabledText}`)}">
-      <span class="label-job-copy"><span class="label-job-title"><strong>${escapeHtml(productDisplayName(job))}</strong><span class="status-chip label-status-chip" data-tone="${printStatus.tone}">${printStatus.label}</span></span><span>${escapeHtml(job.customer || "得意先未設定")} · ${escapeHtml(job.serialNo || "連番未設定")} · 納期 ${escapeHtml(formatDate(job.dueDate))}${escapeHtml(printedNote)}</span></span>
+      <span class="label-job-copy"><span class="label-job-title"><strong>${zurepinMarkup(productDisplayName(job))}</strong><span class="status-chip label-status-chip" data-tone="${printStatus.tone}">${printStatus.label}</span></span><span>${escapeHtml(job.customer || "得意先未設定")} · ${escapeHtml(job.serialNo || "連番未設定")} · 納期 ${escapeHtml(formatDate(job.dueDate))}${escapeHtml(printedNote)}</span></span>
     </label>`;
   }).join("");
 }
@@ -4520,6 +4614,7 @@ function savePendingDialogEdits() {
   const target = pendingDiscardDialog;
   if (!target?.open) return;
   let form;
+  let submitter;
   if (target.id === "process-dialog") {
     form = qs("#process-form");
     if (!canWork() || pendingProcessSaves.has(form.elements.id.value)) return;
@@ -4528,12 +4623,13 @@ function savePendingDialogEdits() {
     if (!canEdit() || jobMutationPending(form.elements.id.value)) return;
   } else if (target.id === "casting-stock-dialog") {
     form = qs("#casting-stock-form");
-    if (!canWork() || castingStockUi?.isSaving()) return;
+    if (!canWork()) return;
+    submitter = qs("#casting-submit");
   } else return;
   const warning = qs("#discard-dialog");
   warning._returnFocus = null;
   closeDialog(warning, { force: true });
-  form.requestSubmit();
+  form.requestSubmit(submitter);
 }
 
 function closeDialog(dialog, { force = false } = {}) {
@@ -4542,7 +4638,6 @@ function closeDialog(dialog, { force = false } = {}) {
     else finishedStockUi?.close();
     return;
   }
-  if (!force && dialog.id === "casting-stock-dialog" && castingStockUi?.isSaving()) return;
   if (!force && dialog.id === "order-dialog" && pendingJobMutations.has(qs("#order-form").elements.id.value)) return;
   if (dialog.id === "bulk-intake-dialog" && bulkIntakeBusy) return;
   if (dialog.id === "intake-dialog" && (intakeDeleteBusy || intakeApproveBusy)) return;
@@ -4988,6 +5083,7 @@ function openOrderDialog(job = null) {
     const apply = (key, value) => {
       if (form.elements[key]) form.elements[key].value = value;
       if (key === "note") resizeOrderNote(form);
+      if (key === "labelKeywords") updateMaterialLabelColor(form.elements.labelKeywords);
       updateFinishedStockOrderSummary(form);
     };
     Object.entries(analysis.values).forEach(([key, value]) => apply(key, value));
@@ -5005,6 +5101,7 @@ function openOrderDialog(job = null) {
     qs("#order-dialog")._editBaseline = draft.baseline;
     qs("#spec-auto-note").textContent = "保存できなかった入力を復元しました。内容を確認して保存してください。";
   }
+  updateMaterialLabelColor(form.elements.labelKeywords);
   updateFinishedStockOrderSummary(form);
   openDialog(qs("#order-dialog"), form._unresolvedRecovery?.size ? "[data-recovery-field]" : "[name='customer']");
   resizeOrderNote(form);
@@ -5048,7 +5145,7 @@ function openProcessDialog(job, requestedStageKey = "") {
     ? requestedStageKey
     : STAGES.some((stage) => stage.key === current.key) ? current.key : STAGES[STAGES.length - 1].key;
   qs("#process-dialog-kicker").textContent = job.shippingStatus === "shipped" ? "終了案件の工程" : "工程と担当を更新";
-  qs("#process-product").textContent = productDisplayName(job);
+  qs("#process-product").innerHTML = zurepinMarkup(productDisplayName(job));
   qs("#process-customer").textContent = job.customer || "未設定";
   qs("#process-due").textContent = job.dueDate ? formatDate(job.dueDate, { year: "numeric", month: "numeric", day: "numeric" }) : "未設定";
   qs("#process-serial").textContent = job.serialNo || "未設定";
@@ -6582,7 +6679,12 @@ function bindEvents() {
         void loadDeferredData(section);
         renderActiveView();
       },
-      "show-all-orders": () => showOrders(),
+      "show-stage-orders": () => showOrders({ stage: button.dataset.stageKey }),
+      "set-stage-unit": () => {
+        state.dashboardStageUnit = button.dataset.unit;
+        qsa("[data-action='set-stage-unit']").forEach((control) => control.setAttribute("aria-pressed", String(control === button)));
+        renderStageChart(dashboardMetrics());
+      },
       "show-production-orders": () => showOrders({ attention: "production" }),
       "show-due-orders": () => showOrders({ attention: "due" }),
       "show-shipping-orders": () => showShipping(),
@@ -6592,7 +6694,6 @@ function bindEvents() {
       "clear-orders-filter": () => clearWorkspaceFilters("orders"),
       "clear-shipping-filter": () => clearWorkspaceFilters("shipping"),
       "clear-completed-filter": () => clearWorkspaceFilters("completed"),
-      "clear-filters": () => clearWorkspaceFilters("dashboard"),
       "complete-order": () => {
         const form = qs("#process-form");
         if (!processInShippingQueue(form)) return;
@@ -6632,6 +6733,7 @@ function bindEvents() {
   orderForm.addEventListener("submit", saveOrder);
   orderForm.addEventListener("input", (event) => {
     if (event.target === orderForm.elements.note) resizeOrderNote(orderForm);
+    if (event.target === orderForm.elements.labelKeywords) updateMaterialLabelColor(event.target);
     updateFinishedStockOrderSummary(orderForm);
   });
   window.addEventListener("resize", () => resizeOrderNote(orderForm));
@@ -6783,9 +6885,6 @@ function bindEvents() {
   });
 
   const filters = [
-    ["#dashboard-search", "dashboard", "query", renderDashboardOrders],
-    ["#dashboard-stage-filter", "dashboard", "stage", renderDashboardOrders],
-    ["#dashboard-sort", "dashboard", "sort", renderDashboardOrders],
     ["#orders-search", "orders", "query", renderOrdersWorkspace],
     ["#orders-stage-filter", "orders", "stage", renderOrdersWorkspace],
     ["#orders-attention-filter", "orders", "attention", renderOrdersWorkspace],
@@ -6966,7 +7065,6 @@ function debounce(fn, wait) {
 
 async function init() {
   applyTheme(state.theme, { persist: false });
-  renderSkeletons();
   bindEvents();
   window.addEventListener("beforeunload", confirmPageUnload);
   bindLedgerDisplay();

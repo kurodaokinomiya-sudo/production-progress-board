@@ -98,6 +98,18 @@ test("rejects malformed balances, subtotal mismatches, missing labels and duplic
   assert.throws(() => readSource([regular], { id: 10 }), /「総合在庫数」のデータが見つかりません/);
 });
 
+test("TA lever retains its existing part ID when importing both phases", () => {
+  const result = readSource([["", "ＴＡレバー", 8, 2, 3, 13, "", ""]]);
+  const id = "legacy--5jUghc0ifJkDHKDawwaH7TodaDPNgDqKytiya8t474";
+  assert.deepEqual(result.items.find(item => item.id === id).variants.map(({ id, threshold }) => [id, threshold]),
+    [["raw", null], ["processed", null], ["unclassified", null]]);
+  assert.deepEqual(result.stock, [
+    { partId: id, variant: "raw", location: "1F", quantity: 8 },
+    { partId: id, variant: "processed", location: "2F", quantity: 2 },
+    { partId: id, variant: "processed", location: "保土田", quantity: 3 },
+  ]);
+});
+
 test("the opening revision changes with stock or notes but stays stable across legacy row rearrangement", () => {
   const item = ["", "部品甲", 8, "", "-", 8, "従来メモ", ""];
   const maeda = ["", "前田式レバー", "", "", "-", 0, "", ""];

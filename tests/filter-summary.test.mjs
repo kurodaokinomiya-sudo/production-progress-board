@@ -104,7 +104,7 @@ test("clearing orders removes only its filters and preserves sort, zoom, and oth
   ui.state.jobs = [job("A-1"), job("B-1")];
   Object.assign(ui.state.filters.orders, { query: "missing", stage: "welding", attention: "production", sort: "serial", sortDirection: "desc", sort2: "due", sort2Direction: "asc", sort3: "quantity", sort3Direction: "desc" });
   ui.state.filters.completed.query = "retain-completed";
-  ui.state.filters.dashboard.query = "retain-dashboard";
+  ui.state.filters.shipping.query = "retain-shipping";
   ui.state.ledgerDisplay = { mode: "manual", scale: 73, rows: 23, compact: true };
   const display = copy(ui.state.ledgerDisplay), beforeStorage = copy([...storage]);
   ui.renderOrdersWorkspace();
@@ -113,7 +113,7 @@ test("clearing orders removes only its filters and preserves sort, zoom, and oth
   ui.clearWorkspaceFilters("orders");
   assert.deepEqual(copy(ui.state.filters.orders), { query: "", stage: "all", attention: "all", sort: "serial", sortDirection: "desc", sort2: "due", sort2Direction: "asc", sort3: "quantity", sort3Direction: "desc" });
   assert.equal(ui.state.filters.completed.query, "retain-completed");
-  assert.equal(ui.state.filters.dashboard.query, "retain-dashboard");
+  assert.equal(ui.state.filters.shipping.query, "retain-shipping");
   assert.deepEqual(copy(ui.state.ledgerDisplay), display);
   assert.deepEqual(copy([...storage]), beforeStorage);
   assert.equal(elements.get("#orders-filter-summary").hidden, true);

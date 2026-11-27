@@ -125,7 +125,7 @@ test("confirmed opening orders carry full outstanding units and no physical stoc
     return snapshot;
   };
   const opened = CastingStock.project(openingSeed, events);
-  assert.deepEqual(opened.orders, [{ ...order, remaining: 20 }]);
+  assert.deepEqual(opened.orders, [{ ...order, received: 0, remaining: 20, revision: order.id }]);
   assert.deepEqual(opened.history, []);
   assert.deepEqual(opened.stock, seed.stock);
   assert.throws(() => save(operation("use", "id-conflict", { opId: order.id })), /記録IDが重複/);
@@ -139,8 +139,9 @@ test("confirmed opening orders carry full outstanding units and no physical stoc
   assert.deepEqual(save(cancel).orders, []);
   const reopened = save(operation("reverse", "reopen-opening-order", { targetId: cancel.opId }));
   assert.equal(reopened.orders[0].remaining, 12);
-  const reversed = save(operation("reverse", "reverse-opening-receipt", { targetId: receipt.opId }));
-  assert.deepEqual(reversed.orders, opened.orders);
+  const undoReceipt = operation("reverse", "reverse-opening-receipt", { targetId: receipt.opId });
+  const reversed = save(undoReceipt);
+  assert.deepEqual(reversed.orders, [{ ...opened.orders[0], revision: undoReceipt.opId }]);
   assert.equal(stockAt(reversed, "raw"), 10);
 
   assert.throws(() => CastingStock.project({ ...seed, openingOrders: [order, order] }, []), /発注IDが重複/);
@@ -186,7 +187,7 @@ const serviceSource = (await Promise.all([
 
 function serviceHarness() {
   const grid = [];
-  const control = { role: "owner", locked: false, sourceReads: 0, sourceRevision: source.sourceRevision };
+  const control = { role: "owner", locked: false, sourceReads: 0, spreadsheetReads: 0, sourceRevision: source.sourceRevision };
   const sheet = {
     getLastRow: () => grid.length,
     getRange: (row, column, height, width) => ({
@@ -206,7 +207,10 @@ function serviceHarness() {
       return { email: `${control.role}@example.com` };
     },
     requireOwnerAccess_() { if (control.role !== "owner") throw new Error("OWNER_REQUIRED"); },
-    getSpreadsheet_() { return { getSheetByName: () => grid.length ? sheet : null }; },
+    getSpreadsheet_() {
+      control.spreadsheetReads += 1;
+      return { getSheetByName: () => grid.length ? sheet : null };
+    },
     ensureSheet_(spreadsheet, name, headers) {
       assert.equal(name, "工程管理_鋳物在庫");
       assert.equal(control.locked, true);
@@ -325,4 +329,55 @@ test("fixed storage preserves existing operation rows and projects their actual 
   assert.deepEqual(JSON.parse(grid[1][1]), { ...seed, fixedStorageFrom: 1 });
   assert.equal(grid[1][0], "開始（1・2階）");
   assert.deepEqual(grid[2], row);
+});
+
+test("part history includes older records across phases and shares the current reversal rules", () => {
+  const first = operation("process", "earliest-processing", { toVariant: "processed", toLocation: "2F" });
+  const adjustments = Array.from({ length: 151 }, (_, index) =>
+    operation("threshold", "earlier-threshold-" + index, { variant: "processed", threshold: index }));
+  const colored = operation("process", "earlier-colored", { toVariant: "colored", toLocation: "2F" });
+  const reversal = operation("reverse", "reversed-colored", { targetId: colored.opId });
+  const otherPart = Array.from({ length: 151 }, (_, index) =>
+    operation("threshold", "latest-other-part-" + index, { partId: "new-sample", variant: "single", threshold: index }));
+  const events = [first, ...adjustments, colored, reversal, ...otherPart].map(request => ({ request, ...metadata }));
+
+  const recent = CastingStock.project(seed, events).history;
+  assert.equal(recent.length, 151);
+  assert.deepEqual(recent.filter(row => row.partId === "sample").map(row => row.id), [adjustments.at(-1).opId]);
+
+  const history = CastingStock.historyForPart(seed, events, "sample");
+  assert.deepEqual(history.map(row => row.id), [first, ...adjustments, colored, reversal].map(request => request.opId).reverse());
+  assert.equal(history[0].targetType, "process");
+  assert.equal(history[0].canReverse, false);
+  assert.equal(history[1].toVariant, "colored");
+  assert.equal(history[1].reversed, true);
+  assert.equal(history[1].canReverse, false);
+  assert.equal(history.at(-1).toVariant, "processed");
+  assert.deepEqual(history.filter(row => row.canReverse).map(row => row.id), [adjustments.at(-1).opId]);
+});
+
+test("the part history RPC requires worker access before reading and preserves the original ledger", () => {
+  const { context, control, grid } = serviceHarness();
+  control.role = "worker";
+  assert.equal(context.getCastingInventoryHistory("sample").length, 0);
+  assert.equal(grid.length, 0);
+  assert.equal(control.sourceReads, 0);
+
+  const { event } = CastingStock.apply(seed, [], operation("use", "legacy-part-history"), metadata);
+  grid.push(["記録ID", "内容JSON"], ["開始", JSON.stringify(seed)], ["op:" + event.request.opId, JSON.stringify(event)]);
+  const original = JSON.stringify(grid);
+  const history = context.getCastingInventoryHistory("sample");
+  assert.equal(history.length, 1);
+  assert.equal(history[0].id, event.request.opId);
+  assert.equal(history[0].canReverse, true);
+  assert.equal(context.getCastingInventoryHistory("new-sample").length, 0);
+  assert.equal(JSON.stringify(grid), original);
+  assert.equal(control.sourceReads, 0);
+
+  const reads = control.spreadsheetReads;
+  for (const role of ["viewer", "anonymous"]) {
+    control.role = role;
+    assert.throws(() => context.getCastingInventoryHistory("sample"), /WORKER_REQUIRED/);
+    assert.equal(control.spreadsheetReads, reads);
+  }
 });
